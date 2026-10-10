@@ -757,18 +757,12 @@ router.get('/orders/:orderId/download', async (req: Request, res: Response) => {
   if (!order) return res.status(404).json({ error: 'Order not found.' });
   if (order.status !== 'READY' || order.paymentStatus !== 'PAID' || !order.artifactKey) return res.status(403).json({ error: 'Production cards are available only after verified payment and successful generation.' });
 
-  const storageRoot = path.resolve(process.env.ID_CARD_STORAGE_DIR || path.join(process.cwd(), 'private-storage', 'id-cards'));
-  const artifactPath = path.resolve(storageRoot, order.artifactKey);
-  if (!artifactPath.startsWith(`${storageRoot}${path.sep}`)) return res.status(404).json({ error: 'Card file not found.' });
   try {
-    let bytes: Buffer | Uint8Array;
-    if (format === 'A4') {
-      if (!order.renderSnapshotEncrypted) return res.status(404).json({ error: 'Card render snapshot is unavailable. Contact support.' });
-      const snapshot = decryptIdCardSnapshot<IdCardRenderSnapshot>(order.renderSnapshotEncrypted);
-      bytes = await generateIdCardA4SheetPdf(snapshot);
-    } else {
-      bytes = await readFile(artifactPath);
-    }
+    if (!order.renderSnapshotEncrypted) return res.status(404).json({ error: 'Card render snapshot is unavailable. Contact support.' });
+    const snapshot = decryptIdCardSnapshot<IdCardRenderSnapshot>(order.renderSnapshotEncrypted);
+    const bytes = format === 'A4'
+      ? await generateIdCardA4SheetPdf(snapshot)
+      : await generateIdCardPdf(snapshot);
     await prisma.idCardOrderEvent.create({ data: { orderId: order.id, eventType: 'DOWNLOAD', actorId: user.userId, details: JSON.stringify({ format }) } });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="schoolbase-id-cards-${order.id}-${format.toLowerCase()}.pdf"`);

@@ -1,8 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { PDFDocument, PDFName, PDFRawStream, StandardFonts } from 'pdf-lib';
+import sharp from 'sharp';
 import { ID_CARD_TEMPLATES, type IdCardOrientation } from '../src/services/id-card-pricing.ts';
-import { fitStudentName, generateIdCardA4SheetPdf, generateIdCardPdf, ID_CARD_TEMPLATE_ACCENTS, type IdCardRenderSnapshot } from '../src/services/id-card-pdf.ts';
+import { fitStudentName, generateIdCardA4SheetPdf, generateIdCardPdf, ID_CARD_TEMPLATE_ACCENTS, resolveLocalUploadPath, type IdCardRenderSnapshot } from '../src/services/id-card-pdf.ts';
 
 const sample: Omit<IdCardRenderSnapshot, 'templateId' | 'orientation'> = {
   school: { name: 'Greenfield Academy', initials: 'GA', primaryColor: '#0A6670' },
@@ -10,6 +14,42 @@ const sample: Omit<IdCardRenderSnapshot, 'templateId' | 'orientation'> = {
 };
 
 describe('ID card PDF layout', () => {
+  it('resolves API-prefixed upload URLs to files inside the backend uploads directory', () => {
+    assert.equal(
+      resolveLocalUploadPath('/api/uploads/photos/student.jpg'),
+      new URL('../uploads/photos/student.jpg', import.meta.url).pathname,
+    );
+    assert.equal(resolveLocalUploadPath('/uploads/photos/student.jpg'), new URL('../uploads/photos/student.jpg', import.meta.url).pathname);
+    assert.equal(resolveLocalUploadPath('/api/uploads/../../.env'), null);
+    assert.equal(resolveLocalUploadPath('https://example.com/student.jpg'), null);
+  });
+
+  it('embeds student photos referenced through the API uploads path', async () => {
+    const photoUrl = `/api/uploads/photos/id-card-test-${randomUUID()}.png`;
+    const photoPath = resolveLocalUploadPath(photoUrl);
+    assert.ok(photoPath);
+    await mkdir(path.dirname(photoPath), { recursive: true });
+    await writeFile(photoPath, await sharp({
+      create: { width: 4, height: 4, channels: 3, background: { r: 28, g: 110, b: 145 } },
+    }).png().toBuffer());
+
+    try {
+      const bytes = await generateIdCardPdf({
+        ...sample,
+        templateId: 'modernInstitution',
+        orientation: 'PORTRAIT',
+        students: [{ ...sample.students[0], photoUrl }],
+      });
+      const document = await PDFDocument.load(bytes);
+      const hasEmbeddedImage = document.context.enumerateIndirectObjects().some(([, object]) =>
+        object instanceof PDFRawStream && object.dict.get(PDFName.of('Subtype'))?.toString() === '/Image',
+      );
+      assert.equal(hasEmbeddedImage, true);
+    } finally {
+      await rm(photoPath, { force: true });
+    }
+  });
+
   it('wraps complete long student names into two lines with a 10% smaller base size', async () => {
     const document = await PDFDocument.create();
     const font = await document.embedFont(StandardFonts.HelveticaBold);

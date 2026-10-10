@@ -34,6 +34,15 @@ const CARD_WIDTH = 243.4;
 const CARD_HEIGHT = 153.5;
 const UPLOADS_ROOT = path.resolve(process.cwd(), 'uploads');
 
+export function resolveLocalUploadPath(url?: string | null) {
+  if (!url) return null;
+  const uploadPath = url.startsWith('/api/uploads/') ? url.slice('/api'.length) : url;
+  if (!uploadPath.startsWith('/uploads/')) return null;
+
+  const resolved = path.resolve(UPLOADS_ROOT, uploadPath.slice('/uploads/'.length));
+  return resolved.startsWith(`${UPLOADS_ROOT}${path.sep}`) ? resolved : null;
+}
+
 export const ID_CARD_TEMPLATE_ACCENTS = {
   crestClassic: '#173f35',
   modernInstitution: '#146b72',
@@ -143,9 +152,8 @@ function drawContainedText(
 }
 
 async function readLocalImage(url?: string | null) {
-  if (!url || !url.startsWith('/uploads/')) return null;
-  const resolved = path.resolve(UPLOADS_ROOT, url.slice('/uploads/'.length));
-  if (!resolved.startsWith(`${UPLOADS_ROOT}${path.sep}`)) return null;
+  const resolved = resolveLocalUploadPath(url);
+  if (!resolved) return null;
   try {
     return await readFile(resolved);
   } catch {
