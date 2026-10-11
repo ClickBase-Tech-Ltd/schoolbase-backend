@@ -3206,6 +3206,76 @@ router.get('/invoices/:id', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/admin/invoices/:id/additional-charges - Add an auditable outstanding charge to an invoice
+router.post('/invoices/:id/additional-charges', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+
+    const name = String(req.body?.name ?? '').trim();
+    const reason = String(req.body?.reason ?? '').trim();
+    const rawAmount = req.body?.amount;
+    if (name.length < 2 || name.length > 120) return res.status(400).json({ error: 'Charge name must be between 2 and 120 characters.' });
+    if (reason.length < 3 || reason.length > 500) return res.status(400).json({ error: 'Provide a reason between 3 and 500 characters.' });
+
+    const amountMajor = typeof rawAmount === 'number' ? rawAmount : Number(rawAmount);
+    const amountMinor = Math.round(amountMajor * 100);
+    if (!Number.isFinite(amountMajor) || amountMinor <= 0 || !Number.isSafeInteger(amountMinor) || amountMinor > 2_147_483_647) {
+      return res.status(400).json({ error: 'Charge amount must be greater than zero and within the supported currency range.' });
+    }
+
+    const userId = await resolveUserId(req);
+    const invoice = await prisma.$transaction(async (tx) => {
+      const current = await tx.invoice.findFirst({
+        where: { id: req.params.id, schoolId },
+        select: { id: true, amountDue: true, amountPaid: true, status: true, dueDate: true },
+      });
+      if (!current) throw Object.assign(new Error('Invoice not found.'), { statusCode: 404 });
+      if (current.amountDue + amountMinor > 2_147_483_647) throw Object.assign(new Error('The updated invoice total exceeds the supported range.'), { statusCode: 400 });
+
+      await tx.invoiceItem.create({
+        data: {
+          invoiceId: current.id,
+          name,
+          amount: amountMinor,
+          quantity: 1,
+          description: `Additional charge: ${reason}`,
+        },
+      });
+
+      const nextAmountDue = current.amountDue + amountMinor;
+      let nextStatus = current.status;
+      if (current.status !== 'DRAFT') {
+        nextStatus = current.amountPaid >= nextAmountDue
+          ? 'PAID'
+          : current.dueDate && current.dueDate < new Date()
+            ? 'OVERDUE'
+            : current.amountPaid > 0
+              ? 'PART_PAID'
+              : 'SENT';
+      }
+
+      return tx.invoice.update({
+        where: { id: current.id },
+        data: { amountDue: { increment: amountMinor }, status: nextStatus },
+        select: { id: true, amountDue: true, amountPaid: true, status: true },
+      });
+    });
+
+    res.status(201).json({ success: true, invoice });
+    void recordActivity({
+      event: 'INVOICE_ADDITIONAL_CHARGE_ADDED',
+      details: `Added ${name} (${amountMinor} minor units) to invoice ${invoice.id}. Reason: ${reason}`,
+      userId: userId || undefined,
+      schoolId,
+    }).catch((error) => console.warn('Failed to audit invoice additional charge:', error));
+  } catch (error) {
+    const statusCode = Number((error as { statusCode?: number })?.statusCode) || 500;
+    if (statusCode >= 500) console.error('Error adding invoice additional charge:', error);
+    return res.status(statusCode).json({ error: error instanceof Error ? error.message : 'Failed to add invoice charge.' });
+  }
+});
+
 // GET /api/admin/invoices/:id/pdf - Download invoice as PDF
 router.get('/invoices/:id/pdf', async (req: Request, res: Response) => {
   try {
