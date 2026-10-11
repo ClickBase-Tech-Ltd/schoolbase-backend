@@ -3,6 +3,7 @@ import { clip, endPath, popGraphicsState, pushGraphicsState, rectangle } from 'p
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import QRCode from 'qrcode';
+import sharp from 'sharp';
 import { ID_CARD_TEMPLATES, type IdCardOrientation } from './id-card-pricing.js';
 
 export type IdCardRenderSnapshot = {
@@ -151,6 +152,22 @@ function drawContainedText(
   page.drawText(text, { ...options, size });
 }
 
+function drawCenteredContainedText(
+  page: PDFPage,
+  value: string,
+  options: { x: number; y: number; size: number; font: PDFFont; color: ReturnType<typeof rgb>; maxWidth: number },
+) {
+  let text = safeText(value);
+  let size = options.size;
+  while (size > 5 && options.font.widthOfTextAtSize(text, size) > options.maxWidth) size = Math.max(5, size - 0.5);
+  if (options.font.widthOfTextAtSize(text, size) > options.maxWidth) {
+    while (text.length > 0 && options.font.widthOfTextAtSize(`${text}...`, size) > options.maxWidth) text = text.slice(0, -1);
+    text = `${text.trimEnd()}...`;
+  }
+  const width = options.font.widthOfTextAtSize(text, size);
+  page.drawText(text, { ...options, x: options.x + (options.maxWidth - width) / 2, size });
+}
+
 async function readLocalImage(url?: string | null) {
   const resolved = resolveLocalUploadPath(url);
   if (!resolved) return null;
@@ -161,25 +178,40 @@ async function readLocalImage(url?: string | null) {
   }
 }
 
-async function drawPhoto(document: PDFDocument, page: PDFPage, photoUrl: string | null | undefined, x: number, y: number, width: number, height: number) {
+async function drawPhoto(document: PDFDocument, page: PDFPage, photoUrl: string | null | undefined, x: number, y: number, width: number, height: number, shape: 'rectangle' | 'circle' = 'rectangle', borderColor = rgb(1, 1, 1)) {
   const bytes = await readLocalImage(photoUrl);
   if (!bytes) return false;
   try {
-    const image = photoUrl?.toLowerCase().endsWith('.png')
-      ? await document.embedPng(bytes)
-      : await document.embedJpg(bytes);
+    const imageBytes = shape === 'circle'
+      ? await sharp(bytes)
+          .resize(512, 512, { fit: 'cover' })
+          .composite([{
+            input: Buffer.from('<svg width="512" height="512"><circle cx="256" cy="256" r="256" fill="white"/></svg>'),
+            blend: 'dest-in',
+          }])
+          .png()
+          .toBuffer()
+      : bytes;
+    const image = shape === 'circle' || photoUrl?.toLowerCase().endsWith('.png')
+      ? await document.embedPng(imageBytes)
+      : await document.embedJpg(imageBytes);
     const scale = Math.max(width / image.width, height / image.height);
     const drawWidth = image.width * scale;
     const drawHeight = image.height * scale;
-    page.pushOperators(pushGraphicsState(), rectangle(x, y, width, height), clip(), endPath());
-    page.drawImage(image, {
-      x: x + (width - drawWidth) / 2,
-      y: y + (height - drawHeight) / 2,
-      width: drawWidth,
-      height: drawHeight,
-    });
-    page.pushOperators(popGraphicsState());
-    page.drawRectangle({ x, y, width, height, borderWidth: 1.2, borderColor: rgb(1, 1, 1) });
+    if (shape === 'circle') {
+      page.drawImage(image, { x, y, width, height });
+      page.drawEllipse({ x: x + width / 2, y: y + height / 2, xScale: width / 2, yScale: height / 2, borderWidth: 3.5, borderColor });
+    } else {
+      page.pushOperators(pushGraphicsState(), rectangle(x, y, width, height), clip(), endPath());
+      page.drawImage(image, {
+        x: x + (width - drawWidth) / 2,
+        y: y + (height - drawHeight) / 2,
+        width: drawWidth,
+        height: drawHeight,
+      });
+      page.pushOperators(popGraphicsState());
+      page.drawRectangle({ x, y, width, height, borderWidth: 1.2, borderColor });
+    }
     return true;
   } catch {
     return false;
@@ -216,6 +248,294 @@ async function drawSchoolMark(document: PDFDocument, page: PDFPage, snapshot: Id
   });
 }
 
+async function drawProofMatchedFront(
+  document: PDFDocument,
+  page: PDFPage,
+  snapshot: IdCardRenderSnapshot,
+  student: IdCardRenderSnapshot['students'][number],
+  regular: PDFFont,
+  bold: PDFFont,
+): Promise<boolean> {
+  const portrait = (snapshot.orientation || ID_CARD_TEMPLATES[snapshot.templateId as keyof typeof ID_CARD_TEMPLATES].defaultOrientation) === 'PORTRAIT';
+  const refWidth = portrait ? 176 : 384;
+  const refHeight = portrait ? 278 : 243;
+  const pageWidth = page.getWidth();
+  const pageHeight = page.getHeight();
+  const scaleX = pageWidth / refWidth;
+  const scaleY = pageHeight / refHeight;
+  const textScale = Math.min(scaleX, scaleY);
+  const schoolName = safeText(snapshot.school.name || 'School');
+  const accent = parseColor(ID_CARD_TEMPLATE_ACCENTS[snapshot.templateId as keyof typeof ID_CARD_TEMPLATE_ACCENTS]);
+  const white = rgb(1, 1, 1);
+  const ink = rgb(0.1, 0.16, 0.18);
+  const muted = rgb(0.39, 0.47, 0.48);
+  const templateId = snapshot.templateId;
+  const isModern = templateId === 'modernInstitution';
+  const isEarly = templateId === 'earlyLearners';
+  const isCrest = templateId === 'crestClassic';
+  const isHouse = templateId === 'houseTeam';
+  const isSignature = templateId === 'signatureCollection';
+  const isSenior = templateId === 'seniorCollege';
+  const isInk = templateId === 'inkSaver';
+  const background = isEarly ? rgb(1, 0.97, 0.87) : isSignature ? rgb(1, 1, 0.98) : white;
+
+  const rect = (x: number, top: number, width: number, height: number, color: ReturnType<typeof rgb>, borderColor?: ReturnType<typeof rgb>, borderPx = 0) => {
+    page.drawRectangle({
+      x: x * scaleX,
+      y: pageHeight - (top + height) * scaleY,
+      width: width * scaleX,
+      height: height * scaleY,
+      color,
+      ...(borderColor ? { borderColor, borderWidth: borderPx * textScale } : {}),
+    });
+  };
+  const line = (x1: number, y1: number, x2: number, y2: number, color: ReturnType<typeof rgb>, thickness = 1) => {
+    page.drawLine({
+      start: { x: x1 * scaleX, y: pageHeight - y1 * scaleY },
+      end: { x: x2 * scaleX, y: pageHeight - y2 * scaleY },
+      color,
+      thickness: thickness * textScale,
+    });
+  };
+  const circle = (x: number, top: number, size: number, color: ReturnType<typeof rgb>, borderColor?: ReturnType<typeof rgb>, borderPx = 0) => {
+    page.drawEllipse({
+      x: (x + size / 2) * scaleX,
+      y: pageHeight - (top + size / 2) * scaleY,
+      xScale: size * scaleX / 2,
+      yScale: size * scaleY / 2,
+      color,
+      ...(borderColor ? { borderColor, borderWidth: borderPx * textScale } : {}),
+    });
+  };
+  const drawText = (value: string, x: number, top: number, width: number, fontPx: number, color: ReturnType<typeof rgb>, options: { font?: PDFFont; align?: 'left' | 'center'; maxLines?: number; lineHeightPx?: number } = {}) => {
+    const font = options.font || regular;
+    const size = fontPx * textScale;
+    const maxWidth = width * scaleX;
+    let lines = wrapText(safeText(value), font, size, maxWidth);
+    if (options.maxLines && lines.length > options.maxLines) {
+      lines = lines.slice(0, options.maxLines);
+      let last = lines[lines.length - 1] || '';
+      while (last && font.widthOfTextAtSize(`${last}...`, size) > maxWidth) last = last.slice(0, -1);
+      lines[lines.length - 1] = `${last.trimEnd()}...`;
+    }
+    const lineHeight = (options.lineHeightPx || fontPx * 1.2) * scaleY;
+    lines.forEach((text, index) => {
+      const textWidth = font.widthOfTextAtSize(text, size);
+      const xPoint = x * scaleX + (options.align === 'center' ? Math.max(0, (maxWidth - textWidth) / 2) : 0);
+      const baseline = pageHeight - top * scaleY - size * 0.92 - index * lineHeight;
+      page.drawText(text, { x: xPoint, y: baseline, size, font, color });
+    });
+    return lines.length;
+  };
+  const mark = async (x: number, top: number, size: number, color: ReturnType<typeof rgb>, rounded = false) => {
+    const pointX = x * scaleX;
+    const pointY = pageHeight - (top + size) * scaleY;
+    if (await drawLogo(document, page, snapshot.school.logoUrl, pointX, pointY, size * textScale)) return;
+    if (rounded) circle(x, top, size, white);
+    else rect(x, top, size, size, white);
+    const label = snapshot.school.initials || initials(schoolName);
+    drawText(label, x + 1, top + size * 0.31, size - 2, Math.max(5, size * 0.3), color, { font: bold, align: 'center', maxLines: 1 });
+  };
+  const photo = async (student: IdCardRenderSnapshot['students'][number], x: number, top: number, width: number, height: number, options: { shape?: 'rectangle' | 'circle'; border?: ReturnType<typeof rgb>; borderPx?: number } = {}) => {
+    const size = options.shape === 'circle' ? Math.min(width, height) : undefined;
+    const actualWidth = size || width;
+    const actualHeight = size || height;
+    const drawn = await drawPhoto(
+      document,
+      page,
+      student.photoUrl,
+      x * scaleX,
+      pageHeight - (top + actualHeight) * scaleY,
+      actualWidth * scaleX,
+      actualHeight * scaleY,
+      options.shape || 'rectangle',
+      options.border || white,
+    );
+    if (!drawn) {
+      if (options.shape === 'circle') {
+        circle(x, top, actualWidth, rgb(0.94, 0.87, 0.73), options.border || accent, options.borderPx || 2);
+      } else {
+        rect(x, top, actualWidth, actualHeight, rgb(0.9, 0.93, 0.93), options.border || undefined, options.borderPx || 0);
+      }
+      drawText(initials([student.firstName, student.lastName].filter(Boolean).join(' ')), x, top + actualHeight * 0.42, actualWidth, 16, accent, { font: bold, align: 'center', maxLines: 1 });
+    } else if (options.shape === 'circle' && options.borderPx) {
+      circle(x, top, actualWidth, white, options.border || accent, options.borderPx);
+    }
+  };
+
+  rect(0, 0, refWidth, refHeight, background);
+  if (isCrest) rect(0, 0, refWidth, 36, rgb(0.09, 0.25, 0.21));
+  if (isEarly) rect(0, 0, refWidth, 36, rgb(0.9, 0.66, 0.29));
+  if (isHouse) {
+    rect(0, 0, 12, refHeight, rgb(0.89, 0.64, 0.16));
+    rect(8, 0, refWidth - 8, 36, rgb(0.1, 0.3, 0.57));
+  }
+  if (isSignature) {
+    rect(1, 1, refWidth - 2, refHeight - 2, background, rgb(0.33, 0.19, 0.29), 3);
+    rect(8, 8, refWidth - 16, refHeight - 16, background, rgb(0.77, 0.66, 0.43), 1);
+    rect(0, 0, refWidth, 36, rgb(0.33, 0.19, 0.29));
+  }
+  if (isSenior) {
+    rect(0, 0, refWidth, 8, rgb(0.15, 0.23, 0.24));
+    rect(8, 8, refWidth - 16, refHeight - 16, background, rgb(0.84, 0.87, 0.87), 1);
+  }
+  if (isModern) {
+    rect(0, 0, refWidth, refHeight * 0.22, rgb(0.08, 0.42, 0.45));
+    rect(0, refHeight * 0.22, refWidth, refHeight * 0.02, rgb(0.84, 0.91, 0.9));
+    if (!portrait) rect(0, refHeight * 0.24, refWidth * 0.02, refHeight * 0.76, rgb(0.08, 0.42, 0.45));
+  }
+  if (isInk) line(0, 34, refWidth, 34, rgb(0.1, 0.1, 0.1), 1);
+  if (isCrest) rect(0, 36, refWidth, 4, rgb(0.78, 0.66, 0.35));
+
+  if (isModern) {
+    const markSize = 24;
+    await mark(refWidth * 0.05, refHeight * 0.05, markSize, rgb(0.08, 0.42, 0.45), true);
+    drawText(schoolName, refWidth * 0.05 + markSize + 4, refHeight * 0.075, refWidth * 0.67, 10, white, { font: bold, maxLines: 1 });
+  } else if (isSenior) {
+    const markSize = 20;
+    await mark(14, 20, markSize, accent, true);
+    drawText(schoolName, 40, 23, refWidth - 52, 10, ink, { font: bold, maxLines: 1 });
+  } else {
+    const markSize = 24;
+    const markX = isHouse ? 16 : 12;
+    await mark(markX, 6, markSize, isCrest || isEarly || isHouse || isSignature ? accent : ink, true);
+    drawText(isHouse ? `${schoolName} · STUDENT ID` : schoolName, markX + markSize + 4, 11, refWidth - markX - markSize - 8, 10, isCrest || isEarly || isHouse || isSignature ? white : ink, { font: bold, maxLines: 1 });
+  }
+
+  const fullName = [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ');
+  const infoLabel = (text: string, x: number, y: number, width: number, align: 'left' | 'center' = 'left') => drawText(text, x, y, width, 7, muted, { font: bold, align, maxLines: 1 });
+  const infoValue = (text: string, x: number, y: number, width: number, align: 'left' | 'center' = 'left') => drawText(text, x, y, width, 10, ink, { font: regular, align, maxLines: 1 });
+
+  if (isEarly) {
+    const diameter = portrait ? 80 : 40;
+    const photoTop = portrait ? 55 : 52;
+    const photoBorder = portrait ? 4 : 2;
+    await photo(student, (refWidth - diameter) / 2, photoTop, diameter, diameter, { shape: 'circle', border: rgb(0.9, 0.66, 0.29), borderPx: photoBorder });
+    let top = photoTop + diameter + 12;
+    const nameLines = drawText(fullName, 8, top, refWidth - 16, 12.6, rgb(0.22, 0.28, 0.22), { font: bold, align: 'center', maxLines: 2, lineHeightPx: 18.9 });
+    top += nameLines * 18.9 + 4;
+    infoLabel('CLASS', 8, top, refWidth - 16, 'center');
+    top += 10.5;
+    infoValue(student.className || 'Class not assigned', 8, top, refWidth - 16, 'center');
+    top += 19;
+    infoLabel(`ADMISSION NUMBER · ${student.admissionNo || 'Not assigned'}`, 8, top, refWidth - 16, 'center');
+  } else if (isCrest) {
+    circle((refWidth - 44) / 2, 56, 44, background, rgb(0.78, 0.66, 0.35), 1);
+    await mark((refWidth - 24) / 2, 66, 24, accent, true);
+    await photo(student, (refWidth - 64) / 2, 108, 64, 80, { border: rgb(0.78, 0.66, 0.35), borderPx: 1 });
+    let top = 196;
+    const lines = drawText(fullName, 8, top, refWidth - 16, 12.6, ink, { font: bold, align: 'center', maxLines: 2, lineHeightPx: 18.9 });
+    top += lines * 18.9 + 4;
+    infoLabel('ADMISSION NUMBER', 8, top, refWidth - 16, 'center');
+    infoValue(student.admissionNo || 'Not assigned', 8, top + 11, refWidth - 16, 'center');
+    infoLabel(`CLASS · ${student.className || 'Class not assigned'}`, 8, top + 27, refWidth - 16, 'center');
+  } else if (isModern) {
+    if (portrait) {
+      await photo(student, refWidth * 0.3, refHeight * 0.25, refWidth * 0.4, refHeight * 0.29);
+      drawText(fullName, refWidth * 0.05, refHeight * 0.57, refWidth * 0.9, 12.6, ink, { font: bold, align: 'center', maxLines: 2, lineHeightPx: 18.9 });
+      infoLabel('ADMISSION NUMBER', refWidth * 0.05, refHeight * 0.7, refWidth * 0.9, 'center');
+      infoValue(student.admissionNo || 'Not assigned', refWidth * 0.05, refHeight * 0.75, refWidth * 0.9, 'center');
+      infoLabel('CLASS', refWidth * 0.05, refHeight * 0.84, refWidth * 0.9, 'center');
+      infoValue(student.className || 'Class not assigned', refWidth * 0.05, refHeight * 0.89, refWidth * 0.9, 'center');
+    } else {
+      await photo(student, refWidth * 0.06, refHeight * 0.31, refWidth * 0.27, refHeight * 0.55);
+      const x = refWidth * 0.38;
+      const width = refWidth * 0.57;
+      drawText('STUDENT IDENTITY', x, refHeight * 0.32, width, 7, accent, { font: bold, maxLines: 1 });
+      drawText(fullName, x, refHeight * 0.42, width, 12.6, ink, { font: bold, maxLines: 2, lineHeightPx: 18.9 });
+      line(x, refHeight * 0.57, refWidth * 0.94, refHeight * 0.57, rgb(0.85, 0.89, 0.88));
+      infoLabel('ADMISSION NO.', x, refHeight * 0.63, width);
+      infoValue(student.admissionNo || 'Not assigned', x, refHeight * 0.69, width);
+      infoLabel('CLASS', x, refHeight * 0.79, width);
+      infoValue(student.className || 'Class not assigned', x, refHeight * 0.85, width);
+    }
+  } else if (isHouse) {
+    const x = portrait ? 8 : 24;
+    const photoTop = portrait ? 52 : 52;
+    const photoWidth = 64;
+    const photoHeight = 80;
+    await photo(student, portrait ? (refWidth - photoWidth) / 2 : x, photoTop, photoWidth, photoHeight, { border: rgb(0.89, 0.64, 0.16), borderPx: 4 });
+    const textX = portrait ? 12 : 98;
+    const width = portrait ? refWidth - 24 : refWidth - textX - 16;
+    let top = portrait ? 148 : 54;
+    const lines = drawText(fullName, textX, top, width, 12.6, ink, { font: bold, align: portrait ? 'center' : 'left', maxLines: 2, lineHeightPx: 18.9 });
+    top += lines * 18.9 + 8;
+    infoLabel('CLASS', textX, top, width, portrait ? 'center' : 'left');
+    infoValue(student.className || 'Class not assigned', textX, top + 11, width, portrait ? 'center' : 'left');
+    top += 30;
+    infoLabel('ADMISSION NUMBER', textX, top, width, portrait ? 'center' : 'left');
+    infoValue(student.admissionNo || 'Not assigned', textX, top + 11, width, portrait ? 'center' : 'left');
+  } else if (isSignature) {
+    const photoWidth = 64;
+    const photoHeight = 80;
+    const photoTop = portrait ? 52 : (refHeight - photoHeight) / 2;
+    const photoX = portrait ? (refWidth - photoWidth) / 2 : 16;
+    await photo(student, photoX, photoTop, photoWidth, photoHeight);
+    const x = portrait ? 8 : 92;
+    const width = portrait ? refWidth - 16 : refWidth - x - 12;
+    let top = portrait ? 148 : 48;
+    drawText('STUDENT IDENTITY', x, top, width, 10, accent, { font: bold, align: portrait ? 'center' : 'left' });
+    top += 17;
+    const nameLines = drawText(fullName, x, top, width, 12.6, ink, { font: bold, align: portrait ? 'center' : 'left', maxLines: 2, lineHeightPx: 18.9 });
+    top += nameLines * 18.9 + 6;
+    infoLabel('ADMISSION NUMBER', x, top, width, portrait ? 'center' : 'left');
+    infoValue(student.admissionNo || 'Not assigned', x, top + 11, width, portrait ? 'center' : 'left');
+    infoLabel('CLASS', x, top + 29, width, portrait ? 'center' : 'left');
+    infoValue(student.className || 'Class not assigned', x, top + 40, width, portrait ? 'center' : 'left');
+    line(x, top + 57, x + Math.min(width, 80), top + 57, rgb(0.77, 0.66, 0.43));
+  } else if (isSenior) {
+    const photoWidth = 72;
+    const photoHeight = 96;
+    const photoX = portrait ? (refWidth - photoWidth) / 2 : 24;
+    const photoTop = portrait ? 32 : (refHeight - photoHeight) / 2;
+    await photo(student, photoX, photoTop, photoWidth, photoHeight);
+    const x = portrait ? 20 : 110;
+    const width = portrait ? refWidth - 40 : refWidth - x - 20;
+    const identityTop = portrait ? 144 : 48;
+    const markX = portrait ? 36 : x;
+    await mark(markX, identityTop, 20, accent, true);
+    drawText(schoolName, portrait ? markX + 26 : x + 26, identityTop + 4, portrait ? refWidth - markX - 34 : width - 26, 10, ink, { font: bold, maxLines: 1 });
+    line(x, identityTop + 25, x + Math.min(width, portrait ? 96 : 96), identityTop + 25, rgb(0.15, 0.23, 0.24), 2);
+    let top = identityTop + 38;
+    const nameLines = drawText(fullName, x, top, width, 12.6, ink, { font: bold, align: portrait ? 'center' : 'left', maxLines: 2, lineHeightPx: 18.9 });
+    top += nameLines * 18.9 + 9;
+    infoLabel('ADMISSION NUMBER', x, top, width, portrait ? 'center' : 'left');
+    infoValue(student.admissionNo || 'Not assigned', x, top + 11, width, portrait ? 'center' : 'left');
+    infoLabel('CLASS', x, top + 30, width, portrait ? 'center' : 'left');
+    infoValue(student.className || 'Class not assigned', x, top + 41, width, portrait ? 'center' : 'left');
+  } else {
+    const photoWidth = 64;
+    const photoHeight = 80;
+    const photoTop = portrait ? 52 : (refHeight - photoHeight) / 2;
+    const photoX = portrait ? (refWidth - photoWidth) / 2 : 16;
+    await photo(student, photoX, photoTop, photoWidth, photoHeight, { border: isInk ? rgb(0.89, 0.64, 0.16) : white, borderPx: 3 });
+    const x = portrait ? 8 : 92;
+    const width = portrait ? refWidth - 16 : refWidth - x - 12;
+    let top = portrait ? 148 : 48;
+    drawText(isInk ? '' : 'STUDENT ID', x, top, width, 10, accent, { font: bold, align: portrait ? 'center' : 'left' });
+    top += isInk ? 0 : 14;
+    const nameLines = drawText(fullName, x, top, width, 12.6, ink, { font: bold, align: portrait ? 'center' : 'left', maxLines: 2, lineHeightPx: 18.9 });
+    top += nameLines * 18.9 + 6;
+    infoLabel('ADMISSION NUMBER', x, top, width, portrait ? 'center' : 'left');
+    infoValue(student.admissionNo || 'Not assigned', x, top + 11, width, portrait ? 'center' : 'left');
+    infoLabel('CLASS', x, top + 29, width, portrait ? 'center' : 'left');
+    infoValue(student.className || 'Class not assigned', x, top + 40, width, portrait ? 'center' : 'left');
+  }
+  const frameColor = isEarly
+    ? rgb(0.91, 0.77, 0.42)
+    : isCrest
+      ? rgb(0.78, 0.66, 0.35)
+      : isHouse
+        ? rgb(0.1, 0.3, 0.57)
+        : isSignature
+          ? rgb(0.33, 0.19, 0.29)
+          : isInk
+            ? rgb(0.08, 0.08, 0.08)
+            : rgb(0.72, 0.78, 0.78);
+  page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: pageHeight, borderColor: frameColor, borderWidth: textScale });
+  return true;
+}
+
 export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
   const document = await PDFDocument.create();
   const regular = await document.embedFont(StandardFonts.Helvetica);
@@ -229,6 +549,7 @@ export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
   const includeCardBack = snapshot.includeCardBack ?? Boolean(snapshot.parentPortalQrUrl);
   const pageWidth = isPortrait ? CARD_HEIGHT : CARD_WIDTH;
   const pageHeight = isPortrait ? CARD_WIDTH : CARD_HEIGHT;
+  const proofScale = pageWidth / (isPortrait ? 176 : 384);
 
   for (const student of snapshot.students) {
     const page = document.addPage([pageWidth, pageHeight]);
@@ -244,6 +565,8 @@ export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
     const bandColor = isInkSaver ? rgb(0.15, 0.15, 0.15) : templateAccent;
     const background = isEarlyLearners ? rgb(1, 0.97, 0.89) : rgb(0.98, 0.99, 0.99);
 
+    const previewMatched = await drawProofMatchedFront(document, page, snapshot, student, regular, bold);
+    if (!previewMatched) {
     page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: pageHeight, color: background });
     if (isSignatureCollection) {
       page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: pageHeight, borderWidth: 4, borderColor: bandColor });
@@ -277,18 +600,55 @@ export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
       const mastheadY = pageHeight - (snapshot.templateId === 'crestClassic' ? 33 : 29);
       await drawSchoolMark(document, page, snapshot, 12, mastheadY, isModernInstitution ? 20 : 22, bandColor, bold);
       drawContainedText(page, schoolName, { x: 40, y: pageHeight - 22, size: 9, font: bold, color: snapshot.templateId === 'inkSaver' ? rgb(0.1, 0.1, 0.1) : rgb(1, 1, 1), maxWidth: pageWidth - 52 });
-      const photoWidth = isModernInstitution ? 64 : isEarlyLearners ? 82 : 72;
-      const photoHeight = isModernInstitution ? 72 : isEarlyLearners ? 94 : 88;
-      const photoX = isModernInstitution || snapshot.templateId !== 'houseTeam' ? (pageWidth - photoWidth) / 2 : 20;
-      const photoY = isModernInstitution ? pageHeight - 120 : isEarlyLearners ? pageHeight - 138 : pageHeight - 132;
-      const hasPhoto = await drawPhoto(document, page, student.photoUrl, photoX, photoY, photoWidth, photoHeight);
+      const photoWidth = isModernInstitution
+        ? pageWidth * (isPortrait ? 0.4 : 0.27)
+        : (snapshot.templateId === 'seniorCollege' ? 72 : isEarlyLearners ? 80 : 64) * proofScale;
+      const photoHeight = isModernInstitution
+        ? pageHeight * (isPortrait ? 0.29 : 0.55)
+        : (snapshot.templateId === 'seniorCollege' ? 96 : isEarlyLearners ? 80 : 80) * proofScale;
+      const photoX = isModernInstitution
+        ? pageWidth * (isPortrait ? 0.3 : 0.06)
+        : isPortrait || isEarlyLearners || snapshot.templateId === 'crestClassic'
+          ? (pageWidth - photoWidth) / 2
+          : (isHouseTeam ? 24 : snapshot.templateId === 'seniorCollege' ? 24 : 16) * proofScale;
+      const photoTop = isModernInstitution
+        ? pageHeight * (isPortrait ? 0.25 : 0.31)
+        : snapshot.templateId === 'crestClassic'
+          ? 108 * proofScale
+          : snapshot.templateId === 'seniorCollege'
+            ? (pageHeight - photoHeight) / 2
+            : (isEarlyLearners ? 52 : 53) * proofScale;
+      const photoY = pageHeight - photoTop - photoHeight;
+      const photoShape = isEarlyLearners ? 'circle' : 'rectangle';
+      if (snapshot.templateId === 'crestClassic') {
+        const markSize = 44 * proofScale;
+        const markTop = 56 * proofScale;
+        await drawSchoolMark(document, page, snapshot, (pageWidth - markSize) / 2, pageHeight - markTop - markSize, markSize, bandColor, bold);
+      }
+      const hasPhoto = await drawPhoto(document, page, student.photoUrl, photoX, photoY, photoWidth, photoHeight, photoShape, isEarlyLearners ? bandColor : rgb(1, 1, 1));
       if (!hasPhoto) {
-        page.drawRectangle({ x: photoX, y: photoY, width: photoWidth, height: photoHeight, color: rgb(0.9, 0.93, 0.93) });
-        page.drawText(initials(fullName), { x: photoX + 24, y: photoY + 38, size: 22, font: bold, color: bandColor });
+        if (photoShape === 'circle') {
+            page.drawEllipse({ x: photoX + photoWidth / 2, y: photoY + photoHeight / 2, xScale: photoWidth / 2, yScale: photoHeight / 2, color: rgb(0.94, 0.87, 0.73), borderWidth: 3.5, borderColor: bandColor });
+          const mark = initials(fullName);
+          const markWidth = bold.widthOfTextAtSize(mark, 16);
+          page.drawText(mark, { x: photoX + (photoWidth - markWidth) / 2, y: photoY + photoHeight / 2 - 5, size: 16, font: bold, color: bandColor });
+        } else {
+          page.drawRectangle({ x: photoX, y: photoY, width: photoWidth, height: photoHeight, color: rgb(0.9, 0.93, 0.93) });
+          page.drawText(initials(fullName), { x: photoX + 20, y: photoY + 30, size: 16, font: bold, color: bandColor });
+        }
       }
       const textX = snapshot.templateId === 'houseTeam' ? 96 : 12;
       const textWidth = pageWidth - textX - 12;
-      if (snapshot.templateId === 'crestClassic') {
+      if (isEarlyLearners) {
+        const textLeft = 8 * proofScale;
+        const textWidth = pageWidth - textLeft * 2;
+        const nameY = photoY - 23 * proofScale;
+        const nameLines = drawStudentName(page, fullName, { x: textLeft, y: nameY, size: 14, font: bold, color: rgb(0.22, 0.28, 0.22), maxWidth: textWidth, centered: true });
+        const classLabelY = nameY - nameLines * 16.5 * proofScale - 3.5 * proofScale;
+        drawCenteredContainedText(page, 'CLASS', { x: textLeft, y: classLabelY, size: 7 * proofScale, font: bold, color: rgb(0.51, 0.46, 0.36), maxWidth: textWidth });
+        drawCenteredContainedText(page, student.className || 'Class not assigned', { x: textLeft, y: classLabelY - 10 * proofScale, size: 10 * proofScale, font: regular, color: rgb(0.22, 0.28, 0.22), maxWidth: textWidth });
+        drawCenteredContainedText(page, `ADMISSION NUMBER · ${student.admissionNo || 'Not assigned'}`, { x: textLeft, y: classLabelY - 23 * proofScale, size: 7 * proofScale, font: bold, color: rgb(0.51, 0.46, 0.36), maxWidth: textWidth });
+      } else if (snapshot.templateId === 'crestClassic') {
         drawStudentName(page, fullName, { x: 12, y: pageHeight - 148, size: nameSize, font: bold, color: rgb(0.08, 0.12, 0.14), maxWidth: pageWidth - 24, centered: true });
         drawContainedText(page, 'ADMISSION NO.', { x: 12, y: 40, size: 5.5, font: bold, color: rgb(0.42, 0.48, 0.49), maxWidth: pageWidth - 24 });
         drawContainedText(page, student.admissionNo || 'Not assigned', { x: 12, y: 29, size: 8, font: regular, color: rgb(0.2, 0.25, 0.27), maxWidth: pageWidth - 24 });
@@ -325,7 +685,16 @@ export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
       const textX = isModernInstitution ? 88 : isHouseTeam ? 98 : 94;
       const textWidth = pageWidth - textX - 12;
       const titleOffset = isSignatureCollection ? 56 : 53;
-      if (snapshot.templateId === 'houseTeam') {
+      if (isEarlyLearners) {
+        const textLeft = 8 * proofScale;
+        const textWidth = pageWidth - textLeft * 2;
+        const nameY = photoY - 19 * proofScale;
+        const nameLines = drawStudentName(page, fullName, { x: textLeft, y: nameY, size: 14, font: bold, color: rgb(0.22, 0.28, 0.22), maxWidth: textWidth, centered: true });
+        const classLabelY = nameY - nameLines * 16.5 * proofScale - 3.5 * proofScale;
+        drawCenteredContainedText(page, 'CLASS', { x: textLeft, y: classLabelY, size: 7 * proofScale, font: bold, color: rgb(0.51, 0.46, 0.36), maxWidth: textWidth });
+        drawCenteredContainedText(page, student.className || 'Class not assigned', { x: textLeft, y: classLabelY - 10 * proofScale, size: 10 * proofScale, font: regular, color: rgb(0.22, 0.28, 0.22), maxWidth: textWidth });
+        drawCenteredContainedText(page, `ADMISSION NUMBER · ${student.admissionNo || 'Not assigned'}`, { x: textLeft, y: classLabelY - 23 * proofScale, size: 7 * proofScale, font: bold, color: rgb(0.51, 0.46, 0.36), maxWidth: textWidth });
+      } else if (snapshot.templateId === 'houseTeam') {
         drawContainedText(page, 'STUDENT IDENTITY', { x: textX, y: pageHeight - 53, size: 6, font: bold, color: bandColor, maxWidth: textWidth });
         const nameLines = drawStudentName(page, fullName, { x: textX, y: pageHeight - 70, size: nameSize, font: bold, color: rgb(0.08, 0.12, 0.14), maxWidth: textWidth });
         const detailsOffset = nameLines > 1 ? 97 : 91;
@@ -352,7 +721,17 @@ export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
         drawContainedText(page, student.className || 'Class not assigned', { x: textX, y: nameLines > 1 ? 15 : 21, size: 9, font: bold, color: bandColor, maxWidth: textWidth });
       }
     }
-    page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: pageHeight, borderWidth: 1, borderColor: rgb(0.82, 0.86, 0.86) });
+    const frameColor = snapshot.templateId === 'earlyLearners'
+      ? rgb(0.91, 0.77, 0.42)
+      : snapshot.templateId === 'crestClassic'
+        ? rgb(0.78, 0.66, 0.35)
+        : snapshot.templateId === 'houseTeam'
+          ? rgb(0.1, 0.3, 0.57)
+          : snapshot.templateId === 'signatureCollection'
+            ? rgb(0.33, 0.19, 0.29)
+            : rgb(0.72, 0.78, 0.78);
+    page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: pageHeight, borderWidth: 1, borderColor: frameColor });
+    }
 
     if (includeCardBack) {
       const back = document.addPage([pageWidth, pageHeight]);
