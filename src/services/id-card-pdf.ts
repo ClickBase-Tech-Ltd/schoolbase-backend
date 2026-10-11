@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, type PDFPage, type PDFFont } from 'pdf-lib';
-import { appendBezierCurve, clip, endPath, moveTo, popGraphicsState, pushGraphicsState, rectangle } from 'pdf-lib';
+import { appendBezierCurve, clip, closePath, endPath, moveTo, popGraphicsState, pushGraphicsState, rectangle } from 'pdf-lib';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import QRCode from 'qrcode';
@@ -202,6 +202,7 @@ async function drawPhoto(document: PDFDocument, page: PDFPage, photoUrl: string 
         appendBezierCurve(centerX + radiusX, centerY - curve * radiusY, centerX + curve * radiusX, centerY - radiusY, centerX, centerY - radiusY),
         appendBezierCurve(centerX - curve * radiusX, centerY - radiusY, centerX - radiusX, centerY - curve * radiusY, centerX - radiusX, centerY),
         appendBezierCurve(centerX - radiusX, centerY + curve * radiusY, centerX - curve * radiusX, centerY + radiusY, centerX, centerY + radiusY),
+        closePath(),
         clip(),
         endPath(),
       );
@@ -365,7 +366,14 @@ async function drawProofMatchedFront(
       else rect(x, top, actualWidth, actualHeight, rgb(0.9, 0.93, 0.93), options.border, options.borderPx || 0);
       drawText(initials([student.firstName, student.lastName].filter(Boolean).join(' ')), x, top + actualHeight * 0.42, actualWidth, 16, accent, { font: bold, align: 'center', maxLines: 1 });
     } else if (options.shape === 'circle' && options.borderPx) {
-      circle(x, top, actualWidth, white, options.border || accent, options.borderPx);
+      page.drawEllipse({
+        x: (x + actualWidth / 2) * scaleX,
+        y: pageHeight - (top + actualHeight / 2) * scaleY,
+        xScale: actualWidth * scaleX / 2,
+        yScale: actualHeight * scaleY / 2,
+        borderColor: options.border || accent,
+        borderWidth: options.borderPx * textScale,
+      });
     }
   };
 
