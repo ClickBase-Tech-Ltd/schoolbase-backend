@@ -435,6 +435,33 @@ router.post('/quotes', requireSubscription, async (req: Request, res: Response) 
   }
 });
 
+router.get('/quotes/:quoteId/preview.pdf', async (req: Request, res: Response) => {
+  const user = authenticatedUser(req)!;
+  const quote = await prisma.idCardQuote.findFirst({
+    where: { id: req.params.quoteId, schoolId: user.schoolId, status: 'QUOTED', expiresAt: { gt: new Date() } },
+    select: { id: true, renderSnapshotEncrypted: true },
+  });
+  if (!quote?.renderSnapshotEncrypted) return res.status(404).json({ error: 'This card proof has expired. Review the order again to create a new proof.' });
+
+  try {
+    const snapshot = decryptIdCardSnapshot<IdCardRenderSnapshot>(quote.renderSnapshotEncrypted);
+    if (!snapshot.students.length) return res.status(404).json({ error: 'No student card is available in this proof.' });
+    const previewSnapshot = { ...snapshot, students: snapshot.students.slice(0, 1) };
+    const bytes = await generateIdCardPdf(previewSnapshot);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="schoolbase-id-card-proof-${quote.id}.pdf"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Content-Length', bytes.byteLength);
+    return res.send(Buffer.from(bytes));
+  } catch (error) {
+    console.error('[id-card-studio] Failed to render quote proof', {
+      quoteId: quote.id,
+      message: error instanceof Error ? error.message : 'Unknown proof rendering error.',
+    });
+    return res.status(500).json({ error: 'Unable to render the card proof. Please review the order again.' });
+  }
+});
+
 router.post('/orders', requireSubscription, async (req: Request, res: Response) => {
   const user = authenticatedUser(req)!;
   const quoteId = String(req.body?.quoteId || '');
