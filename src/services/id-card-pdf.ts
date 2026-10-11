@@ -397,11 +397,7 @@ async function drawProofMatchedFront(
     const markSize = 24;
     await mark(refWidth * 0.05, refHeight * 0.05, markSize, rgb(0.08, 0.42, 0.45), true);
     drawText(schoolName, refWidth * 0.05 + markSize + 4, refHeight * 0.075, refWidth * 0.67, 10, white, { font: bold, maxLines: 1 });
-  } else if (isSenior) {
-    const markSize = 20;
-    await mark(14, 20, markSize, accent, true);
-    drawText(schoolName, 40, 23, refWidth - 52, 10, ink, { font: bold, maxLines: 1 });
-  } else {
+  } else if (!isSenior) {
     const markSize = 24;
     const markX = isHouse ? 16 : 12;
     await mark(markX, 6, markSize, isCrest || isEarly || isHouse || isSignature ? accent : ink, true);
