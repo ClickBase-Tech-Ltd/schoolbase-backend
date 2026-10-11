@@ -1,9 +1,8 @@
 import { PDFDocument, StandardFonts, rgb, type PDFPage, type PDFFont } from 'pdf-lib';
-import { clip, endPath, popGraphicsState, pushGraphicsState, rectangle } from 'pdf-lib';
+import { appendBezierCurve, clip, endPath, moveTo, popGraphicsState, pushGraphicsState, rectangle } from 'pdf-lib';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import QRCode from 'qrcode';
-import sharp from 'sharp';
 import { ID_CARD_TEMPLATES, type IdCardOrientation } from './id-card-pricing.js';
 
 export type IdCardRenderSnapshot = {
@@ -182,30 +181,38 @@ async function drawPhoto(document: PDFDocument, page: PDFPage, photoUrl: string 
   const bytes = await readLocalImage(photoUrl);
   if (!bytes) return false;
   try {
-    const imageBytes = shape === 'circle'
-      ? await sharp(bytes)
-          .resize(512, 512, { fit: 'cover' })
-          .composite([{
-            input: Buffer.from('<svg width="512" height="512"><circle cx="256" cy="256" r="256" fill="white"/></svg>'),
-            blend: 'dest-in',
-          }])
-          .png()
-          .toBuffer()
-      : bytes;
-    const image = shape === 'circle' || photoUrl?.toLowerCase().endsWith('.png')
-      ? await document.embedPng(imageBytes)
-      : await document.embedJpg(imageBytes);
+    const image = photoUrl?.toLowerCase().endsWith('.png')
+      ? await document.embedPng(bytes)
+      : await document.embedJpg(bytes);
     const scale = Math.max(width / image.width, height / image.height);
     const drawWidth = image.width * scale;
     const drawHeight = image.height * scale;
+    const imageX = x + (width - drawWidth) / 2;
+    const imageY = y + (height - drawHeight) / 2;
     if (shape === 'circle') {
-      page.drawImage(image, { x, y, width, height });
+      const centerX = x + width / 2;
+      const centerY = y + height / 2;
+      const radiusX = width / 2;
+      const radiusY = height / 2;
+      const curve = 0.5522847498;
+      page.pushOperators(
+        pushGraphicsState(),
+        moveTo(centerX, centerY + radiusY),
+        appendBezierCurve(centerX + curve * radiusX, centerY + radiusY, centerX + radiusX, centerY + curve * radiusY, centerX + radiusX, centerY),
+        appendBezierCurve(centerX + radiusX, centerY - curve * radiusY, centerX + curve * radiusX, centerY - radiusY, centerX, centerY - radiusY),
+        appendBezierCurve(centerX - curve * radiusX, centerY - radiusY, centerX - radiusX, centerY - curve * radiusY, centerX - radiusX, centerY),
+        appendBezierCurve(centerX - radiusX, centerY + curve * radiusY, centerX - curve * radiusX, centerY + radiusY, centerX, centerY + radiusY),
+        clip(),
+        endPath(),
+      );
+      page.drawImage(image, { x: imageX, y: imageY, width: drawWidth, height: drawHeight });
+      page.pushOperators(popGraphicsState());
       page.drawEllipse({ x: x + width / 2, y: y + height / 2, xScale: width / 2, yScale: height / 2, borderWidth: 3.5, borderColor });
     } else {
       page.pushOperators(pushGraphicsState(), rectangle(x, y, width, height), clip(), endPath());
       page.drawImage(image, {
-        x: x + (width - drawWidth) / 2,
-        y: y + (height - drawHeight) / 2,
+        x: imageX,
+        y: imageY,
         width: drawWidth,
         height: drawHeight,
       });
@@ -305,11 +312,11 @@ export async function generateIdCardPdf(snapshot: IdCardRenderSnapshot) {
       page.drawRectangle({ x: 0, y: 0, width: pageWidth, height: 5, color: bandColor, opacity: 0.14 });
     }
 
+    const proofScale = pageWidth / (isPortrait ? 176 : 384);
     if (isPortrait) {
       const mastheadY = pageHeight - (snapshot.templateId === 'crestClassic' ? 33 : 29);
       await drawSchoolMark(document, page, snapshot, 12, mastheadY, isModernInstitution ? 20 : 22, bandColor, bold);
       drawContainedText(page, schoolName, { x: 40, y: pageHeight - 22, size: 9, font: bold, color: snapshot.templateId === 'inkSaver' ? rgb(0.1, 0.1, 0.1) : rgb(1, 1, 1), maxWidth: pageWidth - 52 });
-      const proofScale = pageWidth / (isPortrait ? 176 : 384);
       const photoWidth = isModernInstitution
         ? pageWidth * (isPortrait ? 0.4 : 0.27)
         : (snapshot.templateId === 'seniorCollege' ? 72 : isEarlyLearners ? 80 : 64) * proofScale;

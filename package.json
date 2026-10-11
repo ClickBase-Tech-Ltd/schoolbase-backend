@@ -42,7 +42,6 @@
     "prisma": "^6.19.3",
     "puppeteer-core": "^23.11.1",
     "qrcode": "^1.5.4",
-    "sharp": "^0.32.6",
     "ws": "^8.21.0"
   },
   "devDependencies": {

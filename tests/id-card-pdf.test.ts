@@ -4,7 +4,6 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PDFDocument, PDFName, PDFRawStream, StandardFonts } from 'pdf-lib';
-import sharp from 'sharp';
 import { ID_CARD_TEMPLATES, type IdCardOrientation } from '../src/services/id-card-pricing.ts';
 import { fitStudentName, generateIdCardA4SheetPdf, generateIdCardPdf, ID_CARD_TEMPLATE_ACCENTS, resolveLocalUploadPath, type IdCardRenderSnapshot } from '../src/services/id-card-pdf.ts';
 
@@ -29,9 +28,7 @@ describe('ID card PDF layout', () => {
     const photoPath = resolveLocalUploadPath(photoUrl);
     assert.ok(photoPath);
     await mkdir(path.dirname(photoPath), { recursive: true });
-    await writeFile(photoPath, await sharp({
-      create: { width: 4, height: 4, channels: 3, background: { r: 28, g: 110, b: 145 } },
-    }).png().toBuffer());
+    await writeFile(photoPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=', 'base64'));
 
     try {
       const bytes = await generateIdCardPdf({
