@@ -15,10 +15,18 @@ export function filterActiveStudents<T extends { isActive?: boolean | null; stat
   return students.filter((student) => isStudentCurrentlyEnrolled(student));
 }
 
+export function buildActiveStudentWhere(schoolId: string): Prisma.PupilWhereInput {
+  return {
+    schoolId,
+    isActive: true,
+    OR: [{ status: null }, { status: { not: 'INACTIVE' } }],
+  };
+}
+
 export function buildStudentRosterWhere(schoolId: string, status: StudentEnrollmentStatus): Prisma.PupilWhereInput {
   if (status === 'INACTIVE') {
     return { schoolId, OR: [{ isActive: false }, { status: 'INACTIVE' }] };
   }
 
-  return { schoolId, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }] };
+  return buildActiveStudentWhere(schoolId);
 }

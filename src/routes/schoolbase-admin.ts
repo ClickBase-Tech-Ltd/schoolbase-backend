@@ -983,16 +983,12 @@ router.get('/stats', async (req: Request, res: Response) => {
 
 // GET /schoolbase-admin/api/profile - Get current platform admin profile
 router.get('/profile', async (req: Request, res: Response) => {
-  const session = await requirePlatformAdminSession(req, res);
-  if (!session) return;
+  const userId = await requirePlatformAdminSession(req, res);
+  if (!userId) return;
 
   try {
-    // Get the platform admin user (there should be one with role PLATFORM_ADMIN and no schoolId)
-    const admin = await prisma.user.findFirst({
-      where: {
-        role: 'PLATFORM_ADMIN',
-        schoolId: null,
-      },
+    const admin = await prisma.user.findUnique({
+      where: { id: userId },
       select: {
         id: true,
         email: true,
@@ -1002,8 +998,8 @@ router.get('/profile', async (req: Request, res: Response) => {
       },
     });
 
-    if (!admin) {
-      return res.status(404).json({ message: 'Platform admin not found' });
+    if (!admin || admin.role !== 'PLATFORM_ADMIN') {
+      return res.status(403).json({ message: 'Platform admin session required' });
     }
 
     res.json({ admin });
@@ -1015,8 +1011,8 @@ router.get('/profile', async (req: Request, res: Response) => {
 
 // PATCH /schoolbase-admin/api/profile - Update current platform admin profile
 router.patch('/profile', async (req: Request, res: Response) => {
-  const session = await requirePlatformAdminSession(req, res);
-  if (!session) return;
+  const userId = await requirePlatformAdminSession(req, res);
+  if (!userId) return;
 
   try {
     const { name, email } = req.body;
@@ -1025,24 +1021,20 @@ router.patch('/profile', async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Name and email are required' });
     }
 
-    // Find the platform admin user
-    const admin = await prisma.user.findFirst({
-      where: {
-        role: 'PLATFORM_ADMIN',
-        schoolId: null,
-      },
+    const admin = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
     });
 
-    if (!admin) {
-      return res.status(404).json({ message: 'Platform admin not found' });
+    if (!admin || admin.role !== 'PLATFORM_ADMIN') {
+      return res.status(403).json({ message: 'Platform admin session required' });
     }
 
-    // Update the admin profile
     const updated = await prisma.user.update({
       where: { id: admin.id },
       data: {
-        name: name.trim(),
-        email: email.trim(),
+        name: String(name).trim(),
+        email: String(email).trim(),
       },
       select: {
         id: true,

@@ -25,7 +25,7 @@ import { resolveSchoolScope } from '../services/security-context.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
-import { buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
+import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -2653,11 +2653,7 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
     }
 
     const eligiblePupilsBySchedule = new Map<string, any[]>();
-    const activePupilWhere = {
-      schoolId,
-      isActive: true,
-      OR: [{ status: null }, { status: { not: 'INACTIVE' } }],
-    } as const;
+    const activePupilWhere = buildActiveStudentWhere(schoolId);
     let whatsappRecipientCount = 0;
 
     for (const schedule of feeSchedules) {
@@ -2897,6 +2893,7 @@ router.post('/fees/invoices/send-reminders', requireSubscription, async (req: Re
       where: {
         schoolId,
         status: { in: ['SENT', 'OVERDUE', 'PART_PAID'] },
+        pupil: buildActiveStudentWhere(schoolId),
         ...(invoiceId ? { id: invoiceId } : {}),
       },
       include: {
@@ -7715,7 +7712,7 @@ router.post('/announcements', async (req: Request, res: Response) => {
     if (publishNow) {
       const policy = await readSchoolWhatsAppPolicy(prisma, schoolId);
       const guardianCount = await prisma.guardian.count({
-        where: { pupils: { some: { pupil: { schoolId } } } },
+        where: { pupils: { some: { pupil: buildActiveStudentWhere(schoolId) } } },
       });
       const policyCheck = evaluateSchoolWhatsAppSend(policy, {
         recipientCount: guardianCount,
@@ -7748,7 +7745,7 @@ router.post('/announcements', async (req: Request, res: Response) => {
     if (announcement.published) {
       const guardians = await prisma.guardian.findMany({
         where: {
-          pupils: { some: { pupil: { schoolId } } },
+          pupils: { some: { pupil: buildActiveStudentWhere(schoolId) } },
         },
         select: {
           id: true,

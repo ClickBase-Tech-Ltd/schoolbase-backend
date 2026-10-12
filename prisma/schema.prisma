@@ -444,6 +444,7 @@ model Pupil {
   competitionAchievements CompetitionPupilAchievement[]
   competitionChallengesSent CompetitionStudentChallenge[] @relation("CompetitionChallengeSender")
   competitionChallengesReceived CompetitionStudentChallenge[] @relation("CompetitionChallengeRecipient")
+  competitionChallengesWon CompetitionStudentChallenge[] @relation("CompetitionChallengeWinner")
   competitionTournamentParticipants CompetitionTournamentParticipant[]
   competitionCertificates CompetitionCertificate[]
   competitionPrizes CompetitionPrize[]
@@ -736,6 +737,8 @@ model CompetitionChallengeAttempt {
   questions             CompetitionAttemptQuestion[]
   answers               CompetitionAnswerSubmission[]
   xpTransactions        CompetitionXpTransaction[]
+  studentChallengesAsSender CompetitionStudentChallenge[] @relation("StudentChallengeSenderAttempt")
+  studentChallengesAsRecipient CompetitionStudentChallenge[] @relation("StudentChallengeRecipientAttempt")
   suspiciousActivities  CompetitionSuspiciousActivity[]
   certificates          CompetitionCertificate[]
 
@@ -784,6 +787,9 @@ model CompetitionStudentChallenge {
   challengeId       String
   senderPupilId     String
   recipientPupilId  String
+  senderAttemptId   String?                             @unique
+  recipientAttemptId String?                            @unique
+  winnerPupilId     String?
   status            CompetitionStudentChallengeStatus  @default(PENDING)
   expiresAt         DateTime
   acceptedAt        DateTime?
@@ -792,10 +798,14 @@ model CompetitionStudentChallenge {
   challenge         CompetitionChallenge               @relation(fields: [challengeId], references: [id], onDelete: Cascade)
   sender            Pupil                               @relation("CompetitionChallengeSender", fields: [senderPupilId], references: [id], onDelete: Cascade)
   recipient         Pupil                               @relation("CompetitionChallengeRecipient", fields: [recipientPupilId], references: [id], onDelete: Cascade)
+  senderAttempt     CompetitionChallengeAttempt?        @relation("StudentChallengeSenderAttempt", fields: [senderAttemptId], references: [id], onDelete: SetNull)
+  recipientAttempt  CompetitionChallengeAttempt?        @relation("StudentChallengeRecipientAttempt", fields: [recipientAttemptId], references: [id], onDelete: SetNull)
+  winner            Pupil?                              @relation("CompetitionChallengeWinner", fields: [winnerPupilId], references: [id], onDelete: SetNull)
 
   @@index([recipientPupilId, status, expiresAt])
   @@index([senderPupilId, createdAt])
   @@index([challengeId, status])
+  @@index([winnerPupilId])
 }
 
 model CompetitionXpTransaction {

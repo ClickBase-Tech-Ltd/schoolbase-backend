@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildActiveStudentWhere,
   buildStudentRosterWhere,
   filterActiveStudents,
   isStudentCurrentlyEnrolled,
@@ -39,11 +40,14 @@ describe('student enrollment lifecycle', () => {
   });
 
   it('keeps inactive status values out of the active roster', () => {
-    assert.deepEqual(buildStudentRosterWhere('school-1', 'ACTIVE'), {
+    const expectedWhere = {
       schoolId: 'school-1',
       isActive: true,
       OR: [{ status: null }, { status: { not: 'INACTIVE' } }],
-    });
+    };
+
+    assert.deepEqual(buildActiveStudentWhere('school-1'), expectedWhere);
+    assert.deepEqual(buildStudentRosterWhere('school-1', 'ACTIVE'), expectedWhere);
   });
 
   it('filters a roster to only currently enrolled pupils for active workflows', () => {

@@ -10,7 +10,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "smoke:api": "node ../scripts/smoke-api.mjs",
-    "test:competition": "tsx tests/competition-feature-gate.test.ts && tsx tests/competition-pupil-identity.test.ts && tsx tests/competition-scoring.test.ts && tsx tests/competition-audience.test.ts",
+    "test:competition": "tsx tests/competition-feature-gate.test.ts && tsx tests/competition-pupil-identity.test.ts && tsx tests/competition-scoring.test.ts && tsx tests/competition-audience.test.ts && tsx tests/competition-rewards.test.ts && tsx tests/competition-achievements.test.ts && tsx tests/competition-leaderboard.test.ts",
     "test:platform-settings": "tsx tests/platform-settings.test.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
