@@ -1,5 +1,7 @@
+/// <reference types="node" />
 import assert from 'node:assert/strict';
 import { calculateAge, matchesCompetitionAudience, parseCompetitionAudience } from '../src/services/competition-audience.js';
+import { getCompetitionDailyLimitError } from '../src/services/competition-daily-limit.js';
 
 const referenceDate = new Date('2026-10-09T12:00:00.000Z');
 
@@ -23,7 +25,31 @@ assert.equal(matchesCompetitionAudience({ audienceLabel: 'JS 3', className: 'Jun
 assert.equal(matchesCompetitionAudience({ audienceLabel: 'SSS 2', className: 'Senior Secondary 2' }), true);
 assert.equal(matchesCompetitionAudience({ audienceLabel: 'Basic 1', className: 'Primary 2' }), false);
 assert.equal(matchesCompetitionAudience({ audienceLabel: 'JSS 1', className: 'SS 1' }), false);
+assert.equal(matchesCompetitionAudience({ audienceLabel: 'JHS 1', className: 'JSS 1' }), true);
+assert.equal(matchesCompetitionAudience({ audienceLabel: 'SHS 3', className: 'SSS 3' }), true);
+assert.equal(matchesCompetitionAudience({ audienceLabel: 'Year 1', className: 'Basic 1' }), true);
+assert.equal(matchesCompetitionAudience({ audienceLabel: 'JHS 1', className: 'Year 7' }), true);
+assert.equal(matchesCompetitionAudience({ audienceLabel: 'SHS 2', className: 'Year 11' }), true);
 assert.equal(matchesCompetitionAudience({ ...pupil, className: null }), false);
 assert.equal(matchesCompetitionAudience({ ...pupil, audienceLabel: null }), false);
+
+const today = new Date('2026-10-13T12:00:00.000Z');
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: null } },
+], today, 'DAILY'), 'DAILY_CHALLENGE_LIMIT_REACHED');
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+], today, 'EXAM'), 'EXAM_PRACTICE_LIMIT_REACHED');
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-12T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+], today, 'EXAM'), null);
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: null } },
+  { startedAt: '2026-10-13T09:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+], today, 'DAILY'), 'DAILY_CHALLENGE_LIMIT_REACHED');
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+  { startedAt: '2026-10-13T09:00:00.000Z', challenge: { examPractice: null } },
+], today, 'EXAM'), 'EXAM_PRACTICE_LIMIT_REACHED');
 
 console.log('Competition audience tests passed');

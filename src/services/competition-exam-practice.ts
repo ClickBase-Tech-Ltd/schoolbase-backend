@@ -9,12 +9,12 @@ export type CompetitionExamCode = 'WAEC' | 'BECE' | 'JUNIOR_WAEC';
 
 const examGradeAliases: Record<string, Record<string, Record<string, string>>> = {
   GH: {
-    WAEC: Object.fromEntries([1, 2, 3].flatMap((level) => [[`shs${level}`, `SHS ${level}`], [`seniorhigh${level}`, `SHS ${level}`], [`seniorhighschool${level}`, `SHS ${level}`], [`seniorsecondary${level}`, `SHS ${level}`]])),
-    BECE: Object.fromEntries([1, 2, 3].flatMap((level) => [[`jhs${level}`, `JHS ${level}`], [`juniorhigh${level}`, `JHS ${level}`], [`juniorhighschool${level}`, `JHS ${level}`]])),
+    WAEC: Object.fromEntries([1, 2, 3].flatMap((level) => [[`shs${level}`, `SHS ${level}`], [`seniorhigh${level}`, `SHS ${level}`], [`seniorhighschool${level}`, `SHS ${level}`], [`seniorsecondary${level}`, `SHS ${level}`], [`year${9 + level}`, `SHS ${level}`], [`yr${9 + level}`, `SHS ${level}`]])),
+    BECE: Object.fromEntries([1, 2, 3].flatMap((level) => [[`jhs${level}`, `JHS ${level}`], [`juniorhigh${level}`, `JHS ${level}`], [`juniorhighschool${level}`, `JHS ${level}`], [`year${6 + level}`, `JHS ${level}`], [`yr${6 + level}`, `JHS ${level}`]])),
   },
   NG: {
-    WAEC: Object.fromEntries([1, 2, 3].flatMap((level) => [[`ss${level}`, `SS ${level}`], [`sss${level}`, `SS ${level}`], [`seniorsecondary${level}`, `SS ${level}`], [`seniorsecondaryschool${level}`, `SS ${level}`]])),
-    JUNIOR_WAEC: Object.fromEntries([1, 2, 3].flatMap((level) => [[`jss${level}`, `JSS ${level}`], [`juniorsecondary${level}`, `JSS ${level}`], [`juniorsecondaryschool${level}`, `JSS ${level}`]])),
+    WAEC: Object.fromEntries([1, 2, 3].flatMap((level) => [[`ss${level}`, `SS ${level}`], [`sss${level}`, `SS ${level}`], [`seniorsecondary${level}`, `SS ${level}`], [`seniorsecondaryschool${level}`, `SS ${level}`], [`year${9 + level}`, `SS ${level}`], [`yr${9 + level}`, `SS ${level}`]])),
+    JUNIOR_WAEC: Object.fromEntries([1, 2, 3].flatMap((level) => [[`jss${level}`, `JSS ${level}`], [`juniorsecondary${level}`, `JSS ${level}`], [`juniorsecondaryschool${level}`, `JSS ${level}`], [`year${6 + level}`, `JSS ${level}`], [`yr${6 + level}`, `JSS ${level}`]])),
   },
 };
 

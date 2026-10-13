@@ -4,16 +4,26 @@ export interface CompetitionAudience {
 
 function normalizeClassLabel(value: string): string {
   const normalized = value.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
-  const numberedGrade = normalized.match(/^(basic|primary|pry|p)([1-6])$/);
-  if (numberedGrade) return `primary${numberedGrade[2]}`;
-  const basicSecondaryGrade = normalized.match(/^basic([7-9])$/);
+
+  const yearLevel = normalized.match(/^(?:year|yr)([1-9]|1[0-2])$/);
+  if (yearLevel) {
+    const level = Number(yearLevel[1]);
+    if (level <= 6) return `primary${level}`;
+    if (level <= 9) return `jss${level - 6}`;
+    if (level <= 12) return `ss${level - 9}`;
+  }
+
+  const numberedGrade = normalized.match(/^(?:basic|primary|pry|p|grade)([1-6])$/);
+  if (numberedGrade) return `primary${numberedGrade[1]}`;
+
+  const basicSecondaryGrade = normalized.match(/^(?:basic|year|yr|grade)([7-9])$/);
   if (basicSecondaryGrade) return `jss${Number(basicSecondaryGrade[1]) - 6}`;
 
-  const juniorSecondary = normalized.match(/^(jss|js|juniorsecondary|juniorsecondaryschool)([1-3])$/);
-  if (juniorSecondary) return `jss${juniorSecondary[2]}`;
+  const juniorSecondary = normalized.match(/^(?:jss|js|jhs|juniorsecondary|juniorsecondaryschool|juniorhigh|juniorhighschool)([1-3])$/);
+  if (juniorSecondary) return `jss${juniorSecondary[1]}`;
 
-  const seniorSecondary = normalized.match(/^(ss|sss|seniorsecondary|seniorsecondaryschool)([1-3])$/);
-  if (seniorSecondary) return `ss${seniorSecondary[2]}`;
+  const seniorSecondary = normalized.match(/^(?:ss|sss|shs|seniorsecondary|seniorsecondaryschool|seniorhigh|seniorhighschool)([1-3])$/);
+  if (seniorSecondary) return `ss${seniorSecondary[1]}`;
 
   return normalized;
 }

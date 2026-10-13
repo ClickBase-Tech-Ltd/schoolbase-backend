@@ -11,6 +11,7 @@ import { parseCompetitionAchievementCriteria, shouldAwardCompetitionAchievement 
 import { buildCompetitionLeaderboard, chooseCompetitionMatchWinner } from '../services/competition-leaderboard.js';
 import { canTransitionCompetitionTournament, parseCompetitionTournamentDate, type CompetitionTournamentStatus } from '../services/competition-tournaments.js';
 import { matchesCompetitionAudience, parseCompetitionAudience } from '../services/competition-audience.js';
+import { getCompetitionDailyLimitError } from '../services/competition-daily-limit.js';
 import { getCompetitionExamPracticeGrades, isEligibleForCompetitionExamPractice, normalizeCompetitionExamPracticeGrade } from '../services/competition-exam-practice.js';
 import { canApproveCompetitionQuestionSet } from '../services/competition-question-set-review.js';
 
@@ -1493,6 +1494,29 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
     if (existing.pupilId !== identity.pupilId || existing.challengeId !== challenge.id) return res.status(409).json({ error: 'IDEMPOTENCY_KEY_CONFLICT' });
     return res.json({ attempt: presentAttempt(existing) });
   }
+
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const startOfNextDay = new Date(startOfDay);
+  startOfNextDay.setDate(startOfNextDay.getDate() + 1);
+
+  const todaysAttempts = await prisma.competitionChallengeAttempt.findMany({
+    where: {
+      pupilId: identity.pupilId,
+      startedAt: { gte: startOfDay, lt: startOfNextDay },
+    },
+    select: {
+      startedAt: true,
+      challenge: { select: { examPractice: { select: { id: true } } } },
+    },
+  });
+  const dailyLimitError = getCompetitionDailyLimitError(
+    todaysAttempts,
+    now,
+    challenge.examPractice ? 'EXAM' : 'DAILY',
+  );
+  if (dailyLimitError) return res.status(409).json({ error: dailyLimitError, message: 'Please come back tomorrow.' });
+
   const selected = secureShuffle(challenge.questionSet.questions).slice(0, challenge.questionCount);
   const deadlineAt = new Date(now.getTime() + challenge.durationSeconds * 1000);
   try {
