@@ -1561,7 +1561,23 @@ router.post('/student/attempts/:attemptId/answers/:questionId', requireSession, 
     });
     res.json({ accepted: true });
   } catch (error) {
-    if (isPrismaUniqueError(error)) return res.status(409).json({ error: 'QUESTION_ALREADY_ANSWERED' });
+    if (isPrismaUniqueError(error)) {
+      const existingSubmission = await prisma.competitionAnswerSubmission.findUnique({
+        where: { attemptId_questionId: { attemptId: attempt.id, questionId: req.params.questionId } },
+        select: { responseJson: true },
+      });
+      if (existingSubmission) {
+        let savedOptionId: string | null = null;
+        try {
+          const response = JSON.parse(existingSubmission.responseJson) as { optionId?: unknown };
+          if (typeof response.optionId === 'string') savedOptionId = response.optionId;
+        } catch {
+          return res.status(500).json({ error: 'ANSWER_RECOVERY_FAILED' });
+        }
+        if (savedOptionId) return res.json({ accepted: true, alreadyRecorded: true, optionId: savedOptionId });
+      }
+      return res.status(409).json({ error: 'QUESTION_ALREADY_ANSWERED' });
+    }
     if (error instanceof Error && error.message === 'ATTEMPT_NOT_ACTIVE') return res.status(409).json({ error: 'ATTEMPT_NOT_ACTIVE' });
     console.error('[competition] answer submission failed', error);
     res.status(500).json({ error: 'ANSWER_SUBMISSION_FAILED' });
