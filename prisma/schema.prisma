@@ -557,6 +557,7 @@ model CompetitionCategory {
   subject     Subject? @relation(fields: [subjectId], references: [id], onDelete: SetNull)
   questionSets CompetitionQuestionSet[]
   challenges  CompetitionChallenge[]
+  examPractices CompetitionExamPractice[]
   tournaments CompetitionTournament[]
 
   @@unique([schoolId, code])
@@ -695,11 +696,34 @@ model CompetitionChallenge {
   term              Term?                      @relation(fields: [termId], references: [id], onDelete: SetNull)
   attempts          CompetitionChallengeAttempt[]
   studentInvitations CompetitionStudentChallenge[]
+  examPractice      CompetitionExamPractice?
 
   @@index([schoolId, status, opensAt, closesAt])
   @@index([categoryId, status])
   @@index([classId, status])
   @@index([academicYearId, termId])
+}
+
+model CompetitionExamPractice {
+  id                 String                         @id @default(cuid())
+  challengeId        String                         @unique
+  examCode           String                         @db.VarChar(40)
+  countryCode        String                         @db.VarChar(2)
+  gradeLabel         String                         @db.VarChar(80)
+  subjectCategoryId  String
+  format             CompetitionExamPracticeFormat @default(PRACTICE)
+  syllabusVersion    String?                        @db.VarChar(80)
+  isActive           Boolean                        @default(false)
+  reviewedByUserId   String?
+  reviewedAt         DateTime?
+  createdByUserId    String?
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
+  challenge          CompetitionChallenge           @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  subjectCategory    CompetitionCategory            @relation(fields: [subjectCategoryId], references: [id], onDelete: Restrict)
+
+  @@index([countryCode, gradeLabel, isActive])
+  @@index([examCode, countryCode, isActive])
 }
 
 model CompetitionChallengeAttempt {
@@ -940,6 +964,11 @@ model CompetitionTournamentParticipant {
   status              CompetitionRegistrationStatus @default(PENDING)
   displayNameSnapshot String                        @db.VarChar(160)
   visibilityApproved  Boolean                       @default(false)
+  nominatedAt         DateTime?
+  nominatedByUserId   String?
+  guardianConsentStatus CompetitionGuardianConsentStatus?
+  guardianConsentAt   DateTime?
+  guardianConsentGuardianId String?
   registeredAt        DateTime                      @default(now())
   approvedAt          DateTime?
   tournament          CompetitionTournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
@@ -956,6 +985,8 @@ model CompetitionTournamentParticipant {
   @@unique([tournamentId, pupilId])
   @@index([schoolId, tournamentId, status])
   @@index([classId, tournamentId])
+  @@index([tournamentId, schoolId, nominatedAt], map: "CompetitionTournamentParticipant_tournament_school_nom_idx")
+  @@index([guardianConsentStatus])
 }
 
 model CompetitionTournamentRound {
@@ -2829,10 +2860,21 @@ enum CompetitionTournamentScope {
 }
 
 enum CompetitionRegistrationStatus {
+  INVITED
   PENDING
   APPROVED
   WITHDRAWN
   DISQUALIFIED
+}
+
+enum CompetitionGuardianConsentStatus {
+  ACCEPTED
+  DECLINED
+}
+
+enum CompetitionExamPracticeFormat {
+  PRACTICE
+  MOCK_EXAM
 }
 
 enum CompetitionRoundStatus {

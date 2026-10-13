@@ -29,41 +29,40 @@ assert.equal(isEligibleCompetitionPupilLink({ ...validLink, pupilIsActive: false
 assert.equal(isEligibleCompetitionPupilLink({ ...validLink, pupilStatus: 'INACTIVE' }), false);
 assert.equal(isEligibleCompetitionPupilLink({ ...validLink, userSchoolId: null }), false);
 
-const guardianAccounts = [
+const guardianPupilLinks = [
   {
-    schoolId: 'school-1',
-    status: 'ACTIVE',
+    guardianId: 'guardian-1',
     guardian: { id: 'guardian-1', schoolId: 'school-1' },
-    pupil: { id: 'pupil-1', schoolId: 'school-1', classId: 'class-1', firstName: 'Ada', lastName: 'One', isActive: true, status: 'ACTIVE', class: { name: 'Year 1' }, guardians: [{ guardianId: 'guardian-1' }] },
+    pupil: { id: 'pupil-1', schoolId: 'school-1', classId: 'class-1', firstName: 'Ada', lastName: 'One', isActive: true, status: 'ACTIVE', class: { name: 'Year 1' } },
   },
   {
-    schoolId: 'school-1',
-    status: 'ACTIVE',
+    guardianId: 'guardian-2',
     guardian: { id: 'guardian-2', schoolId: 'school-1' },
-    pupil: { id: 'pupil-2', schoolId: 'school-1', classId: null, firstName: 'Ben', lastName: 'Two', isActive: true, status: null, class: null, guardians: [{ guardianId: 'guardian-2' }] },
+    pupil: { id: 'pupil-2', schoolId: 'school-1', classId: null, firstName: 'Ben', lastName: 'Two', isActive: true, status: null, class: null },
   },
   {
-    schoolId: 'school-2',
-    status: 'ACTIVE',
+    guardianId: 'guardian-1',
     guardian: { id: 'guardian-1', schoolId: 'school-1' },
-    pupil: { id: 'pupil-3', schoolId: 'school-2', classId: null, firstName: 'Cross', lastName: 'School', isActive: true, status: null, class: null, guardians: [{ guardianId: 'guardian-1' }] },
+    pupil: { id: 'pupil-3', schoolId: 'school-2', classId: null, firstName: 'Cross', lastName: 'School', isActive: true, status: null, class: null },
   },
   {
-    schoolId: 'school-1',
-    status: 'ACTIVE',
+    guardianId: 'guardian-1',
     guardian: { id: 'guardian-1', schoolId: 'school-1' },
-    pupil: { id: 'pupil-4', schoolId: 'school-1', classId: null, firstName: 'Inactive', lastName: 'Pupil', isActive: false, status: 'INACTIVE', class: null, guardians: [{ guardianId: 'guardian-1' }] },
+    pupil: { id: 'pupil-4', schoolId: 'school-1', classId: null, firstName: 'Inactive', lastName: 'Pupil', isActive: false, status: 'INACTIVE', class: null },
   },
   {
-    schoolId: 'school-1',
-    status: 'ACTIVE',
-    guardian: { id: 'guardian-1', schoolId: 'school-1' },
-    pupil: { id: 'pupil-5', schoolId: 'school-1', classId: null, firstName: 'Unlinked', lastName: 'Pupil', isActive: true, status: 'ACTIVE', class: null, guardians: [] },
+    guardianId: 'guardian-foreign',
+    guardian: { id: 'guardian-foreign', schoolId: 'school-1' },
+    pupil: { id: 'pupil-5', schoolId: 'school-1', classId: null, firstName: 'Not in family', lastName: 'Pupil', isActive: true, status: 'ACTIVE', class: null },
   },
 ];
+const guardianPupilQueries: unknown[] = [];
 const guardianPrisma = {
-  competitionPupilAccount: {
-    findMany: async () => guardianAccounts,
+  guardianPupil: {
+    findMany: async (args: unknown) => {
+      guardianPupilQueries.push(args);
+      return guardianPupilLinks;
+    },
   },
 } as unknown as PrismaClient;
 const validGuardianChoices = await resolveCompetitionGuardianPupilChoices(guardianPrisma, ['guardian-1', 'guardian-2', 'guardian-1']);
@@ -71,6 +70,17 @@ assert.deepEqual(validGuardianChoices, [
   { pupilId: 'pupil-1', schoolId: 'school-1', classId: 'class-1', firstName: 'Ada', lastName: 'One', className: 'Year 1' },
   { pupilId: 'pupil-2', schoolId: 'school-1', classId: null, firstName: 'Ben', lastName: 'Two', className: null },
 ]);
+assert.deepEqual(guardianPupilQueries[0], {
+  where: {
+    guardianId: { in: ['guardian-1', 'guardian-2'] },
+    pupil: { isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }] },
+  },
+  select: {
+    guardianId: true,
+    guardian: { select: { id: true, schoolId: true } },
+    pupil: { select: { id: true, schoolId: true, classId: true, firstName: true, lastName: true, isActive: true, status: true, class: { select: { name: true } } } },
+  },
+});
 assert.equal(selectCompetitionGuardianPupil(validGuardianChoices), null);
 assert.equal(selectCompetitionGuardianPupil(validGuardianChoices, 'pupil-2')?.pupilId, 'pupil-2');
 assert.equal(selectCompetitionGuardianPupil(validGuardianChoices, 'pupil-outside-family'), null);

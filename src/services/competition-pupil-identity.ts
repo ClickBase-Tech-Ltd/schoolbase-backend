@@ -114,11 +114,16 @@ export async function resolveCompetitionGuardianPupilChoices(
   const uniqueGuardianIds = Array.from(new Set(guardianIds.filter(Boolean)));
   if (uniqueGuardianIds.length === 0) return [];
 
-  const accounts = await prisma.competitionPupilAccount.findMany({
-    where: { guardianId: { in: uniqueGuardianIds }, status: 'ACTIVE' },
+  const guardianPupilLinks = await prisma.guardianPupil.findMany({
+    where: {
+      guardianId: { in: uniqueGuardianIds },
+      pupil: {
+        isActive: true,
+        OR: [{ status: null }, { status: { not: 'INACTIVE' } }],
+      },
+    },
     select: {
-      schoolId: true,
-      status: true,
+      guardianId: true,
       guardian: { select: { id: true, schoolId: true } },
       pupil: {
         select: {
@@ -130,30 +135,24 @@ export async function resolveCompetitionGuardianPupilChoices(
           isActive: true,
           status: true,
           class: { select: { name: true } },
-          guardians: {
-            where: { guardianId: { in: uniqueGuardianIds } },
-            select: { guardianId: true },
-          },
         },
       },
     },
-    orderBy: { linkedAt: 'asc' },
   });
 
-  return accounts
-    .filter((account) => account.status === 'ACTIVE' &&
-      account.guardian !== null &&
-      uniqueGuardianIds.includes(account.guardian.id) &&
-      account.pupil.guardians.some((link) => link.guardianId === account.guardian?.id) &&
-      account.guardian.schoolId === account.schoolId &&
-      account.pupil.schoolId === account.schoolId &&
-      isStudentCurrentlyEnrolled({ isActive: account.pupil.isActive, status: account.pupil.status }))
-    .map((account) => ({
-      pupilId: account.pupil.id,
-      schoolId: account.schoolId,
-      classId: account.pupil.classId,
-      firstName: account.pupil.firstName,
-      lastName: account.pupil.lastName,
-      className: account.pupil.class?.name ?? null,
-    }));
+  const choices = new Map<string, CompetitionGuardianPupilChoice>();
+  for (const link of guardianPupilLinks) {
+    if (!uniqueGuardianIds.includes(link.guardianId) ||
+      link.guardian.schoolId !== link.pupil.schoolId ||
+      !isStudentCurrentlyEnrolled({ isActive: link.pupil.isActive, status: link.pupil.status })) continue;
+    choices.set(link.pupil.id, {
+      pupilId: link.pupil.id,
+      schoolId: link.pupil.schoolId,
+      classId: link.pupil.classId,
+      firstName: link.pupil.firstName,
+      lastName: link.pupil.lastName,
+      className: link.pupil.class?.name ?? null,
+    });
+  }
+  return Array.from(choices.values());
 }

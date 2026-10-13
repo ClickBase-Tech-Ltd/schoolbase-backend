@@ -23,6 +23,7 @@ const defaultFeatures = normalizeCompetitionFeatures(undefined);
 assert.deepEqual(defaultFeatures, competitionFeatureDefaults);
 assert.equal(isCompetitionFeatureEnabled(defaultFeatures, 'competition.enabled'), false);
 assert.equal(isCompetitionFeatureEnabled(defaultFeatures, 'competition.dailyChallenge.enabled'), false);
+assert.equal(isCompetitionFeatureEnabled(defaultFeatures, 'competition.examPractice.enabled'), false);
 
 const childEnabledOnly = normalizeCompetitionFeatures({ 'competition.dailyChallenge.enabled': true });
 assert.equal(isCompetitionFeatureEnabled(childEnabledOnly, 'competition.dailyChallenge.enabled'), false);
@@ -32,6 +33,8 @@ const enabledFeatures = normalizeCompetitionFeatures({
   'competition.dailyChallenge.enabled': true,
 });
 assert.equal(isCompetitionFeatureEnabled(enabledFeatures, 'competition.dailyChallenge.enabled'), true);
+assert.equal(isCompetitionFeatureEnabled(normalizeCompetitionFeatures({ 'competition.enabled': true, 'competition.examPractice.enabled': true }), 'competition.examPractice.enabled'), true);
+assert.equal(isCompetitionFeatureEnabled(normalizeCompetitionFeatures({ 'competition.enabled': true, 'competition.dailyChallenge.enabled': true }), 'competition.examPractice.enabled'), false);
 assert.equal(isCompetitionFeatureEnabled(enabledFeatures, 'competition.studentVsStudent.enabled'), false);
 
 assert.equal(await resolveCompetitionFeature(prismaWithSetting(), 'competition.enabled'), false);

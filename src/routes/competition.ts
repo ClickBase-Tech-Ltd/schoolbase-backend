@@ -11,6 +11,7 @@ import { parseCompetitionAchievementCriteria, shouldAwardCompetitionAchievement 
 import { buildCompetitionLeaderboard, chooseCompetitionMatchWinner } from '../services/competition-leaderboard.js';
 import { canTransitionCompetitionTournament, parseCompetitionTournamentDate, type CompetitionTournamentStatus } from '../services/competition-tournaments.js';
 import { matchesCompetitionAudience } from '../services/competition-audience.js';
+import { getCompetitionExamPracticeGrades, isEligibleForCompetitionExamPractice, normalizeCompetitionExamPracticeGrade } from '../services/competition-exam-practice.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -95,6 +96,14 @@ async function requirePlatformAdmin(req: CompetitionRequest, res: Response, next
   next();
 }
 
+async function isChallengePracticeEnabled(): Promise<boolean> {
+  const [dailyChallengeEnabled, examPracticeEnabled] = await Promise.all([
+    resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'),
+    resolveCompetitionFeature(prisma, 'competition.examPractice.enabled'),
+  ]);
+  return dailyChallengeEnabled || examPracticeEnabled;
+}
+
 async function requireSchoolStaff(req: CompetitionRequest, res: Response, next: NextFunction) {
   if (!req.competitionUser?.schoolId || !['SCHOOL_ADMIN', 'TEACHER'].includes(req.competitionUser.role)) {
     return res.status(403).json({ error: 'SCHOOL_STAFF_REQUIRED' });
@@ -140,13 +149,13 @@ router.post('/admin/categories', requireSession, requirePlatformAdmin, async (re
 });
 
 router.get('/admin/scoring-policies', requireSession, requirePlatformAdmin, async (_req, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!(await isChallengePracticeEnabled())) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const policies = await prisma.competitionScoringPolicy.findMany({ orderBy: [{ name: 'asc' }, { version: 'desc' }], take: 100 });
   res.json({ policies });
 });
 
 router.post('/admin/scoring-policies', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!(await isChallengePracticeEnabled())) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const { name, policy } = req.body ?? {};
   if (typeof name !== 'string' || !name.trim() || name.length > 120 || !policy || typeof policy !== 'object' || Array.isArray(policy) || !Number.isInteger(policy.basePoints) || policy.basePoints < 0 || policy.basePoints > 100000) return res.status(400).json({ error: 'INVALID_SCORING_POLICY' });
   try { parseCompetitionScoringPolicy(JSON.stringify(policy)); } catch { return res.status(400).json({ error: 'INVALID_SCORING_POLICY' }); }
@@ -210,7 +219,7 @@ router.patch('/admin/achievements/:id/status', requireSession, requirePlatformAd
 });
 
 router.post('/admin/challenges', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!(await isChallengePracticeEnabled())) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const { categoryId, questionSetId, scoringPolicyId, title, description, ageRange, gradeLabel, questionCount, durationSeconds, attemptLimit, difficultyMix, completionXp = 0 } = req.body ?? {};
   const ageMatch = typeof ageRange === 'string' ? ageRange.trim().match(/^(\d{1,2})\s*[-–]\s*(\d{1,2})$/) : null;
   const minimumAge = ageMatch ? Number(ageMatch[1]) : 0;
@@ -357,8 +366,8 @@ router.post('/admin/questions/:id/review', requireSession, requirePlatformAdmin,
 });
 
 router.get('/admin/challenges', requireSession, requirePlatformAdmin, async (_req, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
-  const challenges = await prisma.competitionChallenge.findMany({ orderBy: { updatedAt: 'desc' }, take: 100, include: { category: true, _count: { select: { attempts: true } } } });
+  if (!(await isChallengePracticeEnabled())) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const challenges = await prisma.competitionChallenge.findMany({ orderBy: { updatedAt: 'desc' }, take: 100, include: { category: true, questionSet: { select: { gradeLabel: true, status: true } }, _count: { select: { attempts: true } } } });
   res.json({ challenges: challenges.map(({ xpPolicyJson, ...challenge }) => {
     let completionXp = 0;
     try { completionXp = parseCompetitionXpPolicy(xpPolicyJson).completionXp; } catch { /* Keep malformed legacy policy from blocking challenge administration. */ }
@@ -367,7 +376,7 @@ router.get('/admin/challenges', requireSession, requirePlatformAdmin, async (_re
 });
 
 router.patch('/admin/challenges/:id/status', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!(await isChallengePracticeEnabled())) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const status = req.body?.status;
   if (!['DRAFT', 'SCHEDULED', 'ACTIVE', 'PAUSED', 'COMPLETED', 'ARCHIVED'].includes(status)) return res.status(400).json({ error: 'INVALID_CHALLENGE_STATUS' });
   if (status === 'ACTIVE') {
@@ -382,6 +391,94 @@ router.patch('/admin/challenges/:id/status', requireSession, requirePlatformAdmi
   } catch (error) {
     console.error('[competition] challenge status update failed', error);
     res.status(404).json({ error: 'CHALLENGE_NOT_FOUND' });
+  }
+});
+
+router.get('/admin/exam-practices', requireSession, requirePlatformAdmin, async (_req, res) => {
+  if (!(await resolveCompetitionFeature(prisma, 'competition.examPractice.enabled')) || !(await resolveCompetitionFeature(prisma, 'competition.questionBank.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const examPractices = await prisma.competitionExamPractice.findMany({
+    orderBy: [{ examCode: 'asc' }, { countryCode: 'asc' }, { gradeLabel: 'asc' }, { subjectCategory: { name: 'asc' } }],
+    take: 500,
+    include: { subjectCategory: { select: { id: true, name: true, code: true } }, challenge: { select: { id: true, title: true, status: true, questionCount: true, durationSeconds: true, attemptLimit: true, questionSet: { select: { id: true, name: true, gradeLabel: true, _count: { select: { questions: true } } } } } } },
+  });
+  res.json({ examPractices });
+});
+
+router.post('/admin/exam-practices', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
+  if (!(await resolveCompetitionFeature(prisma, 'competition.examPractice.enabled')) || !(await resolveCompetitionFeature(prisma, 'competition.questionBank.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const { challengeId, examCode, countryCode, gradeLabel, format = 'PRACTICE', syllabusVersion } = req.body ?? {};
+  const supportedExamCodes = ['WAEC', 'BECE', 'JUNIOR_WAEC'];
+  if (typeof challengeId !== 'string' || typeof examCode !== 'string' || !supportedExamCodes.includes(examCode) || typeof countryCode !== 'string' || !/^[A-Za-z]{2}$/.test(countryCode) || typeof gradeLabel !== 'string' || !gradeLabel.trim() || gradeLabel.trim().length > 80 || !['PRACTICE', 'MOCK_EXAM'].includes(format) || syllabusVersion !== undefined && (typeof syllabusVersion !== 'string' || syllabusVersion.length > 80)) return res.status(400).json({ error: 'INVALID_EXAM_PRACTICE' });
+  const normalizedCountryCode = countryCode.trim().toUpperCase();
+  if (!getCompetitionExamPracticeGrades(normalizedCountryCode, examCode).length || !normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, gradeLabel)) return res.status(400).json({ error: 'INVALID_EXAM_PRACTICE_GRADE' });
+  const challenge = await prisma.competitionChallenge.findUnique({
+    where: { id: challengeId },
+    select: {
+      id: true,
+      status: true,
+      gradeLabel: true,
+      questionCount: true,
+      categoryId: true,
+      questionSet: { select: { id: true, status: true, categoryId: true, gradeLabel: true, _count: { select: { questions: true } } } },
+    },
+  });
+  const challengeGrade = challenge?.gradeLabel?.split('·').at(-1)?.trim();
+  const normalizedGrade = normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, gradeLabel);
+  if (!challenge || challenge.status !== 'ACTIVE' || challenge.questionSet.status !== 'APPROVED' || challenge.questionSet.categoryId !== challenge.categoryId || !normalizedGrade || normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, challengeGrade) !== normalizedGrade || normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, challenge.questionSet.gradeLabel) !== normalizedGrade || challenge.questionSet._count.questions < challenge.questionCount) return res.status(400).json({ error: 'EXAM_PRACTICE_CHALLENGE_MISMATCH' });
+  try {
+    const examPractice = await prisma.competitionExamPractice.create({
+      data: { challengeId, examCode, countryCode: normalizedCountryCode, gradeLabel: normalizedGrade, subjectCategoryId: challenge.categoryId, format, syllabusVersion: typeof syllabusVersion === 'string' && syllabusVersion.trim() ? syllabusVersion.trim() : undefined, isActive: true, createdByUserId: req.competitionUser?.id },
+      include: { subjectCategory: { select: { id: true, name: true, code: true } }, challenge: { select: { id: true, title: true, status: true, questionCount: true, durationSeconds: true, attemptLimit: true, questionSet: { select: { id: true, name: true, gradeLabel: true, status: true, _count: { select: { questions: true } } } } } } },
+    });
+    await prisma.competitionAuditLog.create({ data: { actorUserId: req.competitionUser?.id, action: 'EXAM_PRACTICE_CONFIGURED', entityType: 'CompetitionExamPractice', entityId: examPractice.id, afterJson: JSON.stringify({ examCode, countryCode: normalizedCountryCode, gradeLabel: normalizedGrade, format, syllabusVersion }) } });
+    res.status(201).json({ examPractice });
+  } catch (error) {
+    if (isPrismaUniqueError(error)) return res.status(409).json({ error: 'EXAM_PRACTICE_ALREADY_CONFIGURED' });
+    console.error('[competition] exam practice configuration failed', error);
+    res.status(500).json({ error: 'EXAM_PRACTICE_CONFIGURE_FAILED' });
+  }
+});
+
+router.patch('/admin/exam-practices/:id/status', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
+  if (!(await resolveCompetitionFeature(prisma, 'competition.examPractice.enabled')) || !(await resolveCompetitionFeature(prisma, 'competition.questionBank.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (typeof req.body?.isActive !== 'boolean') return res.status(400).json({ error: 'INVALID_EXAM_PRACTICE_STATUS' });
+  try {
+    const currentPractice = await prisma.competitionExamPractice.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        examCode: true,
+        countryCode: true,
+        gradeLabel: true,
+        challenge: {
+          select: {
+            status: true,
+            gradeLabel: true,
+            questionCount: true,
+            questionSet: {
+              select: {
+                status: true,
+                gradeLabel: true,
+                _count: { select: { questions: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!currentPractice) return res.status(404).json({ error: 'EXAM_PRACTICE_NOT_FOUND' });
+    const challengeGrade = currentPractice.challenge.gradeLabel?.split('·').at(-1)?.trim();
+    const canonicalGrade = normalizeCompetitionExamPracticeGrade(currentPractice.countryCode, currentPractice.examCode, currentPractice.gradeLabel);
+    const validGrade = canonicalGrade && normalizeCompetitionExamPracticeGrade(currentPractice.countryCode, currentPractice.examCode, challengeGrade) === canonicalGrade && normalizeCompetitionExamPracticeGrade(currentPractice.countryCode, currentPractice.examCode, currentPractice.challenge.questionSet.gradeLabel) === canonicalGrade;
+    if (req.body.isActive && (currentPractice.challenge.status !== 'ACTIVE' || currentPractice.challenge.questionSet.status !== 'APPROVED' || !validGrade || currentPractice.challenge.questionSet._count.questions < currentPractice.challenge.questionCount)) {
+      return res.status(409).json({ error: 'EXAM_PRACTICE_CONTENT_UNAVAILABLE' });
+    }
+    const examPractice = await prisma.competitionExamPractice.update({ where: { id: req.params.id }, data: { isActive: req.body.isActive }, include: { subjectCategory: { select: { id: true, name: true, code: true } }, challenge: { select: { id: true, title: true, status: true, questionCount: true, durationSeconds: true, attemptLimit: true, questionSet: { select: { id: true, name: true, gradeLabel: true, status: true, _count: { select: { questions: true } } } } } } } });
+    await prisma.competitionAuditLog.create({ data: { actorUserId: req.competitionUser?.id, action: req.body.isActive ? 'EXAM_PRACTICE_ACTIVATED' : 'EXAM_PRACTICE_DEACTIVATED', entityType: 'CompetitionExamPractice', entityId: examPractice.id, afterJson: JSON.stringify({ isActive: examPractice.isActive }) } });
+    res.json({ examPractice });
+  } catch (error) {
+    console.error('[competition] exam practice status update failed', error);
+    res.status(404).json({ error: 'EXAM_PRACTICE_NOT_FOUND' });
   }
 });
 
@@ -449,8 +546,40 @@ router.get('/school/tournaments', requireSession, async (req: CompetitionRequest
   const schoolId = schoolAdmin?.schoolId ?? identity!.schoolId;
   const pupilSchool = nationalEnabled ? await prisma.school.findUnique({ where: { id: schoolId }, select: { country: true } }) : null;
   const now = new Date();
-  const tournaments = await prisma.competitionTournament.findMany({ where: { scope: { in: nationalEnabled ? ['SCHOOL', 'CLASS', 'COUNTRY'] : ['SCHOOL', 'CLASS'] }, status: { in: ['UPCOMING', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'LIVE'] }, OR: [{ registrationOpensAt: null }, { registrationOpensAt: { lte: now } }], AND: [{ OR: [{ schoolId: null }, { schoolId }] }, ...(nationalEnabled && pupilSchool ? [{ OR: [{ scope: { not: 'COUNTRY' as const } }, { countryCode: pupilSchool.country.toUpperCase() }] }] : [])] }, select: { id: true, title: true, description: true, rules: true, scope: true, countryCode: true, status: true, registrationOpensAt: true, registrationClosesAt: true, startsAt: true, endsAt: true, participantLimit: true, _count: { select: { participants: true } }, schools: { where: { schoolId }, select: { id: true, status: true } }, participants: { where: { pupilId: identity?.pupilId ?? '' }, select: { id: true, status: true, visibilityApproved: true } } }, orderBy: { startsAt: 'asc' }, take: 50 });
-  res.json({ tournaments: tournaments.map(({ schools, participants, ...tournament }) => ({ ...tournament, schoolRegistration: schools[0] ? { registered: true, status: schools[0].status } : { registered: false, status: null }, ownRegistration: Array.isArray(participants) && participants[0] ? { registered: true, status: participants[0].status, visibilityApproved: participants[0].visibilityApproved } : { registered: false, status: null, visibilityApproved: false } })) });
+  const tournaments = await prisma.competitionTournament.findMany({
+    where: {
+      scope: { in: nationalEnabled ? ['SCHOOL', 'CLASS', 'COUNTRY'] : ['SCHOOL', 'CLASS'] },
+      status: { in: ['UPCOMING', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'LIVE'] },
+      OR: [{ registrationOpensAt: null }, { registrationOpensAt: { lte: now } }],
+      AND: [
+        { OR: [{ schoolId: null }, { schoolId }] },
+        ...(nationalEnabled && pupilSchool ? [{ OR: [{ scope: { not: 'COUNTRY' as const } }, { countryCode: pupilSchool.country.toUpperCase() }] }] : []),
+      ],
+    },
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      rules: true,
+      scope: true,
+      countryCode: true,
+      status: true,
+      registrationOpensAt: true,
+      registrationClosesAt: true,
+      startsAt: true,
+      endsAt: true,
+      participantLimit: true,
+      _count: { select: { participants: true } },
+      schools: { where: { schoolId }, select: { id: true, status: true } },
+      participants: {
+        where: { pupilId: identity?.pupilId ?? '' },
+        select: { id: true, status: true, visibilityApproved: true, nominatedAt: true, guardianConsentStatus: true },
+      },
+    },
+    orderBy: { startsAt: 'asc' },
+    take: 50,
+  });
+  res.json({ tournaments: tournaments.map(({ schools, participants, ...tournament }) => ({ ...tournament, schoolRegistration: schools[0] ? { registered: true, status: schools[0].status } : { registered: false, status: null }, ownRegistration: Array.isArray(participants) && participants[0] ? { registered: true, status: participants[0].status, visibilityApproved: participants[0].visibilityApproved, nominated: Boolean(participants[0].nominatedAt), guardianConsentStatus: participants[0].guardianConsentStatus } : { registered: false, status: null, visibilityApproved: false, nominated: false, guardianConsentStatus: null } })) });
 });
 
 router.post('/school/tournaments/:tournamentId/register-school', requireSession, requireSchoolStaff, async (req: CompetitionRequest, res) => {
@@ -466,8 +595,88 @@ router.post('/school/tournaments/:tournamentId/register-school', requireSession,
   res.status(201).json({ registration });
 });
 
+router.get('/school/tournaments/:tournamentId/roster', requireSession, requireSchoolStaff, async (req: CompetitionRequest, res) => {
+  if (req.competitionUser?.role !== 'SCHOOL_ADMIN' || !req.competitionUser.schoolId) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+  if (!(await resolveCompetitionFeature(prisma, 'competition.schoolTournament.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const schoolId = req.competitionUser.schoolId;
+  const tournament = await prisma.competitionTournament.findFirst({
+    where: { id: req.params.tournamentId, status: 'REGISTRATION_OPEN', AND: [{ OR: [{ schoolId: null }, { schoolId }] }] },
+    select: { id: true, registrationOpensAt: true, registrationClosesAt: true, participantLimit: true, _count: { select: { participants: true } }, schools: { where: { schoolId, status: 'APPROVED' }, select: { id: true } } },
+  });
+  const now = new Date();
+  if (!tournament || tournament.registrationOpensAt && tournament.registrationOpensAt > now || tournament.registrationClosesAt && tournament.registrationClosesAt <= now) return res.status(409).json({ error: 'TOURNAMENT_REGISTRATION_CLOSED' });
+  if (!tournament.schools.length) return res.status(403).json({ error: 'SCHOOL_REGISTRATION_APPROVAL_REQUIRED' });
+  const [pupils, participants] = await Promise.all([
+    prisma.pupil.findMany({
+      where: { schoolId, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }], guardians: { some: { guardian: { schoolId } } } },
+      select: { id: true, firstName: true, lastName: true, admissionNo: true, class: { select: { name: true } } },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      take: 1000,
+    }),
+    prisma.competitionTournamentParticipant.findMany({ where: { tournamentId: tournament.id, schoolId }, select: { pupilId: true, status: true, guardianConsentStatus: true, nominatedAt: true } }),
+  ]);
+  const participantByPupil = new Map(participants.map((participant) => [participant.pupilId, participant]));
+  res.json({
+    tournament: { id: tournament.id, participantLimit: tournament.participantLimit, participants: tournament._count.participants },
+    pupils: pupils.map((pupil) => ({ ...pupil, nomination: participantByPupil.get(pupil.id) ?? null })),
+  });
+});
+
+router.post('/school/tournaments/:tournamentId/nominations', requireSession, requireSchoolStaff, async (req: CompetitionRequest, res) => {
+  if (req.competitionUser?.role !== 'SCHOOL_ADMIN' || !req.competitionUser.schoolId) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+  if (!(await resolveCompetitionFeature(prisma, 'competition.schoolTournament.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const requestedPupilIds: unknown[] = Array.isArray(req.body?.pupilIds) ? req.body.pupilIds : [];
+  const pupilIds = Array.from(new Set<string>(requestedPupilIds.filter((id): id is string => typeof id === 'string' && id.length > 0)));
+  if (!pupilIds.length || pupilIds.length > 500) return res.status(400).json({ error: 'PUPILS_REQUIRED' });
+  const schoolId = req.competitionUser.schoolId;
+  const tournament = await prisma.competitionTournament.findFirst({
+    where: { id: req.params.tournamentId, status: 'REGISTRATION_OPEN', AND: [{ OR: [{ schoolId: null }, { schoolId }] }] },
+    select: { id: true, registrationOpensAt: true, registrationClosesAt: true, participantLimit: true, _count: { select: { participants: true } }, schools: { where: { schoolId, status: 'APPROVED' }, select: { id: true } } },
+  });
+  const now = new Date();
+  if (!tournament || tournament.registrationOpensAt && tournament.registrationOpensAt > now || tournament.registrationClosesAt && tournament.registrationClosesAt <= now) return res.status(409).json({ error: 'TOURNAMENT_REGISTRATION_CLOSED' });
+  if (!tournament.schools.length) return res.status(403).json({ error: 'SCHOOL_REGISTRATION_APPROVAL_REQUIRED' });
+  const eligiblePupils = await prisma.pupil.findMany({
+    where: { id: { in: pupilIds }, schoolId, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }], guardians: { some: { guardian: { schoolId } } } },
+    select: { id: true, classId: true, admissionNo: true, guardians: { select: { guardianId: true } } },
+  });
+  if (eligiblePupils.length !== pupilIds.length) return res.status(400).json({ error: 'PUPILS_NOT_ELIGIBLE' });
+  try {
+    const result = await prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT id FROM CompetitionTournament WHERE id = ${tournament.id} FOR UPDATE`;
+      const existing = await transaction.competitionTournamentParticipant.findMany({ where: { tournamentId: tournament.id, pupilId: { in: pupilIds } }, select: { id: true, pupilId: true, status: true, guardianConsentStatus: true } });
+      const existingIds = new Set(existing.map(({ pupilId }) => pupilId));
+      const newPupils = eligiblePupils.filter((pupil) => !existingIds.has(pupil.id));
+      const currentCount = await transaction.competitionTournamentParticipant.count({ where: { tournamentId: tournament.id, status: { notIn: ['WITHDRAWN', 'DISQUALIFIED'] } } });
+      if (tournament.participantLimit !== null && currentCount + newPupils.length > tournament.participantLimit) throw new Error('TOURNAMENT_FULL');
+      if (newPupils.length) {
+        await transaction.competitionTournamentParticipant.createMany({ data: newPupils.map((pupil) => ({
+          tournamentId: tournament.id,
+          tournamentSchoolId: tournament.schools[0]!.id,
+          schoolId,
+          pupilId: pupil.id,
+          classId: pupil.classId,
+          status: 'INVITED' as const,
+          displayNameSnapshot: `Student ${pupil.id.slice(-4)}`,
+          visibilityApproved: false,
+          nominatedAt: now,
+          nominatedByUserId: req.competitionUser!.id,
+        })) });
+      }
+      return { invited: newPupils.length, alreadyListed: existing.length };
+    });
+    await prisma.competitionAuditLog.create({ data: { schoolId, actorUserId: req.competitionUser.id, action: 'TOURNAMENT_PUPILS_NOMINATED', entityType: 'CompetitionTournament', entityId: tournament.id, afterJson: JSON.stringify(result) } });
+    res.status(201).json(result);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'TOURNAMENT_FULL') return res.status(409).json({ error: 'TOURNAMENT_FULL' });
+    console.error('[competition] tournament nomination failed', error);
+    res.status(500).json({ error: 'TOURNAMENT_NOMINATION_FAILED' });
+  }
+});
+
 router.post('/school/tournaments/:tournamentId/register', requireSession, async (req: CompetitionRequest, res) => {
   if (!(await resolveCompetitionFeature(prisma, 'competition.schoolTournament.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!req.competitionGuardian) return res.status(403).json({ error: 'GUARDIAN_SESSION_REQUIRED' });
   const identity = await resolveLearnerIdentity(req, res);
   if (!identity) return;
   const nationalEnabled = await resolveCompetitionFeature(prisma, 'competition.national.enabled');
@@ -478,17 +687,36 @@ router.post('/school/tournaments/:tournamentId/register', requireSession, async 
   if (!tournament.schools.length) return res.status(403).json({ error: 'SCHOOL_REGISTRATION_APPROVAL_REQUIRED' });
   const participant = await prisma.$transaction(async (transaction) => {
     await transaction.$queryRaw`SELECT id FROM CompetitionTournament WHERE id = ${tournament.id} FOR UPDATE`;
-    const existing = await transaction.competitionTournamentParticipant.findUnique({ where: { tournamentId_pupilId: { tournamentId: tournament.id, pupilId: identity.pupilId } }, select: { id: true, status: true, registeredAt: true } });
-    if (existing) return existing;
+    const existing = await transaction.competitionTournamentParticipant.findUnique({ where: { tournamentId_pupilId: { tournamentId: tournament.id, pupilId: identity.pupilId } }, select: { id: true, status: true, registeredAt: true, nominatedAt: true, guardianConsentStatus: true } });
+    if (existing?.status === 'INVITED' && existing.nominatedAt && !existing.guardianConsentStatus) {
+      return transaction.competitionTournamentParticipant.update({ where: { id: existing.id }, data: { status: 'PENDING', guardianConsentStatus: 'ACCEPTED', guardianConsentAt: new Date(), guardianConsentGuardianId: req.competitionGuardian!.id }, select: { id: true, status: true, registeredAt: true } });
+    }
+    if (existing?.guardianConsentStatus === 'DECLINED' || existing?.status === 'WITHDRAWN') throw new Error('TOURNAMENT_PARTICIPATION_DECLINED');
+    if (existing) return { id: existing.id, status: existing.status, registeredAt: existing.registeredAt };
     const count = await transaction.competitionTournamentParticipant.count({ where: { tournamentId: tournament.id, status: { notIn: ['WITHDRAWN', 'DISQUALIFIED'] } } });
     if (tournament.participantLimit !== null && count >= tournament.participantLimit) throw new Error('TOURNAMENT_FULL');
-    return transaction.competitionTournamentParticipant.create({ data: { tournamentId: tournament.id, schoolId: identity.schoolId, pupilId: identity.pupilId, classId: identity.classId, status: 'PENDING', displayNameSnapshot: `Student ${identity.pupilId.slice(-4)}`, visibilityApproved: false }, select: { id: true, status: true, registeredAt: true } });
+    return transaction.competitionTournamentParticipant.create({ data: { tournamentId: tournament.id, schoolId: identity.schoolId, pupilId: identity.pupilId, classId: identity.classId, status: 'PENDING', displayNameSnapshot: `Student ${identity.pupilId.slice(-4)}`, visibilityApproved: false, guardianConsentStatus: 'ACCEPTED', guardianConsentAt: new Date(), guardianConsentGuardianId: req.competitionGuardian!.id }, select: { id: true, status: true, registeredAt: true } });
   }).catch((registerError: unknown) => {
     if (registerError instanceof Error && registerError.message === 'TOURNAMENT_FULL') return null;
+    if (registerError instanceof Error && registerError.message === 'TOURNAMENT_PARTICIPATION_DECLINED') return 'DECLINED' as const;
     throw registerError;
   });
+  if (participant === 'DECLINED') return res.status(409).json({ error: 'TOURNAMENT_PARTICIPATION_DECLINED' });
   if (!participant) return res.status(409).json({ error: 'TOURNAMENT_FULL' });
   res.status(201).json({ participant });
+});
+
+router.post('/school/tournaments/:tournamentId/decline-invitation', requireSession, async (req: CompetitionRequest, res) => {
+  if (!(await resolveCompetitionFeature(prisma, 'competition.schoolTournament.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!req.competitionGuardian) return res.status(403).json({ error: 'GUARDIAN_SESSION_REQUIRED' });
+  const identity = await resolveLearnerIdentity(req, res);
+  if (!identity) return;
+  const participant = await prisma.competitionTournamentParticipant.findFirst({ where: { tournamentId: req.params.tournamentId, pupilId: identity.pupilId, schoolId: identity.schoolId, status: 'INVITED', nominatedAt: { not: null }, guardianConsentStatus: null }, select: { id: true } });
+  if (!participant) return res.status(404).json({ error: 'TOURNAMENT_INVITATION_NOT_FOUND' });
+  const updated = await prisma.competitionTournamentParticipant.updateMany({ where: { id: participant.id, status: 'INVITED', guardianConsentStatus: null }, data: { status: 'WITHDRAWN', guardianConsentStatus: 'DECLINED', guardianConsentAt: new Date(), guardianConsentGuardianId: req.competitionGuardian.id } });
+  if (updated.count !== 1) return res.status(409).json({ error: 'TOURNAMENT_INVITATION_ALREADY_DECIDED' });
+  await prisma.competitionAuditLog.create({ data: { schoolId: identity.schoolId, action: 'TOURNAMENT_GUARDIAN_DECLINED', entityType: 'CompetitionTournamentParticipant', entityId: participant.id, afterJson: JSON.stringify({ guardianId: req.competitionGuardian.id, decision: 'DECLINED' }) } });
+  res.json({ success: true, status: 'WITHDRAWN' });
 });
 
 router.patch('/admin/tournaments/:tournamentId/schools/:schoolRegistrationId', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
@@ -510,8 +738,9 @@ router.patch('/admin/tournaments/:tournamentId/participants/:participantId', req
   const visibilityApproved = req.body?.visibilityApproved;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
   if (!['APPROVED', 'WITHDRAWN', 'DISQUALIFIED'].includes(status) || typeof visibilityApproved !== 'boolean' || !reason) return res.status(400).json({ error: 'PARTICIPANT_DECISION_REQUIRED' });
-  const participant = await prisma.competitionTournamentParticipant.findFirst({ where: { id: req.params.participantId, tournamentId: req.params.tournamentId, status: 'PENDING' }, select: { id: true, schoolId: true } });
+  const participant = await prisma.competitionTournamentParticipant.findFirst({ where: { id: req.params.participantId, tournamentId: req.params.tournamentId, status: 'PENDING' }, select: { id: true, schoolId: true, guardianConsentStatus: true } });
   if (!participant) return res.status(404).json({ error: 'PARTICIPANT_NOT_FOUND' });
+  if (status === 'APPROVED' && participant.guardianConsentStatus !== 'ACCEPTED') return res.status(409).json({ error: 'GUARDIAN_OPT_IN_REQUIRED' });
   if (status === 'APPROVED') {
     const schoolRegistration = await prisma.competitionTournamentSchool.findFirst({ where: { tournamentId: req.params.tournamentId, schoolId: participant.schoolId, status: 'APPROVED' }, select: { id: true } });
     if (!schoolRegistration) return res.status(409).json({ error: 'SCHOOL_REGISTRATION_APPROVAL_REQUIRED' });
@@ -719,15 +948,15 @@ router.get('/school/overview', requireSession, requireSchoolStaff, async (req: C
     const classIds = assignments.map((item) => item.classId);
     const [attempts, challenges] = await Promise.all([
       prisma.competitionChallengeAttempt.count({ where: { schoolId, classId: { in: classIds } } }),
-      prisma.competitionChallenge.count({ where: { schoolId, OR: [{ classId: { in: classIds } }, { classId: null }] } }),
+      prisma.competitionChallenge.count({ where: { status: 'ACTIVE', schoolId, OR: [{ classId: { in: classIds } }, { classId: null }] } }),
     ]);
     return res.json({ attempts, challenges, assignedClasses: classIds.length });
   }
   const [attempts, challenges, tournaments, participants] = await Promise.all([
     prisma.competitionChallengeAttempt.count({ where: { schoolId } }),
-    prisma.competitionChallenge.count({ where: { OR: [{ schoolId }, { schoolId: null }] } }),
+    prisma.competitionChallenge.count({ where: { status: 'ACTIVE', OR: [{ schoolId }, { schoolId: null }] } }),
     prisma.competitionTournamentSchool.count({ where: { schoolId } }),
-    prisma.competitionTournamentParticipant.count({ where: { schoolId } }),
+    prisma.competitionTournamentParticipant.count({ where: { schoolId, status: 'APPROVED' } }),
   ]);
   res.json({ attempts, challenges, tournaments, participants });
 });
@@ -821,29 +1050,54 @@ router.delete('/school/student-links/:linkId', requireSession, async (req: Compe
 });
 
 router.get('/student/challenges', requireSession, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const [dailyChallengeEnabled, examPracticeEnabled] = await Promise.all([
+    resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'),
+    resolveCompetitionFeature(prisma, 'competition.examPractice.enabled'),
+  ]);
+  if (!dailyChallengeEnabled && !examPracticeEnabled) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const identity = await resolveLearnerIdentity(req, res);
   if (!identity) return;
   const now = new Date();
+  const practiceTypeFilters = [
+    ...(dailyChallengeEnabled ? [{ examPractice: null }] : []),
+    ...(examPracticeEnabled ? [{ examPractice: { isActive: true } }] : []),
+  ];
   const candidateChallenges = await prisma.competitionChallenge.findMany({
     where: {
       status: 'ACTIVE',
-      AND: [{ OR: [{ schoolId: null }, { schoolId: identity.schoolId }] }, { OR: [{ classId: null }, { classId: identity.classId }] }, { OR: [{ opensAt: null }, { opensAt: { lte: now } }] }, { OR: [{ closesAt: null }, { closesAt: { gte: now } }] }],
+      AND: [{ OR: [{ schoolId: null }, { schoolId: identity.schoolId }] }, { OR: [{ classId: null }, { classId: identity.classId }] }, { OR: [{ opensAt: null }, { opensAt: { lte: now } }] }, { OR: [{ closesAt: null }, { closesAt: { gte: now } }] }, { OR: practiceTypeFilters }],
     },
-    select: { id: true, title: true, description: true, gradeLabel: true, questionCount: true, durationSeconds: true, opensAt: true, closesAt: true, attemptLimit: true },
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      status: true,
+      gradeLabel: true,
+      questionCount: true,
+      durationSeconds: true,
+      opensAt: true,
+      closesAt: true,
+      attemptLimit: true,
+      questionSet: { select: { status: true } },
+      examPractice: { select: { id: true, isActive: true, examCode: true, countryCode: true, gradeLabel: true, format: true, syllabusVersion: true, subjectCategory: { select: { name: true } } } },
+    },
     orderBy: { createdAt: 'desc' },
     take: 25,
   });
   const [pupil, classRecord] = await Promise.all([
-    prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { firstName: true, lastName: true, dateOfBirth: true } }),
+    prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { firstName: true, lastName: true, dateOfBirth: true, school: { select: { country: true } } } }),
     identity.classId ? prisma.class.findUnique({ where: { id: identity.classId }, select: { name: true } }) : null,
   ]);
-  const eligibleChallenges = candidateChallenges.filter((challenge) => matchesCompetitionAudience({
-    audienceLabel: challenge.gradeLabel,
-    className: classRecord?.name,
-    dateOfBirth: pupil?.dateOfBirth,
-    onDate: challenge.opensAt ?? now,
-  }));
+  const eligibleChallenges = candidateChallenges.filter((challenge) => challenge.examPractice
+    ? examPracticeEnabled && isEligibleForCompetitionExamPractice({
+      practice: challenge.examPractice,
+      schoolCountry: pupil?.school.country,
+      className: classRecord?.name,
+      challengeStatus: challenge.status,
+      questionSetStatus: challenge.questionSet.status,
+      isActive: challenge.examPractice?.isActive,
+    })
+    : dailyChallengeEnabled && matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: classRecord?.name, dateOfBirth: pupil?.dateOfBirth, onDate: challenge.opensAt ?? now }));
   const attempts = await prisma.competitionChallengeAttempt.findMany({
     where: { pupilId: identity.pupilId, challengeId: { in: eligibleChallenges.map((item) => item.id) } },
     select: { id: true, challengeId: true, status: true, score: true, submittedAt: true },
@@ -861,7 +1115,7 @@ router.get('/student/challenges', requireSession, async (req: CompetitionRequest
   res.json({
     identity: { pupilId: identity.pupilId, classId: identity.classId, firstName: pupil?.firstName ?? null, lastName: pupil?.lastName ?? null, className: classRecord?.name ?? null },
     capabilities: { leaderboardEnabled, studentVsStudentEnabled },
-    challenges: eligibleChallenges.map((challenge) => ({ ...challenge, attemptsUsed: attempts.filter((attempt) => attempt.challengeId === challenge.id && !['INVALIDATED', 'ABANDONED'].includes(attempt.status)).length })),
+    challenges: eligibleChallenges.map(({ examPractice, ...challenge }) => ({ ...challenge, examPractice: examPractice ? { examCode: examPractice.examCode, countryCode: examPractice.countryCode, gradeLabel: examPractice.gradeLabel, format: examPractice.format, syllabusVersion: examPractice.syllabusVersion, subjectName: examPractice.subjectCategory.name } : null, attemptsUsed: attempts.filter((attempt) => attempt.challengeId === challenge.id && !['INVALIDATED', 'ABANDONED'].includes(attempt.status)).length })),
     ineligibleChallengeCount: candidateChallenges.length - eligibleChallenges.length,
     practiceSummary: { completedChallenges: practiceSummary._count._all, latestCompletionAt: practiceSummary._max.submittedAt },
     attempts,
@@ -1127,7 +1381,7 @@ router.post('/student/matches/:matchId/attempt', requireSession, async (req: Com
 });
 
 router.post('/student/challenges/:challengeId/attempts', requireSession, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  if (!(await isChallengePracticeEnabled())) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const identity = await resolveLearnerIdentity(req, res);
   if (!identity) return;
   const idempotencyKey = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : '';
@@ -1135,6 +1389,7 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
   const now = new Date();
   const challengeQuestionInclude = {
     scoringPolicy: true,
+    examPractice: true,
     questionSet: {
       include: {
         questions: {
@@ -1156,12 +1411,16 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
     where: { id: req.params.challengeId, status: 'ACTIVE', AND: [{ OR: [{ schoolId: null }, { schoolId: identity.schoolId }] }, { OR: [{ classId: null }, { classId: identity.classId }] }, { OR: [{ opensAt: null }, { opensAt: { lte: now } }] }, { OR: [{ closesAt: null }, { closesAt: { gte: now } }] }] },
     include: challengeQuestionInclude,
   });
-  if (!challenge || challenge.questionSet.questions.length < challenge.questionCount) return res.status(404).json({ error: 'CHALLENGE_UNAVAILABLE' });
+  if (!challenge || challenge.questionSet.status !== 'APPROVED' || challenge.questionSet.questions.length < challenge.questionCount) return res.status(404).json({ error: 'CHALLENGE_UNAVAILABLE' });
+  if (!(await resolveCompetitionFeature(prisma, challenge.examPractice ? 'competition.examPractice.enabled' : 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const [pupilAudience, learnerClass] = await Promise.all([
-    prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { dateOfBirth: true } }),
+    prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { dateOfBirth: true, school: { select: { country: true } } } }),
     identity.classId ? prisma.class.findUnique({ where: { id: identity.classId }, select: { name: true } }) : null,
   ]);
-  if (!matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: learnerClass?.name, dateOfBirth: pupilAudience?.dateOfBirth, onDate: challenge.opensAt ?? now })) {
+  const audienceEligible = challenge.examPractice
+    ? isEligibleForCompetitionExamPractice({ practice: challenge.examPractice, schoolCountry: pupilAudience?.school.country, className: learnerClass?.name, challengeStatus: challenge.status, questionSetStatus: challenge.questionSet.status, isActive: challenge.examPractice.isActive })
+    : matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: learnerClass?.name, dateOfBirth: pupilAudience?.dateOfBirth, onDate: challenge.opensAt ?? now });
+  if (!audienceEligible) {
     return res.status(403).json({ error: 'CHALLENGE_AUDIENCE_MISMATCH' });
   }
   const attemptQuestionInclude = {
@@ -1224,7 +1483,6 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
 });
 
 router.post('/student/attempts/:attemptId/answers/:questionId', requireSession, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const identity = await resolveLearnerIdentity(req, res);
   if (!identity) return;
   const selectedOptionId = req.body?.optionId;
@@ -1262,7 +1520,6 @@ router.post('/student/attempts/:attemptId/answers/:questionId', requireSession, 
 });
 
 router.post('/student/attempts/:attemptId/submit', requireSession, async (req: CompetitionRequest, res) => {
-  if (!(await resolveCompetitionFeature(prisma, 'competition.dailyChallenge.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const identity = await resolveLearnerIdentity(req, res);
   if (!identity) return;
   const gamificationEnabled = await resolveCompetitionFeature(prisma, 'competition.gamification.enabled');

@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 export const competitionFeatureKeys = [
   'competition.enabled',
   'competition.dailyChallenge.enabled',
+  'competition.examPractice.enabled',
   'competition.questionBank.enabled',
   'competition.leaderboard.enabled',
   'competition.gamification.enabled',
