@@ -6958,7 +6958,7 @@ router.post('/teachers', async (req: Request, res: Response) => {
           name,
           school.name,
           password,
-          'https://www.schoolbase.live/login',
+          'https://www.schoolbase.live/login?next=%2Fteacher',
           school.logoUrl ?? undefined,
         );
         console.log(`✅ Teacher welcome email sent to ${email}`);
