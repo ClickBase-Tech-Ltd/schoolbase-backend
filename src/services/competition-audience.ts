@@ -1,22 +1,30 @@
 export interface CompetitionAudience {
-  minimumAge: number;
-  maximumAge: number;
   classLabel: string;
 }
 
 function normalizeClassLabel(value: string): string {
-  return value.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+  const normalized = value.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+  const numberedGrade = normalized.match(/^(basic|primary|pry|p)([1-6])$/);
+  if (numberedGrade) return `primary${numberedGrade[2]}`;
+  const basicSecondaryGrade = normalized.match(/^basic([7-9])$/);
+  if (basicSecondaryGrade) return `jss${Number(basicSecondaryGrade[1]) - 6}`;
+
+  const juniorSecondary = normalized.match(/^(jss|js|juniorsecondary|juniorsecondaryschool)([1-3])$/);
+  if (juniorSecondary) return `jss${juniorSecondary[2]}`;
+
+  const seniorSecondary = normalized.match(/^(ss|sss|seniorsecondary|seniorsecondaryschool)([1-3])$/);
+  if (seniorSecondary) return `ss${seniorSecondary[2]}`;
+
+  return normalized;
 }
 
 export function parseCompetitionAudience(label: string | null | undefined): CompetitionAudience | null {
   if (!label) return null;
-  const match = label.trim().match(/^Ages\s+(\d{1,2})-(\d{1,2})\s+·\s+(.+)$/i);
-  if (!match) return null;
-  const minimumAge = Number(match[1]);
-  const maximumAge = Number(match[2]);
-  const classLabel = match[3]?.trim() ?? '';
-  if (minimumAge < 2 || maximumAge > 25 || minimumAge > maximumAge || !classLabel) return null;
-  return { minimumAge, maximumAge, classLabel };
+  const value = label.trim();
+  const legacyMatch = value.match(/^Ages\s+\d{1,2}-\d{1,2}\s+·\s+(.+)$/i);
+  const classLabel = (legacyMatch?.[1] ?? value).trim();
+  if (!classLabel || /^ages\b/i.test(classLabel)) return null;
+  return { classLabel };
 }
 
 export function calculateAge(dateOfBirth: Date, onDate = new Date()): number {
@@ -30,13 +38,9 @@ export function calculateAge(dateOfBirth: Date, onDate = new Date()): number {
 export function matchesCompetitionAudience(input: {
   audienceLabel: string | null | undefined;
   className: string | null | undefined;
-  dateOfBirth: Date | null | undefined;
-  onDate?: Date;
 }): boolean {
   const audience = parseCompetitionAudience(input.audienceLabel);
-  if (!audience || !input.className || !input.dateOfBirth) return false;
+  if (!audience || !input.className) return false;
   const normalizedAudienceClass = normalizeClassLabel(audience.classLabel);
-  if (normalizedAudienceClass !== normalizeClassLabel(input.className)) return false;
-  const age = calculateAge(input.dateOfBirth, input.onDate);
-  return age >= audience.minimumAge && age <= audience.maximumAge;
+  return normalizedAudienceClass === normalizeClassLabel(input.className);
 }
