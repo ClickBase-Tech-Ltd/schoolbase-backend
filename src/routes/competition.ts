@@ -1135,7 +1135,7 @@ router.get('/student/challenges', requireSession, async (req: CompetitionRequest
     take: 25,
   });
   const [pupil, classRecord] = await Promise.all([
-    prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { firstName: true, lastName: true, school: { select: { country: true } } } }),
+    prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { firstName: true, lastName: true, photoUrl: true, school: { select: { country: true } } } }),
     identity.classId ? prisma.class.findUnique({ where: { id: identity.classId }, select: { name: true } }) : null,
   ]);
   const eligibleChallenges = candidateChallenges.filter((challenge) => challenge.examPractice
@@ -1163,7 +1163,7 @@ router.get('/student/challenges', requireSession, async (req: CompetitionRequest
     resolveCompetitionFeature(prisma, 'competition.studentVsStudent.enabled'),
   ]);
   res.json({
-    identity: { pupilId: identity.pupilId, classId: identity.classId, firstName: pupil?.firstName ?? null, lastName: pupil?.lastName ?? null, className: classRecord?.name ?? null },
+    identity: { pupilId: identity.pupilId, classId: identity.classId, firstName: pupil?.firstName ?? null, lastName: pupil?.lastName ?? null, photoUrl: pupil?.photoUrl ?? null, className: classRecord?.name ?? null },
     capabilities: { leaderboardEnabled, studentVsStudentEnabled },
     challenges: eligibleChallenges.map(({ examPractice, ...challenge }) => ({ ...challenge, examPractice: examPractice ? { examCode: examPractice.examCode, countryCode: examPractice.countryCode, gradeLabel: examPractice.gradeLabel, format: examPractice.format, syllabusVersion: examPractice.syllabusVersion, subjectName: examPractice.subjectCategory.name } : null, attemptsUsed: attempts.filter((attempt) => attempt.challengeId === challenge.id && !['INVALIDATED', 'ABANDONED'].includes(attempt.status)).length })),
     ineligibleChallengeCount: candidateChallenges.length - eligibleChallenges.length,
@@ -1219,8 +1219,8 @@ router.get('/student/matches', requireSession, async (req: CompetitionRequest, r
     where: { OR: [{ senderPupilId: identity.pupilId }, { recipientPupilId: identity.pupilId }] },
     include: {
       challenge: { select: { id: true, title: true } },
-      sender: { select: { id: true, firstName: true, lastName: true } },
-      recipient: { select: { id: true, firstName: true, lastName: true } },
+      sender: { select: { id: true, firstName: true, lastName: true, photoUrl: true } },
+      recipient: { select: { id: true, firstName: true, lastName: true, photoUrl: true } },
       senderAttempt: { select: { id: true, status: true, score: true, accuracyPercent: true, elapsedMs: true, questions: { select: { questionId: true } } } },
       recipientAttempt: { select: { id: true, status: true, score: true, accuracyPercent: true, elapsedMs: true, questions: { select: { questionId: true } } } },
     },
@@ -1234,6 +1234,7 @@ router.get('/student/matches', requireSession, async (req: CompetitionRequest, r
     status: match.status,
     isSender: match.senderPupilId === identity.pupilId,
     opponentName: match.senderPupilId === identity.pupilId ? mask(match.recipient.firstName, match.recipient.lastName) : mask(match.sender.firstName, match.sender.lastName),
+    opponentPhotoUrl: match.senderPupilId === identity.pupilId ? match.recipient.photoUrl : match.sender.photoUrl,
     expiresAt: match.expiresAt,
     createdAt: match.createdAt,
     acceptedAt: match.acceptedAt,
@@ -1261,7 +1262,7 @@ router.get('/student/challenges/:challengeId/peers', requireSession, async (req:
   ]);
   if (!sender || !matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: classRecord?.name })) return res.status(403).json({ error: 'CHALLENGE_AUDIENCE_MISMATCH' });
   const candidates = await prisma.pupil.findMany({
-    where: { schoolId: identity.schoolId, classId: identity.classId, id: { not: identity.pupilId }, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }], competitionAccount: { is: { status: 'ACTIVE', OR: [{ guardianId: { not: null } }, { userId: { not: null } }] } } },
+    where: { schoolId: identity.schoolId, classId: identity.classId, id: { not: identity.pupilId }, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }], guardians: { some: { guardian: { schoolId: identity.schoolId } } } },
     select: { id: true, firstName: true, lastName: true },
     orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
     take: 100,
@@ -1280,10 +1281,10 @@ router.post('/student/matches', requireSession, async (req: CompetitionRequest, 
   if (typeof recipientPupilId !== 'string' || typeof challengeId !== 'string' || recipientPupilId === identity.pupilId || !identity.classId) return res.status(400).json({ error: 'MATCH_PARTICIPANTS_REQUIRED' });
   const [sender, recipient, challenge] = await Promise.all([
     prisma.pupil.findFirst({ where: { id: identity.pupilId, schoolId: identity.schoolId, classId: identity.classId, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }] }, select: { id: true, dateOfBirth: true, class: { select: { name: true } } } }),
-    prisma.pupil.findFirst({ where: { id: recipientPupilId, schoolId: identity.schoolId, classId: identity.classId, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }] }, select: { id: true, dateOfBirth: true, class: { select: { name: true } }, competitionAccount: { select: { id: true, status: true, guardianId: true, userId: true } } } }),
+    prisma.pupil.findFirst({ where: { id: recipientPupilId, schoolId: identity.schoolId, classId: identity.classId, isActive: true, OR: [{ status: null }, { status: { not: 'INACTIVE' } }], guardians: { some: { guardian: { schoolId: identity.schoolId } } } }, select: { id: true, dateOfBirth: true, class: { select: { name: true } } } }),
     prisma.competitionChallenge.findFirst({ where: { id: challengeId, status: 'ACTIVE', AND: [{ OR: [{ schoolId: null }, { schoolId: identity.schoolId }] }, { OR: [{ classId: null }, { classId: identity.classId }] }, { OR: [{ opensAt: null }, { opensAt: { lte: new Date() } }] }, { OR: [{ closesAt: null }, { closesAt: { gte: new Date() } }] }] }, select: { id: true, gradeLabel: true, opensAt: true } }),
   ]);
-  if (!sender || !recipient || recipient.competitionAccount?.status !== 'ACTIVE' || (!recipient.competitionAccount.guardianId && !recipient.competitionAccount.userId)) return res.status(404).json({ error: 'MATCH_PARTICIPANT_UNAVAILABLE' });
+  if (!sender || !recipient) return res.status(404).json({ error: 'MATCH_PARTICIPANT_UNAVAILABLE' });
   const senderHasCompleted = await prisma.competitionChallengeAttempt.count({ where: { pupilId: identity.pupilId, challengeId, status: 'SUBMITTED' } });
   if (!senderHasCompleted) return res.status(403).json({ error: 'MATCH_SENDER_COMPLETION_REQUIRED' });
   if (!challenge || !matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: sender.class?.name }) || !matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: recipient.class?.name })) return res.status(409).json({ error: 'MATCH_CHALLENGE_UNAVAILABLE' });
