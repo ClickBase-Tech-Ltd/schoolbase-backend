@@ -1133,7 +1133,6 @@ router.get('/student/challenges', requireSession, async (req: CompetitionRequest
       examPractice: { select: { id: true, isActive: true, examCode: true, countryCode: true, gradeLabel: true, format: true, syllabusVersion: true, subjectCategory: { select: { name: true } } } },
     },
     orderBy: { createdAt: 'desc' },
-    take: 25,
   });
   const [pupil, classRecord] = await Promise.all([
     prisma.pupil.findUnique({ where: { id: identity.pupilId }, select: { firstName: true, lastName: true, photoUrl: true, school: { select: { country: true } } } }),
