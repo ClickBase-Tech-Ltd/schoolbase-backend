@@ -12,6 +12,7 @@ import { buildCompetitionLeaderboard, chooseCompetitionMatchWinner } from '../se
 import { canTransitionCompetitionTournament, parseCompetitionTournamentDate, type CompetitionTournamentStatus } from '../services/competition-tournaments.js';
 import { matchesCompetitionAudience } from '../services/competition-audience.js';
 import { getCompetitionExamPracticeGrades, isEligibleForCompetitionExamPractice, normalizeCompetitionExamPracticeGrade } from '../services/competition-exam-practice.js';
+import { canApproveCompetitionQuestionSet } from '../services/competition-question-set-review.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -292,6 +293,37 @@ router.post('/admin/question-sets', requireSession, requirePlatformAdmin, async 
   }
 });
 
+router.post('/admin/question-sets/:id/review', requireSession, requirePlatformAdmin, async (req: CompetitionRequest, res) => {
+  if (!(await resolveCompetitionFeature(prisma, 'competition.questionBank.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
+  const action = req.body?.action;
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.slice(0, 4000) : null;
+  if (!['APPROVE', 'RETURN_TO_DRAFT'].includes(action)) return res.status(400).json({ error: 'INVALID_QUESTION_SET_REVIEW_ACTION' });
+
+  const questionSet = await prisma.competitionQuestionSet.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, status: true, questions: { select: { status: true } } },
+  });
+  if (!questionSet) return res.status(404).json({ error: 'QUESTION_SET_NOT_FOUND' });
+  if (questionSet.status === 'ARCHIVED') return res.status(409).json({ error: 'QUESTION_SET_ARCHIVED' });
+  if (action === 'APPROVE' && !canApproveCompetitionQuestionSet(questionSet.questions.map((question) => question.status))) {
+    return res.status(409).json({ error: 'QUESTION_SET_REVIEW_INCOMPLETE' });
+  }
+
+  try {
+    const status = action === 'APPROVE' ? 'APPROVED' : 'DRAFT';
+    const updated = await prisma.competitionQuestionSet.update({
+      where: { id: questionSet.id },
+      data: { status, reviewedByUserId: req.competitionUser?.id, reviewedAt: new Date(), reviewNotes: notes },
+      select: { id: true, status: true, reviewedAt: true },
+    });
+    await prisma.competitionAuditLog.create({ data: { actorUserId: req.competitionUser?.id, action: `QUESTION_SET_${action}`, entityType: 'CompetitionQuestionSet', entityId: updated.id, reason: notes } });
+    res.json({ questionSet: updated });
+  } catch (error) {
+    console.error('[competition] question-set review failed', error);
+    res.status(500).json({ error: 'QUESTION_SET_REVIEW_FAILED' });
+  }
+});
+
 router.get('/admin/questions', requireSession, requirePlatformAdmin, async (req, res) => {
   if (!(await resolveCompetitionFeature(prisma, 'competition.questionBank.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const questionSetId = typeof req.query.questionSetId === 'string' ? req.query.questionSetId : undefined;
@@ -323,19 +355,26 @@ router.post('/admin/questions', requireSession, requirePlatformAdmin, async (req
   try {
     const questionSet = await prisma.competitionQuestionSet.findUnique({ where: { id: questionSetId }, select: { id: true, status: true } });
     if (!questionSet || questionSet.status === 'ARCHIVED') return res.status(400).json({ error: 'INVALID_QUESTION_SET' });
-    const question = await prisma.competitionQuestion.create({
-      data: {
-        questionSetId,
-        prompt: prompt.trim(),
-        type,
-        difficulty,
-        explanation: typeof explanation === 'string' ? explanation.slice(0, 12000) : undefined,
-        basePoints: Number.isInteger(basePoints) && basePoints >= 0 && basePoints <= 100000 ? basePoints : 100,
-        timeLimitSeconds: Number.isInteger(timeLimitSeconds) && timeLimitSeconds > 0 && timeLimitSeconds <= 3600 ? timeLimitSeconds : undefined,
-        createdByUserId: req.competitionUser?.id,
-        options: { create: options.map((option, sortOrder) => ({ content: option.content.trim().slice(0, 4000), isCorrect: option.isCorrect, sortOrder })) },
-      },
-      include: { options: { orderBy: { sortOrder: 'asc' } } },
+    const question = await prisma.$transaction(async (transaction) => {
+      const createdQuestion = await transaction.competitionQuestion.create({
+        data: {
+          questionSetId,
+          prompt: prompt.trim(),
+          type,
+          difficulty,
+          explanation: typeof explanation === 'string' ? explanation.slice(0, 12000) : undefined,
+          basePoints: Number.isInteger(basePoints) && basePoints >= 0 && basePoints <= 100000 ? basePoints : 100,
+          timeLimitSeconds: Number.isInteger(timeLimitSeconds) && timeLimitSeconds > 0 && timeLimitSeconds <= 3600 ? timeLimitSeconds : undefined,
+          createdByUserId: req.competitionUser?.id,
+          options: { create: options.map((option, sortOrder) => ({ content: option.content.trim().slice(0, 4000), isCorrect: option.isCorrect, sortOrder })) },
+        },
+        include: { options: { orderBy: { sortOrder: 'asc' } } },
+      });
+      await transaction.competitionQuestionSet.updateMany({
+        where: { id: questionSetId, status: { in: ['IN_REVIEW', 'APPROVED', 'REJECTED'] } },
+        data: { status: 'DRAFT', reviewedByUserId: null, reviewedAt: null, reviewNotes: null },
+      });
+      return createdQuestion;
     });
     await prisma.competitionAuditLog.create({ data: { actorUserId: req.competitionUser?.id, action: 'QUESTION_CREATED', entityType: 'CompetitionQuestion', entityId: question.id } });
     res.status(201).json({ question });
@@ -357,6 +396,12 @@ router.post('/admin/questions/:id/review', requireSession, requirePlatformAdmin,
       data: { status, reviewedByUserId: req.competitionUser?.id, reviewedAt: new Date(), reviewNotes: notes },
       select: { id: true, questionSetId: true, status: true, reviewedAt: true },
     });
+    if (status !== 'APPROVED') {
+      await prisma.competitionQuestionSet.updateMany({
+        where: { id: question.questionSetId, status: 'APPROVED' },
+        data: { status: 'DRAFT', reviewedByUserId: null, reviewedAt: null, reviewNotes: null },
+      });
+    }
     await prisma.competitionAuditLog.create({ data: { actorUserId: req.competitionUser?.id, action: `QUESTION_${action}`, entityType: 'CompetitionQuestion', entityId: question.id, reason: notes } });
     res.json({ question });
   } catch (error) {
@@ -382,6 +427,7 @@ router.patch('/admin/challenges/:id/status', requireSession, requirePlatformAdmi
   if (status === 'ACTIVE') {
     const challenge = await prisma.competitionChallenge.findUnique({ where: { id: req.params.id }, select: { gradeLabel: true, questionCount: true, questionSet: { include: { questions: { where: { status: 'APPROVED' }, select: { id: true } } } } } });
     if (!challenge?.gradeLabel || !/^Ages \d{1,2}-\d{1,2} · .+/.test(challenge.gradeLabel)) return res.status(409).json({ error: 'CHALLENGE_AUDIENCE_REQUIRED' });
+    if (challenge.questionSet.status !== 'APPROVED') return res.status(409).json({ error: 'QUESTION_SET_NOT_APPROVED' });
     if (!challenge || challenge.questionSet.questions.length < challenge.questionCount) return res.status(409).json({ error: 'APPROVED_QUESTION_COUNT_INSUFFICIENT' });
   }
   try {
@@ -1065,6 +1111,7 @@ router.get('/student/challenges', requireSession, async (req: CompetitionRequest
   const candidateChallenges = await prisma.competitionChallenge.findMany({
     where: {
       status: 'ACTIVE',
+      questionSet: { status: 'APPROVED' },
       AND: [{ OR: [{ schoolId: null }, { schoolId: identity.schoolId }] }, { OR: [{ classId: null }, { classId: identity.classId }] }, { OR: [{ opensAt: null }, { opensAt: { lte: now } }] }, { OR: [{ closesAt: null }, { closesAt: { gte: now } }] }, { OR: practiceTypeFilters }],
     },
     select: {
