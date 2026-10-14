@@ -26,6 +26,7 @@ import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
 import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
+import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -3593,13 +3594,19 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
       allocationRows.push({ invoiceItemId: item.id, amount: allocationAmount });
     }
 
-    if (invoice.items.length > 0) {
-      const allocatedTotal = allocationRows.reduce((sum, allocation) => sum + allocation.amount, 0);
-      if (allocatedTotal !== amountInCents) {
-        return res.status(400).json({
-          error: 'Payment allocations must add up exactly to the payment amount',
-        });
-      }
+    const allocatedTotal = allocationRows.reduce((sum, allocation) => sum + allocation.amount, 0);
+    const allocationValidation = validateInvoicePaymentAllocation({
+      paymentAmountMinor: amountInCents,
+      allocatedAmountMinor: allocatedTotal,
+      outstandingMinor: outstanding,
+    });
+    if (!allocationValidation.valid) {
+      const message = allocationValidation.error === 'PAYMENT_EXCEEDS_BALANCE'
+        ? `Payment amount cannot exceed outstanding balance of ${(outstanding / 100).toFixed(2)}`
+        : allocationValidation.error === 'ALLOCATIONS_EXCEED_PAYMENT'
+          ? 'Payment allocations cannot exceed the payment amount'
+          : 'Payment amount must be a valid amount greater than zero';
+      return res.status(400).json({ error: message });
     }
 
     const userId = await resolveUserId(req);
@@ -3646,9 +3653,11 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
       });
 
       if (accountingRecorderId) {
-        const accountingRows = allocationRows.length > 0
-          ? allocationRows
-          : [{ invoiceItemId: null, amount: amountInCents }];
+        const unallocatedAmount = allocationValidation.unallocatedAmountMinor;
+        const accountingRows = [
+          ...allocationRows,
+          ...(unallocatedAmount > 0 ? [{ invoiceItemId: null, amount: unallocatedAmount }] : []),
+        ];
 
         for (const [index, allocation] of accountingRows.entries()) {
           const invoiceItem = allocation.invoiceItemId

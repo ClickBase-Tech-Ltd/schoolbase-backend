@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "smoke:api": "node ../scripts/smoke-api.mjs",
     "test:audit": "tsx tests/platform-audit-events.test.ts",
+    "test:invoice-payment": "tsx tests/invoice-payment-allocation.test.ts",
     "test:competition": "tsx tests/competition-feature-gate.test.ts && tsx tests/competition-pupil-identity.test.ts && tsx tests/competition-scoring.test.ts && tsx tests/competition-audience.test.ts && tsx tests/competition-rewards.test.ts && tsx tests/competition-achievements.test.ts && tsx tests/competition-leaderboard.test.ts && tsx tests/competition-exam-practice.test.ts && tsx tests/competition-question-set-review.test.ts",
     "test:platform-settings": "tsx tests/platform-settings.test.ts",
     "db:generate": "prisma generate",
