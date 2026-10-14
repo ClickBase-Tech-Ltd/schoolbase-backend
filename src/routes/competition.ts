@@ -542,7 +542,7 @@ router.patch('/admin/exam-practices/:id/status', requireSession, requirePlatform
 router.get('/admin/tournaments', requireSession, requirePlatformAdmin, async (_req, res) => {
   if (!(await resolveCompetitionFeature(prisma, 'competition.schoolTournament.enabled'))) return res.status(404).json({ error: 'FEATURE_DISABLED' });
   const [tournaments, categories, prizesEnabled, certificatesEnabled, sponsorsEnabled, nationalEnabled] = await Promise.all([
-    prisma.competitionTournament.findMany({ where: { scope: { in: (await resolveCompetitionFeature(prisma, 'competition.national.enabled')) ? ['SCHOOL', 'CLASS', 'COUNTRY'] : ['SCHOOL', 'CLASS'] } }, orderBy: { createdAt: 'desc' }, take: 100, include: { category: true, _count: { select: { schools: true, participants: true } }, schools: { include: { school: { select: { name: true } } }, orderBy: { registeredAt: 'desc' }, take: 100 }, participants: { include: { pupil: { select: { firstName: true, lastName: true } }, school: { select: { name: true } }, class: { select: { name: true } } }, orderBy: { registeredAt: 'desc' }, take: 500 }, rounds: { orderBy: { roundNumber: 'asc' }, include: { matches: { orderBy: { scheduledAt: 'asc' }, include: { homeParticipant: { select: { displayNameSnapshot: true } }, awayParticipant: { select: { displayNameSnapshot: true } } } } } } } }),
+    prisma.competitionTournament.findMany({ where: { scope: { in: (await resolveCompetitionFeature(prisma, 'competition.national.enabled')) ? ['SCHOOL', 'CLASS', 'COUNTRY'] : ['SCHOOL', 'CLASS'] } }, orderBy: { createdAt: 'desc' }, take: 100, include: { category: true, _count: { select: { schools: true, participants: true } }, schools: { include: { school: { select: { id: true, name: true, logoUrl: true } } }, orderBy: { registeredAt: 'desc' }, take: 100 }, participants: { include: { pupil: { select: { firstName: true, lastName: true } }, school: { select: { id: true, name: true, logoUrl: true } }, class: { select: { name: true } } }, orderBy: { registeredAt: 'desc' }, take: 500 }, rounds: { orderBy: { roundNumber: 'asc' }, include: { matches: { orderBy: { scheduledAt: 'asc' }, include: { homeParticipant: { select: { displayNameSnapshot: true } }, awayParticipant: { select: { displayNameSnapshot: true } } } } } } } }),
     prisma.competitionCategory.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' }, take: 250 }),
     resolveCompetitionFeature(prisma, 'competition.prizes.enabled'),
     resolveCompetitionFeature(prisma, 'competition.certificates.enabled'),
@@ -630,13 +630,13 @@ router.get('/school/tournaments', requireSession, async (req: CompetitionRequest
       schools: { where: { schoolId }, select: { id: true, status: true } },
       participants: {
         where: { pupilId: identity?.pupilId ?? '' },
-        select: { id: true, status: true, visibilityApproved: true, nominatedAt: true, guardianConsentStatus: true },
+        select: { id: true, status: true, visibilityApproved: true, nominatedAt: true, guardianConsentStatus: true, school: { select: { id: true, name: true, logoUrl: true } } },
       },
     },
     orderBy: { startsAt: 'asc' },
     take: 50,
   });
-  res.json({ tournaments: tournaments.map(({ schools, participants, ...tournament }) => ({ ...tournament, schoolRegistration: schools[0] ? { registered: true, status: schools[0].status } : { registered: false, status: null }, ownRegistration: Array.isArray(participants) && participants[0] ? { registered: true, status: participants[0].status, visibilityApproved: participants[0].visibilityApproved, nominated: Boolean(participants[0].nominatedAt), guardianConsentStatus: participants[0].guardianConsentStatus } : { registered: false, status: null, visibilityApproved: false, nominated: false, guardianConsentStatus: null } })) });
+  res.json({ tournaments: tournaments.map(({ schools, participants, ...tournament }) => ({ ...tournament, schoolRegistration: schools[0] ? { registered: true, status: schools[0].status } : { registered: false, status: null }, ownRegistration: Array.isArray(participants) && participants[0] ? { registered: true, status: participants[0].status, visibilityApproved: participants[0].visibilityApproved, nominated: Boolean(participants[0].nominatedAt), guardianConsentStatus: participants[0].guardianConsentStatus, invitingSchool: participants[0].school } : { registered: false, status: null, visibilityApproved: false, nominated: false, guardianConsentStatus: null, invitingSchool: null } })) });
 });
 
 router.post('/school/tournaments/:tournamentId/register-school', requireSession, requireSchoolStaff, async (req: CompetitionRequest, res) => {
