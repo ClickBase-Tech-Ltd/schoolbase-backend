@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   getCompetitionExamPracticeGrades,
+  isCompetitionExamPracticeSubjectAllowed,
   isEligibleForCompetitionExamPractice,
   normalizeCompetitionExamPracticeGrade,
 } from '../src/services/competition-exam-practice.js';
@@ -17,7 +18,12 @@ assert.deepEqual(getCompetitionExamPracticeGrades('NG', 'BECE'), []);
 assert.equal(normalizeCompetitionExamPracticeGrade('GH', 'WAEC', 'Senior High School 2'), 'SHS 2');
 assert.equal(normalizeCompetitionExamPracticeGrade('NG', 'WAEC', 'SSS 3'), 'SS 3');
 assert.equal(normalizeCompetitionExamPracticeGrade('NG', 'JUNIOR_WAEC', 'Primary 4'), null);
+assert.equal(isCompetitionExamPracticeSubjectAllowed({ countryCode: 'NG', examCode: 'WAEC', gradeLabel: 'SS 1', subjectName: 'English' }), true);
+assert.equal(isCompetitionExamPracticeSubjectAllowed({ countryCode: 'NG', examCode: 'WAEC', gradeLabel: 'SS 1', subjectName: 'Basic Science' }), false);
+assert.equal(isCompetitionExamPracticeSubjectAllowed({ countryCode: 'NG', examCode: 'WAEC', gradeLabel: 'SS 2', subjectName: 'Social Studies' }), false);
+assert.equal(isCompetitionExamPracticeSubjectAllowed({ countryCode: 'GH', examCode: 'BECE', gradeLabel: 'JHS 2', subjectName: 'Social Studies' }), true);
 assert.equal(isEligibleForCompetitionExamPractice({ practice, schoolCountry: 'GH', className: 'SHS 2', challengeStatus: 'ACTIVE', questionSetStatus: 'APPROVED' }), true);
+assert.equal(isEligibleForCompetitionExamPractice({ practice: { ...practice, subjectName: 'Basic Science' }, schoolCountry: 'GH', className: 'SHS 2', challengeStatus: 'ACTIVE', questionSetStatus: 'APPROVED' }), false);
 assert.equal(isEligibleForCompetitionExamPractice({ practice, schoolCountry: 'gh', className: ' Senior High 2 ', challengeStatus: 'ACTIVE', questionSetStatus: 'APPROVED' }), true);
 assert.equal(isEligibleForCompetitionExamPractice({ practice, schoolCountry: 'GH', className: 'SHS 2', challengeStatus: 'ACTIVE', questionSetStatus: 'APPROVED', isActive: true }), true);
 assert.equal(isEligibleForCompetitionExamPractice({ practice, schoolCountry: 'NG', className: 'SHS 2', challengeStatus: 'ACTIVE', questionSetStatus: 'APPROVED' }), false);

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
-import { calculateAge, matchesCompetitionAudience, parseCompetitionAudience } from '../src/services/competition-audience.js';
+import { calculateAge, isSeniorSecondaryCompetitionGrade, matchesCompetitionAudience, parseCompetitionAudience } from '../src/services/competition-audience.js';
 import { getCompetitionDailyLimitError } from '../src/services/competition-daily-limit.js';
 
 const referenceDate = new Date('2026-10-09T12:00:00.000Z');
@@ -30,6 +30,10 @@ assert.equal(matchesCompetitionAudience({ audienceLabel: 'SHS 3', className: 'SS
 assert.equal(matchesCompetitionAudience({ audienceLabel: 'Year 1', className: 'Basic 1' }), true);
 assert.equal(matchesCompetitionAudience({ audienceLabel: 'JHS 1', className: 'Year 7' }), true);
 assert.equal(matchesCompetitionAudience({ audienceLabel: 'SHS 2', className: 'Year 11' }), true);
+assert.equal(isSeniorSecondaryCompetitionGrade('Ages 15-18 · SS 1'), true);
+assert.equal(isSeniorSecondaryCompetitionGrade('Senior High School 3'), true);
+assert.equal(isSeniorSecondaryCompetitionGrade('Year 10'), true);
+assert.equal(isSeniorSecondaryCompetitionGrade('JSS 3'), false);
 assert.equal(matchesCompetitionAudience({ ...pupil, className: null }), false);
 assert.equal(matchesCompetitionAudience({ ...pupil, audienceLabel: null }), false);
 

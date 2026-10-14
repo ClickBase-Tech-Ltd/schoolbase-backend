@@ -10,9 +10,9 @@ import { parseCompetitionXpPolicy } from '../services/competition-rewards.js';
 import { parseCompetitionAchievementCriteria, shouldAwardCompetitionAchievement } from '../services/competition-achievements.js';
 import { buildCompetitionLeaderboard, chooseCompetitionMatchWinner } from '../services/competition-leaderboard.js';
 import { canTransitionCompetitionTournament, parseCompetitionTournamentDate, type CompetitionTournamentStatus } from '../services/competition-tournaments.js';
-import { matchesCompetitionAudience, parseCompetitionAudience } from '../services/competition-audience.js';
+import { isSeniorSecondaryCompetitionGrade, matchesCompetitionAudience, parseCompetitionAudience } from '../services/competition-audience.js';
 import { getCompetitionDailyLimitError } from '../services/competition-daily-limit.js';
-import { getCompetitionExamPracticeGrades, isEligibleForCompetitionExamPractice, normalizeCompetitionExamPracticeGrade } from '../services/competition-exam-practice.js';
+import { getCompetitionExamPracticeGrades, isCompetitionExamPracticeSubjectAllowed, isEligibleForCompetitionExamPractice, normalizeCompetitionExamPracticeGrade } from '../services/competition-exam-practice.js';
 import { canApproveCompetitionQuestionSet } from '../services/competition-question-set-review.js';
 
 const router = Router();
@@ -229,6 +229,7 @@ router.post('/admin/challenges', requireSession, requirePlatformAdmin, async (re
   const classLabel = typeof gradeLabel === 'string' ? gradeLabel.trim() : '';
   const validAgeRange = !ageRange || Boolean(ageMatch && minimumAge >= 2 && maximumAge <= 25 && minimumAge <= maximumAge);
   if (![categoryId, questionSetId, scoringPolicyId].every((value) => typeof value === 'string') || typeof title !== 'string' || !title.trim() || !validAgeRange || !classLabel || classLabel.length > 60 || !Number.isInteger(questionCount) || questionCount < 1 || questionCount > 100 || !Number.isInteger(durationSeconds) || durationSeconds < 30 || durationSeconds > 7200 || !Number.isInteger(attemptLimit) || attemptLimit < 1 || attemptLimit > 10 || !Number.isInteger(completionXp) || completionXp < 0 || completionXp > 100_000) return res.status(400).json({ error: 'INVALID_CHALLENGE' });
+  if (isSeniorSecondaryCompetitionGrade(classLabel) && questionCount !== 50) return res.status(400).json({ error: 'SENIOR_CHALLENGE_REQUIRES_50_QUESTIONS' });
   const [category, questionSet, scoringPolicy] = await Promise.all([
     prisma.competitionCategory.findUnique({ where: { id: categoryId }, select: { id: true } }),
     prisma.competitionQuestionSet.findUnique({ where: { id: questionSetId }, select: { id: true, categoryId: true, status: true, _count: { select: { questions: true } } } }),
@@ -431,6 +432,7 @@ router.patch('/admin/challenges/:id/status', requireSession, requirePlatformAdmi
     const challenge = await prisma.competitionChallenge.findUnique({ where: { id: req.params.id }, select: { gradeLabel: true, questionCount: true, questionSet: { include: { questions: { where: { status: 'APPROVED' }, select: { id: true } } } } } });
     if (!parseCompetitionAudience(challenge?.gradeLabel)) return res.status(409).json({ error: 'CHALLENGE_AUDIENCE_REQUIRED' });
     if (!challenge) return res.status(404).json({ error: 'CHALLENGE_NOT_FOUND' });
+    if (isSeniorSecondaryCompetitionGrade(challenge.gradeLabel) && challenge.questionCount !== 50) return res.status(409).json({ error: 'SENIOR_CHALLENGE_REQUIRES_50_QUESTIONS' });
     if (challenge.questionSet.status !== 'APPROVED') return res.status(409).json({ error: 'QUESTION_SET_NOT_APPROVED' });
     if (challenge.questionSet.questions.length < challenge.questionCount) return res.status(409).json({ error: 'APPROVED_QUESTION_COUNT_INSUFFICIENT' });
   }
@@ -467,6 +469,7 @@ router.post('/admin/exam-practices', requireSession, requirePlatformAdmin, async
       id: true,
       status: true,
       gradeLabel: true,
+      category: { select: { name: true } },
       questionCount: true,
       categoryId: true,
       questionSet: { select: { id: true, status: true, categoryId: true, gradeLabel: true, _count: { select: { questions: true } } } },
@@ -474,6 +477,8 @@ router.post('/admin/exam-practices', requireSession, requirePlatformAdmin, async
   });
   const challengeGrade = challenge?.gradeLabel?.split('·').at(-1)?.trim();
   const normalizedGrade = normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, gradeLabel);
+  if (challenge && !isCompetitionExamPracticeSubjectAllowed({ countryCode: normalizedCountryCode, examCode, gradeLabel, subjectName: challenge.category.name })) return res.status(400).json({ error: 'EXAM_PRACTICE_SUBJECT_NOT_ALLOWED' });
+  if (challenge && isSeniorSecondaryCompetitionGrade(challenge.gradeLabel) && challenge.questionCount !== 50) return res.status(400).json({ error: 'SENIOR_CHALLENGE_REQUIRES_50_QUESTIONS' });
   if (!challenge || challenge.status !== 'ACTIVE' || challenge.questionSet.status !== 'APPROVED' || challenge.questionSet.categoryId !== challenge.categoryId || !normalizedGrade || normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, challengeGrade) !== normalizedGrade || normalizeCompetitionExamPracticeGrade(normalizedCountryCode, examCode, challenge.questionSet.gradeLabel) !== normalizedGrade || challenge.questionSet._count.questions < challenge.questionCount) return res.status(400).json({ error: 'EXAM_PRACTICE_CHALLENGE_MISMATCH' });
   try {
     const examPractice = await prisma.competitionExamPractice.create({
@@ -500,6 +505,7 @@ router.patch('/admin/exam-practices/:id/status', requireSession, requirePlatform
         examCode: true,
         countryCode: true,
         gradeLabel: true,
+        subjectCategory: { select: { name: true } },
         challenge: {
           select: {
             status: true,
@@ -519,8 +525,9 @@ router.patch('/admin/exam-practices/:id/status', requireSession, requirePlatform
     if (!currentPractice) return res.status(404).json({ error: 'EXAM_PRACTICE_NOT_FOUND' });
     const challengeGrade = currentPractice.challenge.gradeLabel?.split('·').at(-1)?.trim();
     const canonicalGrade = normalizeCompetitionExamPracticeGrade(currentPractice.countryCode, currentPractice.examCode, currentPractice.gradeLabel);
+    const subjectAllowed = isCompetitionExamPracticeSubjectAllowed({ countryCode: currentPractice.countryCode, examCode: currentPractice.examCode, gradeLabel: currentPractice.gradeLabel, subjectName: currentPractice.subjectCategory.name });
     const validGrade = canonicalGrade && normalizeCompetitionExamPracticeGrade(currentPractice.countryCode, currentPractice.examCode, challengeGrade) === canonicalGrade && normalizeCompetitionExamPracticeGrade(currentPractice.countryCode, currentPractice.examCode, currentPractice.challenge.questionSet.gradeLabel) === canonicalGrade;
-    if (req.body.isActive && (currentPractice.challenge.status !== 'ACTIVE' || currentPractice.challenge.questionSet.status !== 'APPROVED' || !validGrade || currentPractice.challenge.questionSet._count.questions < currentPractice.challenge.questionCount)) {
+    if (req.body.isActive && (!subjectAllowed || currentPractice.challenge.status !== 'ACTIVE' || currentPractice.challenge.questionSet.status !== 'APPROVED' || !validGrade || currentPractice.challenge.questionSet._count.questions < currentPractice.challenge.questionCount || isSeniorSecondaryCompetitionGrade(currentPractice.gradeLabel) && currentPractice.challenge.questionCount !== 50)) {
       return res.status(409).json({ error: 'EXAM_PRACTICE_CONTENT_UNAVAILABLE' });
     }
     const examPractice = await prisma.competitionExamPractice.update({ where: { id: req.params.id }, data: { isActive: req.body.isActive }, include: { subjectCategory: { select: { id: true, name: true, code: true } }, challenge: { select: { id: true, title: true, status: true, questionCount: true, durationSeconds: true, attemptLimit: true, questionSet: { select: { id: true, name: true, gradeLabel: true, status: true, _count: { select: { questions: true } } } } } } } });
@@ -1140,7 +1147,7 @@ router.get('/student/challenges', requireSession, async (req: CompetitionRequest
   ]);
   const eligibleChallenges = candidateChallenges.filter((challenge) => challenge.examPractice
     ? examPracticeEnabled && isEligibleForCompetitionExamPractice({
-      practice: challenge.examPractice,
+      practice: { ...challenge.examPractice, subjectName: challenge.examPractice.subjectCategory.name },
       schoolCountry: pupil?.school.country,
       className: classRecord?.name,
       challengeStatus: challenge.status,
@@ -1439,7 +1446,7 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
   const now = new Date();
   const challengeQuestionInclude = {
     scoringPolicy: true,
-    examPractice: true,
+    examPractice: { include: { subjectCategory: { select: { name: true } } } },
     questionSet: {
       include: {
         questions: {
@@ -1468,7 +1475,7 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
     identity.classId ? prisma.class.findUnique({ where: { id: identity.classId }, select: { name: true } }) : null,
   ]);
   const audienceEligible = challenge.examPractice
-    ? isEligibleForCompetitionExamPractice({ practice: challenge.examPractice, schoolCountry: pupilAudience?.school.country, className: learnerClass?.name, challengeStatus: challenge.status, questionSetStatus: challenge.questionSet.status, isActive: challenge.examPractice.isActive })
+    ? isEligibleForCompetitionExamPractice({ practice: { ...challenge.examPractice, subjectName: challenge.examPractice.subjectCategory.name }, schoolCountry: pupilAudience?.school.country, className: learnerClass?.name, challengeStatus: challenge.status, questionSetStatus: challenge.questionSet.status, isActive: challenge.examPractice.isActive })
     : matchesCompetitionAudience({ audienceLabel: challenge.gradeLabel, className: learnerClass?.name });
   if (!audienceEligible) {
     return res.status(403).json({ error: 'CHALLENGE_AUDIENCE_MISMATCH' });

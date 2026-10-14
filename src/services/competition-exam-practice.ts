@@ -3,6 +3,7 @@ export type CompetitionExamPracticeEligibility = {
   countryCode: string;
   gradeLabel: string;
   isActive?: boolean | null;
+  subjectName?: string | null;
 };
 
 export type CompetitionExamCode = 'WAEC' | 'BECE' | 'JUNIOR_WAEC';
@@ -32,6 +33,20 @@ export function normalizeCompetitionExamPracticeGrade(countryCode: string, examC
   return examGradeAliases[countryCode.trim().toUpperCase()]?.[examCode]?.[normalizeLabel(gradeLabel)] ?? null;
 }
 
+export function isCompetitionExamPracticeSubjectAllowed(input: {
+  countryCode: string;
+  examCode: string;
+  gradeLabel: string;
+  subjectName: string | null | undefined;
+}): boolean {
+  const grade = normalizeCompetitionExamPracticeGrade(input.countryCode, input.examCode, input.gradeLabel);
+  if (!grade) return false;
+  if (!/^(?:SS|SHS) [1-3]$/.test(grade)) return true;
+  if (!input.subjectName) return true;
+  const subject = input.subjectName.trim().toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+  return !['basicscience', 'socialstudies'].includes(subject);
+}
+
 export function isEligibleForCompetitionExamPractice(input: {
   practice: CompetitionExamPracticeEligibility;
   schoolCountry: string | null | undefined;
@@ -45,6 +60,12 @@ export function isEligibleForCompetitionExamPractice(input: {
   if (input.questionSetStatus && input.questionSetStatus !== 'APPROVED') return false;
   if (input.isActive !== undefined && input.isActive !== null && input.isActive !== true) return false;
   if (input.practice.isActive !== undefined && input.practice.isActive !== null && input.practice.isActive !== true) return false;
+  if (!isCompetitionExamPracticeSubjectAllowed({
+    countryCode: input.practice.countryCode,
+    examCode: input.practice.examCode,
+    gradeLabel: input.practice.gradeLabel,
+    subjectName: input.practice.subjectName,
+  })) return false;
   const schoolCountry = input.schoolCountry.trim().toUpperCase();
   if (input.practice.countryCode.trim().toUpperCase() !== schoolCountry) return false;
   const offeredGrade = normalizeCompetitionExamPracticeGrade(schoolCountry, input.practice.examCode, input.practice.gradeLabel);

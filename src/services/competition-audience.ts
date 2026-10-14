@@ -37,6 +37,11 @@ export function parseCompetitionAudience(label: string | null | undefined): Comp
   return { classLabel };
 }
 
+export function isSeniorSecondaryCompetitionGrade(label: string | null | undefined): boolean {
+  const audience = parseCompetitionAudience(label);
+  return Boolean(audience && /^ss[1-3]$/.test(normalizeClassLabel(audience.classLabel)));
+}
+
 export function calculateAge(dateOfBirth: Date, onDate = new Date()): number {
   let age = onDate.getFullYear() - dateOfBirth.getFullYear();
   const beforeBirthday = onDate.getMonth() < dateOfBirth.getMonth()
