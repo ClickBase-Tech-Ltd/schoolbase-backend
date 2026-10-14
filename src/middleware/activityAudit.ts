@@ -1,7 +1,9 @@
 import type { NextFunction, Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { jwtVerify } from 'jose';
 import { PrismaClient } from '@prisma/client';
 import { getSessionSecret as getConfiguredSessionSecret } from '../services/security-config.js';
+import { classifyPlatformAuditEvent, extractPlatformAuditResourceId, safeAuditPath } from '../services/platform-audit-events.js';
 
 const prisma = new PrismaClient();
 
@@ -30,9 +32,9 @@ function getEventName(method: string, path: string) {
 
 function getSafeBodyFields(body: unknown) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return '';
-  const excluded = new Set(['password', 'passwordHash', 'token', 'otp', 'secret', 'accessToken', 'refreshToken']);
+  const excluded = /password|token|otp|secret|authorization|cookie|pin|answer|credential|private.?key/i;
   return Object.keys(body as Record<string, unknown>)
-    .filter((key) => !excluded.has(key))
+    .filter((key) => !excluded.test(key))
     .slice(0, 30)
     .join(', ');
 }
@@ -42,6 +44,14 @@ export async function recordActivity(data: {
   details: string;
   userId?: string;
   schoolId?: string;
+  category?: string;
+  action?: string;
+  outcome?: string;
+  resourceType?: string;
+  resourceId?: string;
+  summary?: string;
+  actorRole?: string;
+  requestId?: string;
 }) {
   await prisma.platformAuditLog.create({
     data: {
@@ -49,6 +59,14 @@ export async function recordActivity(data: {
       details: data.details,
       userId: data.userId,
       schoolId: data.schoolId,
+      category: data.category,
+      action: data.action,
+      outcome: data.outcome,
+      resourceType: data.resourceType,
+      resourceId: data.resourceId,
+      summary: data.summary,
+      actorRole: data.actorRole,
+      requestId: data.requestId,
     },
   });
 }
@@ -59,7 +77,7 @@ export function activityAuditMiddleware(req: Request, res: Response, next: NextF
     return;
   }
 
-  const path = req.originalUrl || req.path;
+  const path = req.path || req.originalUrl || '/';
   if (
     path.includes('/audit-logs') ||
     path.includes('/health') ||
@@ -72,8 +90,6 @@ export function activityAuditMiddleware(req: Request, res: Response, next: NextF
   }
 
   res.on('finish', () => {
-    if (res.statusCode < 200 || res.statusCode >= 400) return;
-
     void (async () => {
       let userId: string | undefined;
       let schoolId: string | undefined;
@@ -87,10 +103,14 @@ export function activityAuditMiddleware(req: Request, res: Response, next: NextF
           schoolId = typeof payload.schoolId === 'string' ? payload.schoolId : undefined;
           role = typeof payload.role === 'string' ? payload.role : undefined;
         }
+        if (res.statusCode >= 400 && !userId && !role) return;
 
         const fields = getSafeBodyFields(req.body);
+        const auditEvent = classifyPlatformAuditEvent(req.method, path);
+        const safePath = safeAuditPath(path);
+        const outcome = res.statusCode < 300 ? 'SUCCESS' : res.statusCode < 400 ? 'REDIRECTED' : res.statusCode < 500 ? 'REJECTED' : 'FAILED';
         const details = [
-          `${req.method} ${path}`,
+          `${req.method} ${safePath}`,
           role ? `role: ${role}` : null,
           fields ? `fields: ${fields}` : null,
           `status: ${res.statusCode}`,
@@ -99,8 +119,16 @@ export function activityAuditMiddleware(req: Request, res: Response, next: NextF
         await recordActivity({
           userId,
           schoolId,
-          event: getEventName(req.method, req.path),
+          event: getEventName(req.method, safePath),
           details,
+          category: auditEvent.category,
+          action: auditEvent.action,
+          outcome,
+          resourceType: auditEvent.resourceType,
+          resourceId: extractPlatformAuditResourceId(path),
+          summary: auditEvent.summary,
+          actorRole: role,
+          requestId: typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'].slice(0, 191) : randomUUID(),
         });
       } catch (error) {
         console.warn('[AUDIT] Failed to record activity:', error instanceof Error ? error.message : error);

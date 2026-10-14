@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { URL } from 'node:url';
+import { inferPlatformAuditOutcome, normalizeLegacyPlatformAuditEvent, sanitizeLegacyAuditDetails } from '../services/platform-audit-events.js';
 
 const router = Router();
 type AdsPrismaClient = PrismaClient & {
@@ -1154,7 +1155,7 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
   if (!session) return;
 
   try {
-    const page = parseInt(req.query.page as string) || 1;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const requestedLimit = parseInt(req.query.limit as string) || 50;
     const limit = Math.min(Math.max(requestedLimit, 10), 200);
     const requestedDays = Number.parseInt(String(req.query.days || '90'), 10);
@@ -1162,17 +1163,49 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const skip = (page - 1) * limit;
     const search = String(req.query.search || '').trim();
-    const schoolName = String(req.query.school || '').trim();
+    const schoolId = String(req.query.school || '').trim();
     const action = String(req.query.action || '').trim();
+    const category = String(req.query.category || '').trim().toUpperCase();
+    const outcome = String(req.query.outcome || '').trim().toUpperCase();
+    const actor = String(req.query.actor || '').trim();
 
     const where: any = {
       createdAt: { gte: since },
     };
-    if (schoolName) where.school = { is: { name: schoolName } };
-    if (action) where.event = action;
+    if (schoolId) where.schoolId = schoolId;
+    if (action) where.action = action;
+    if (category) where.category = category;
+    if (outcome) {
+      const legacyOutcomeConditions: any[] = [];
+      if (outcome === 'SUCCESS') legacyOutcomeConditions.push(
+        { event: { contains: 'LOGIN_SUCCESS' } },
+        { event: { contains: 'PARENT_LOGIN_SUCCESS' } },
+        { details: { contains: 'status: 2' } },
+      );
+      if (outcome === 'FAILED') legacyOutcomeConditions.push(
+        { event: { contains: 'LOGIN_FAILED' } },
+        { event: { contains: 'FAILED' } },
+        { details: { contains: 'status: 5' } },
+      );
+      if (outcome === 'REJECTED' || outcome === 'DENIED') legacyOutcomeConditions.push(
+        { details: { contains: 'status: 4' } },
+      );
+      if (outcome === 'REDIRECTED') legacyOutcomeConditions.push({ details: { contains: 'status: 3' } });
+      if (outcome === 'NOT_RECORDED') legacyOutcomeConditions.push({ outcome: null }, { outcome: 'UNKNOWN' });
+      where.AND = [{ OR: [
+        { outcome },
+        ...legacyOutcomeConditions,
+      ] }];
+    }
+    if (actor) where.user = { is: { OR: [{ name: { contains: actor } }, { email: { contains: actor } }] } };
     if (search) {
       where.OR = [
         { event: { contains: search } },
+        { action: { contains: search } },
+        { summary: { contains: search } },
+        { resourceType: { contains: search } },
+        { resourceId: { contains: search } },
+        { requestId: { contains: search } },
         { details: { contains: search } },
         { user: { is: { name: { contains: search } } } },
         { user: { is: { email: { contains: search } } } },
@@ -1189,6 +1222,14 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
         select: {
           id: true,
           event: true,
+          category: true,
+          action: true,
+          outcome: true,
+          resourceType: true,
+          resourceId: true,
+          summary: true,
+          actorRole: true,
+          requestId: true,
           details: true,
           createdAt: true,
           user: {
@@ -1208,15 +1249,25 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
     ]);
 
     res.json({
-      logs: logs.map((log: any) => ({
-        id: log.id,
-        event: log.event,
-        action: log.event,
-        details: log.details,
-        createdAt: log.createdAt,
-        user: log.user,
-        school: log.school,
-      })),
+      logs: logs.map((log: any) => {
+        const legacy = normalizeLegacyPlatformAuditEvent(log.event, log.details);
+        return {
+          id: log.id,
+          event: log.event,
+          category: log.category || legacy.category,
+          action: log.action || legacy.action,
+          outcome: inferPlatformAuditOutcome(log.event, log.details, log.outcome),
+          resourceType: log.resourceType || legacy.resourceType,
+          resourceId: log.resourceId,
+          summary: log.summary || legacy.summary,
+          actorRole: log.actorRole,
+          requestId: log.requestId,
+          details: sanitizeLegacyAuditDetails(log.details),
+          createdAt: log.createdAt,
+          user: log.user,
+          school: log.school,
+        };
+      }),
       pagination: {
         page,
         limit,
@@ -1237,51 +1288,70 @@ router.get('/activity-summary', async (req: Request, res: Response) => {
 
   try {
     const requestedDays = Number.parseInt(String(req.query.days || '30'), 10);
-    const days = Number.isFinite(requestedDays) ? Math.min(Math.max(requestedDays, 7), 90) : 30;
+    const days = Number.isFinite(requestedDays) ? Math.min(Math.max(requestedDays, 1), 90) : 30;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    const [logs, schools, eventTotal, recentEvents, protectedEvents] = await Promise.all([
-      prisma.platformAuditLog.findMany({
-        where: { createdAt: { gte: since } },
-        orderBy: { createdAt: 'desc' },
-        take: 10000,
-        select: { id: true, schoolId: true, event: true, createdAt: true, school: { select: { name: true } } },
-      }),
+    const baseWhere = { createdAt: { gte: since } };
+    const [schools, eventTotal, recentEvents, verificationEvents, failedEvents, groupedEvents, groupedSchools, groupedDays] = await Promise.all([
       prisma.school.findMany({
         orderBy: { createdAt: 'desc' },
         select: { id: true, name: true, status: true, createdAt: true },
       }),
-      prisma.platformAuditLog.count({ where: { createdAt: { gte: since } } }),
+      prisma.platformAuditLog.count({ where: baseWhere }),
       prisma.platformAuditLog.count({ where: { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } }),
       prisma.platformAuditLog.count({
         where: {
-          createdAt: { gte: since },
+          ...baseWhere,
           OR: [{ event: { contains: 'VERIFY' } }, { details: { contains: 'verify' } }],
         },
       }),
+      prisma.platformAuditLog.count({
+        where: {
+          ...baseWhere,
+          OR: [
+            { outcome: { in: ['FAILED', 'REJECTED', 'DENIED'] } },
+            { event: { contains: 'FAILED' } },
+            { details: { contains: 'status: 4' } },
+            { details: { contains: 'status: 5' } },
+          ],
+        },
+      }),
+      prisma.platformAuditLog.groupBy({
+        by: ['action', 'category', 'event', 'summary'],
+        where: baseWhere,
+        _count: { _all: true },
+      }),
+      prisma.platformAuditLog.groupBy({
+        by: ['schoolId'],
+        where: { ...baseWhere, schoolId: { not: null } },
+        _count: { _all: true },
+        _max: { createdAt: true },
+      }),
+      prisma.$queryRaw<Array<{ day: Date | string; count: bigint | number }>>`
+        SELECT DATE(createdAt) AS day, COUNT(*) AS count
+        FROM PlatformAuditLog
+        WHERE createdAt >= ${since}
+        GROUP BY DATE(createdAt)
+        ORDER BY day ASC
+      `,
     ]);
 
-    const actionCounts = new Map<string, { action: string; count: number }>();
-    const schoolCounts = new Map<string, { count: number; lastActivity: Date | null; actions: Set<string> }>();
-    const dailyCounts = new Map<string, number>();
-
-    for (const log of logs) {
-      const action = log.event.replace(/^API_(GET|POST|PUT|PATCH|DELETE)_/, '').replace(/^API_/, '');
-      const currentAction = actionCounts.get(log.event) || { action, count: 0 };
-      currentAction.count += 1;
-      actionCounts.set(log.event, currentAction);
-
-      const day = log.createdAt.toISOString().slice(0, 10);
-      dailyCounts.set(day, (dailyCounts.get(day) || 0) + 1);
-
-      if (log.schoolId) {
-        const current = schoolCounts.get(log.schoolId) || { count: 0, lastActivity: null, actions: new Set<string>() };
-        current.count += 1;
-        current.lastActivity = current.lastActivity && current.lastActivity > log.createdAt ? current.lastActivity : log.createdAt;
-        current.actions.add(action);
-        schoolCounts.set(log.schoolId, current);
-      }
+    const actionCounts = new Map<string, { category: string; action: string; summary: string; count: number }>();
+    for (const group of groupedEvents) {
+      const legacy = group.action ? null : normalizeLegacyPlatformAuditEvent(group.event, null);
+      const action = group.action || legacy!.action;
+      const category = (group.category || legacy?.category || 'OPERATIONS').toString();
+      const key = action;
+      const summary = group.summary || legacy?.summary || action;
+      const current = actionCounts.get(key) || { category, action, summary, count: 0 };
+      current.count += group._count._all;
+      actionCounts.set(key, current);
     }
+    const schoolCounts = new Map(groupedSchools.filter((entry) => entry.schoolId).map((entry) => [entry.schoolId!, {
+      count: entry._count._all,
+      lastActivity: entry._max.createdAt,
+    }]));
+    const dailyCounts = new Map(groupedDays.map((entry) => [new Date(entry.day).toISOString().slice(0, 10), Number(entry.count)]));
 
     const schoolActivity = schools.map((school) => {
       const activity = schoolCounts.get(school.id);
@@ -1290,17 +1360,16 @@ router.get('/activity-summary', async (req: Request, res: Response) => {
         name: school.name,
         status: school.status,
         createdAt: school.createdAt,
-        activityCount: activity?.count || 0,
-        lastActivity: activity?.lastActivity || null,
-        actionCount: activity?.actions.size || 0,
+          eventCount: activity?.count || 0,
+          lastActivity: activity?.lastActivity || null,
       };
     }).sort((a, b) => {
-      if (b.activityCount !== a.activityCount) return b.activityCount - a.activityCount;
+      if (b.eventCount !== a.eventCount) return b.eventCount - a.eventCount;
       return a.name.localeCompare(b.name);
     });
 
-    const activeSchools = schoolActivity.filter((school) => school.activityCount > 0).length;
-    const silentSchools = schoolActivity.filter((school) => school.activityCount === 0).length;
+    const schoolsWithEvents = schoolActivity.filter((school) => school.eventCount > 0).length;
+    const schoolsWithoutEvents = schoolActivity.filter((school) => school.eventCount === 0).length;
     const trend = Array.from({ length: days }, (_, index) => {
       const date = new Date(Date.now() - (days - index - 1) * 24 * 60 * 60 * 1000);
       const key = date.toISOString().slice(0, 10);
@@ -1310,8 +1379,8 @@ router.get('/activity-summary', async (req: Request, res: Response) => {
     res.json({
       days,
       since,
-      totals: { events: eventTotal, recentEvents, protectedEvents, schools: schools.length, activeSchools, silentSchools },
-      actionBreakdown: Array.from(actionCounts.entries()).map(([event, item]) => ({ event, action: item.action, count: item.count })).sort((a, b) => b.count - a.count).slice(0, 50),
+      totals: { events: eventTotal, recentEvents, verificationEvents, failedEvents, schools: schools.length, schoolsWithEvents, schoolsWithoutEvents },
+      actionBreakdown: Array.from(actionCounts.values()).sort((a, b) => b.count - a.count).slice(0, 50),
       trend,
       schoolActivity,
     });
