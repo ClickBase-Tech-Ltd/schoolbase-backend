@@ -38,7 +38,15 @@ assert.equal(getCompetitionDailyLimitError([
   { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: null } },
 ], today, 'DAILY'), 'DAILY_CHALLENGE_LIMIT_REACHED');
 assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: null } },
+  { startedAt: '2026-10-13T09:00:00.000Z', challenge: { examPractice: null } },
+], today, 'DAILY'), 'DAILY_CHALLENGE_LIMIT_REACHED');
+assert.equal(getCompetitionDailyLimitError([
   { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+], today, 'EXAM'), 'EXAM_PRACTICE_LIMIT_REACHED');
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+  { startedAt: '2026-10-13T09:00:00.000Z', challenge: { examPractice: { id: 'exam-2' } } },
 ], today, 'EXAM'), 'EXAM_PRACTICE_LIMIT_REACHED');
 assert.equal(getCompetitionDailyLimitError([
   { startedAt: '2026-10-12T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
@@ -51,5 +59,11 @@ assert.equal(getCompetitionDailyLimitError([
   { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
   { startedAt: '2026-10-13T09:00:00.000Z', challenge: { examPractice: null } },
 ], today, 'EXAM'), 'EXAM_PRACTICE_LIMIT_REACHED');
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: null } },
+], today, 'EXAM'), null);
+assert.equal(getCompetitionDailyLimitError([
+  { startedAt: '2026-10-13T08:00:00.000Z', challenge: { examPractice: { id: 'exam-1' } } },
+], today, 'DAILY'), null);
 
 console.log('Competition audience tests passed');

@@ -1555,6 +1555,40 @@ router.post('/student/challenges/:challengeId/attempts', requireSession, async (
   }
 });
 
+router.get('/student/attempts/:attemptId', requireSession, async (req: CompetitionRequest, res) => {
+  const identity = await resolveLearnerIdentity(req, res);
+  if (!identity) return;
+  const attempt = await prisma.competitionChallengeAttempt.findFirst({
+    where: { id: req.params.attemptId, pupilId: identity.pupilId, schoolId: identity.schoolId, status: 'STARTED' },
+    include: {
+      questions: {
+        orderBy: { position: 'asc' },
+        include: {
+          question: {
+            select: {
+              id: true,
+              prompt: true,
+              type: true,
+              options: { select: { id: true, content: true }, orderBy: { sortOrder: 'asc' } },
+            },
+          },
+        },
+      },
+      answers: { select: { questionId: true, responseJson: true } },
+    },
+  });
+  if (!attempt) return res.status(404).json({ error: 'ATTEMPT_NOT_FOUND' });
+  const savedAnswers = attempt.answers.flatMap((answer) => {
+    try {
+      const response = JSON.parse(answer.responseJson) as { optionId?: unknown };
+      return typeof response.optionId === 'string' ? [{ questionId: answer.questionId, optionId: response.optionId }] : [];
+    } catch {
+      return [];
+    }
+  });
+  res.json({ attempt: presentAttempt(attempt), savedAnswers });
+});
+
 router.post('/student/attempts/:attemptId/answers/:questionId', requireSession, async (req: CompetitionRequest, res) => {
   const identity = await resolveLearnerIdentity(req, res);
   if (!identity) return;
