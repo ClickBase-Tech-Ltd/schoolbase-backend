@@ -12,6 +12,7 @@ import baileysSessionManager from '../communications/whatsapp-baileys.js';
 import { CommunicationRulesRegistry, DEFAULT_COMMUNICATION_RULES } from '../communications/rules.js';
 import { normalizeAdmissionStatus } from './admissions-utils.js';
 import { getPublicAdmissionStatus, submitPublicAdmissionReply } from '../services/public-admission-status.js';
+import { findAdmissionByRequestKey } from '../services/admission-application-access.js';
 import { getConfiguredPaymentPlans, getPublicPaymentPlans } from '../services/platform-settings.js';
 import { getActivePlacementAds, isValidLandingUrl, normalizePlacementType } from './ads-utils.js';
 import { sendAdvertiserApplicationNotification, sendAdvertiserStatusEmail } from '../services/email.js';
@@ -741,8 +742,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
     }
 
     if (requestId) {
-      const previousApplication = await prisma.admissionApplication.findFirst({
-        where: { schoolId: school.id, requestKey: requestId },
+      const previousApplication = await findAdmissionByRequestKey(prisma, school.id, requestId, {
         select: {
           id: true,
           firstName: true,
@@ -898,8 +898,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
     const retrySchoolSlug = normalizePublicAdmissionValue(req.body?.schoolSlug);
     if (prismaError?.code === 'P2002' && retryRequestId && retrySchoolSlug) {
       const school = await prisma.school.findUnique({ where: { slug: retrySchoolSlug }, select: { id: true } }).catch(() => null);
-      const existing = school?.id ? await prisma.admissionApplication.findFirst({
-        where: { schoolId: school.id, requestKey: retryRequestId },
+      const existing = school?.id ? await findAdmissionByRequestKey(prisma, school.id, retryRequestId, {
         select: { id: true, firstName: true, lastName: true, email: true, phone: true, childName: true, intendedClass: true, status: true, createdAt: true },
       }).catch(() => null) : null;
       if (existing) {

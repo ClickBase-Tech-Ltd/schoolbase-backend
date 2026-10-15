@@ -10,6 +10,10 @@ export type SecurityContextResult = {
   reason?: string;
 };
 
+export function buildSchoolAdminMembershipWhere(userId: string, schoolId: string) {
+  return { id: userId, schoolId, role: 'SCHOOL_ADMIN' as const };
+}
+
 const KNOWN_ROLES = new Set([
   'SCHOOL_ADMIN',
   'TEACHER',

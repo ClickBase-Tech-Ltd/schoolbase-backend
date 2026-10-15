@@ -15,13 +15,16 @@ import { ResultsDomainService } from '../domain/results/ResultsDomainService.js'
 import requireActiveSubscription from '../middleware/subscriptionGuard.js';
 import { checkSubscription, requireSubscription } from '../middleware/subscriptionGuard.js';
 import { getNextAdmissionNo, normalizeAdmissionNo, reserveNextAdmissionNo, validateUniqueAdmissionNo } from '../services/student-admission.js';
+import { findCompletedAdmissionConversion } from '../services/admission-approval.js';
+import { findSchoolScopedAdmissionApplication } from '../services/admission-application-access.js';
+import { buildAdmissionInboxWhere, buildAdmissionNotificationRecipientWhere } from '../services/admission-notification-access.js';
 import { evaluateSchoolWhatsAppSend, getPersistedSchoolWhatsAppPolicyRecord, readSchoolWhatsAppPolicy } from '../services/whatsapp-policy.js';
 import { whatsappDeliveryStore } from '../services/whatsapp-delivery-store.js';
 import type { NextFunction } from 'express';
 import { requireAccountingAccess, verifyAuth } from '../middleware/roleAuth.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { buildGuardianNotificationRecipients } from '../services/guardian-notification-recipients.js';
-import { resolveSchoolScope } from '../services/security-context.js';
+import { buildSchoolAdminMembershipWhere, resolveSchoolScope } from '../services/security-context.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
@@ -612,7 +615,7 @@ async function resolveUserId(req: Request): Promise<string | null> {
 async function isSchoolAdmissionAdmin(req: Request, schoolId: string): Promise<boolean> {
   const userId = await resolveUserId(req);
   if (!userId) return false;
-  const user = await prisma.user.findFirst({ where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true } });
+  const user = await prisma.user.findFirst({ where: buildSchoolAdminMembershipWhere(userId, schoolId), select: { id: true } });
   return Boolean(user);
 }
 
@@ -754,12 +757,12 @@ router.get('/admissions/notifications', async (req: Request, res: Response) => {
     if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
 
     const recipient = await prisma.user.findFirst({
-      where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' },
+      where: buildSchoolAdminMembershipWhere(userId, schoolId),
       select: { id: true },
     });
     if (!recipient) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
-    const where = { schoolId, recipientUserId: recipient.id };
+    const where = buildAdmissionInboxWhere(schoolId, recipient.id);
     const [notifications, unreadCount] = await Promise.all([
       prisma.schoolAdminNotification.findMany({
         where,
@@ -797,18 +800,18 @@ router.patch('/admissions/notifications/:notificationId/read', async (req: Reque
     if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
 
     const recipient = await prisma.user.findFirst({
-      where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' },
+      where: buildSchoolAdminMembershipWhere(userId, schoolId),
       select: { id: true },
     });
     if (!recipient) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
     const result = await prisma.schoolAdminNotification.updateMany({
-      where: { id: req.params.notificationId, schoolId, recipientUserId: recipient.id, readAt: null },
+      where: { ...buildAdmissionNotificationRecipientWhere(req.params.notificationId, schoolId, recipient.id), readAt: null },
       data: { readAt: new Date() },
     });
     if (result.count === 0) {
       const exists = await prisma.schoolAdminNotification.findFirst({
-        where: { id: req.params.notificationId, schoolId, recipientUserId: recipient.id },
+        where: buildAdmissionNotificationRecipientWhere(req.params.notificationId, schoolId, recipient.id),
         select: { id: true },
       });
       if (!exists) return res.status(404).json({ error: 'Notification not found' });
@@ -883,7 +886,7 @@ router.get('/admissions/:id/events', async (req: Request, res: Response) => {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) return res.status(401).json({ error: 'School ID required' });
     if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
-    const application = await prisma.admissionApplication.findFirst({ where: { id: req.params.id, schoolId }, select: { id: true } });
+    const application = await findSchoolScopedAdmissionApplication(prisma, schoolId, req.params.id, { select: { id: true } });
     if (!application) return res.status(404).json({ error: 'Admission application not found' });
     const events = await prisma.admissionApplicationEvent.findMany({
       where: { admissionApplicationId: application.id, schoolId },
@@ -902,16 +905,16 @@ router.patch('/admissions/:id/review', async (req: Request, res: Response) => {
   try {
     const [schoolId, userId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
     if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
-    const actor = await prisma.user.findFirst({ where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true, name: true } });
+    const actor = await prisma.user.findFirst({ where: buildSchoolAdminMembershipWhere(userId, schoolId), select: { id: true, name: true } });
     if (!actor) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
-    const application = await prisma.admissionApplication.findFirst({ where: { id: req.params.id, schoolId }, select: { id: true } });
+    const application = await findSchoolScopedAdmissionApplication(prisma, schoolId, req.params.id, { select: { id: true } });
     if (!application) return res.status(404).json({ error: 'Admission application not found' });
     const assignedReviewerId = req.body?.assignedReviewerId === null || req.body?.assignedReviewerId === ''
       ? null
       : String(req.body?.assignedReviewerId ?? '').trim() || undefined;
     if (assignedReviewerId) {
-      const reviewer = await prisma.user.findFirst({ where: { id: assignedReviewerId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true } });
+      const reviewer = await prisma.user.findFirst({ where: buildSchoolAdminMembershipWhere(assignedReviewerId, schoolId), select: { id: true } });
       if (!reviewer) return res.status(400).json({ error: 'Reviewer must be an admin in this school' });
     }
     const internalReviewNotes = req.body?.internalReviewNotes;
@@ -951,7 +954,7 @@ router.get('/admissions/export', async (req: Request, res: Response) => {
   try {
     const [schoolId, actorId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
     if (!schoolId || !actorId) return res.status(401).json({ error: 'School admin session required' });
-    const actor = await prisma.user.findFirst({ where: { id: actorId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true } });
+    const actor = await prisma.user.findFirst({ where: buildSchoolAdminMembershipWhere(actorId, schoolId), select: { id: true } });
     if (!actor) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
     const status = String(req.query.status ?? '').trim().toUpperCase();
@@ -1019,8 +1022,7 @@ router.get('/admissions/:id', async (req: Request, res: Response) => {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) return res.status(401).json({ error: 'School ID required' });
     if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
-    const application = await prisma.admissionApplication.findFirst({
-      where: { id: req.params.id, schoolId },
+    const application = await findSchoolScopedAdmissionApplication(prisma, schoolId, req.params.id, {
       include: {
         assignedReviewer: { select: { id: true, name: true } },
         deliveryAttempts: {
@@ -1132,7 +1134,7 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
   try {
     const [schoolId, userId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
     if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
-    const actor = await prisma.user.findFirst({ where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true, name: true } });
+    const actor = await prisma.user.findFirst({ where: buildSchoolAdminMembershipWhere(userId, schoolId), select: { id: true, name: true } });
     if (!actor) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
     const { id } = req.params;
@@ -1152,9 +1154,7 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
     }
     const publicStatusToken = nextStatus === 'NEEDS_INFORMATION' ? crypto.randomBytes(32).toString('base64url') : null;
 
-    const application = await prisma.admissionApplication.findFirst({
-      where: { id, schoolId },
-    });
+    const application = await findSchoolScopedAdmissionApplication(prisma, schoolId, id);
 
     if (!application) return res.status(404).json({ error: 'Admission application not found' });
     const currentStatus = String(application.status || 'SUBMITTED').toUpperCase();
@@ -1243,7 +1243,9 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
     }
 
     if (isAdmissionApprovalStatus(nextStatus)) {
-      const result = await prisma.$transaction(async (transaction) => {
+      let result;
+      try {
+        result = await prisma.$transaction(async (transaction) => {
         const school = await transaction.school.findUnique({
           where: { id: schoolId },
           select: { name: true, initials: true },
@@ -1326,8 +1328,14 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
           },
         });
 
-        return { application: updated, student };
-      });
+          return { application: updated, student };
+        });
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'ADMISSION_APPROVAL_CONFLICT') throw error;
+        const completedConversion = await findCompletedAdmissionConversion(prisma, schoolId, application.id);
+        if (!completedConversion) throw error;
+        return res.status(200).json({ success: true, alreadyProcessed: true, ...completedConversion });
+      }
 
       await recordActivity({
         event: 'ADMISSION_CONVERTED_TO_STUDENT',

@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSchoolScope } from '../security-context.js';
+import { buildSchoolAdminMembershipWhere, resolveSchoolScope } from '../security-context.js';
+
+test('admissions admin membership is constrained by user, school, and exact role', () => {
+  assert.deepEqual(buildSchoolAdminMembershipWhere('admin-a', 'school-a'), {
+    id: 'admin-a',
+    schoolId: 'school-a',
+    role: 'SCHOOL_ADMIN',
+  });
+  assert.notDeepEqual(buildSchoolAdminMembershipWhere('admin-a', 'school-a'), buildSchoolAdminMembershipWhere('admin-a', 'school-b'));
+  assert.notDeepEqual(buildSchoolAdminMembershipWhere('admin-a', 'school-a'), {
+    id: 'admin-a',
+    schoolId: 'school-a',
+    role: 'TEACHER',
+  });
+});
 
 test('school users are pinned to their authenticated school', () => {
   assert.deepEqual(

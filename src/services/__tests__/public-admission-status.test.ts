@@ -105,6 +105,24 @@ test('public status lookup rejects an expired or unknown token without reading m
   assert.equal(calls.eventLookup, undefined);
 });
 
+test('an application status token cannot be used through another school slug', async () => {
+  const { client, calls } = makePrisma({
+    school: { findUnique: async () => ({ id: 'school-b' }) },
+    admissionApplication: {
+      findFirst: async (args: any) => {
+        calls.applicationLookup = args;
+        return null;
+      },
+    },
+  });
+
+  const result = await getPublicAdmissionStatus(client, 'school-b', token, now);
+
+  assert.equal(result, false);
+  assert.equal((calls.applicationLookup as any).where.schoolId, 'school-b');
+  assert.equal(calls.eventLookup, undefined);
+});
+
 test('applicant reply atomically moves the application and notifies school admins', async () => {
   const { client, calls } = makePrisma();
 
