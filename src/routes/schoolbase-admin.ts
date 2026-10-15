@@ -18,7 +18,7 @@ import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { URL } from 'node:url';
-import { inferPlatformAuditOutcome, normalizeLegacyPlatformAuditEvent, sanitizeLegacyAuditDetails } from '../services/platform-audit-events.js';
+import { compactAuditEventFilters, inferPlatformAuditOutcome, normalizeLegacyPlatformAuditEvent, sanitizeLegacyAuditDetails } from '../services/platform-audit-events.js';
 
 const router = Router();
 type AdsPrismaClient = PrismaClient & {
@@ -1162,19 +1162,47 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
     const days = Number.isFinite(requestedDays) ? Math.min(Math.max(requestedDays, 1), 365) : 90;
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const skip = (page - 1) * limit;
+    const fromDate = req.query.from ? new Date(String(req.query.from)) : null;
+    const toDate = req.query.to ? new Date(String(req.query.to)) : null;
+    if (fromDate && Number.isNaN(fromDate.getTime()) || toDate && Number.isNaN(toDate.getTime()) || fromDate && toDate && fromDate >= toDate) {
+      return res.status(400).json({ message: 'A valid audit date range is required.' });
+    }
     const search = String(req.query.search || '').trim();
     const schoolId = String(req.query.school || '').trim();
     const action = String(req.query.action || '').trim();
+    const events = String(req.query.events || '').split(',').map((event) => event.trim()).filter(Boolean).slice(0, 50);
+    const eventPrefixes = String(req.query.eventPrefixes || '').split(',').map((event) => event.trim()).filter(Boolean).slice(0, 50);
     const category = String(req.query.category || '').trim().toUpperCase();
     const outcome = String(req.query.outcome || '').trim().toUpperCase();
     const actor = String(req.query.actor || '').trim();
 
     const where: any = {
-      createdAt: { gte: since },
+      createdAt: { gte: fromDate ?? since, ...(toDate ? { lt: toDate } : {}) },
     };
     if (schoolId) where.schoolId = schoolId;
     if (action) where.action = action;
-    if (category) where.category = category;
+    if (events.length) where.event = { in: events };
+    if (eventPrefixes.length) {
+      where.AND = [...(where.AND ?? []), { OR: eventPrefixes.map((prefix) => ({ event: { startsWith: prefix } })) }];
+    }
+    if (category) {
+      const legacyCategoryFilters: Record<string, { events?: string[]; paths?: string[] }> = {
+        ACCESS: { events: ['IMPERSONATE', 'LOGIN_SUCCESS', 'LOGIN_FAILED'], paths: ['/login', '/logout', '/session', '/auth'] },
+        SCHOOL: { events: ['SUSPEND', 'ACTIVATE', 'SCHOOL_SIGNUP_COMPLETED', 'VERIFY', 'VERIFIED'], paths: ['/schools', '/signups', '/verify', '/verification'] },
+        STUDENT: { events: ['STUDENT_REGISTERED', 'STUDENTS_IMPORTED'], paths: ['/students', '/pupils'] },
+        ACADEMICS: { events: ['RESULTS_PUBLISHED', 'ATTENDANCE_RECORDED'], paths: ['/results', '/assessments', '/subjects', '/classes', '/teachers', '/timetable', '/attendance'] },
+        FINANCE: { events: ['PAYMENT_RECORDED'], paths: ['/fees/invoices', '/fees/payments', '/fees/schedules', '/fees/cashbook', '/invoices', '/payments', '/cashbook'] },
+        COMMUNICATIONS: { paths: ['/whatsapp', '/emails', '/communications', '/announcements'] },
+        MARKETING: { paths: ['/ads', '/campaigns', '/advertisers'] },
+        COMPETITION: { paths: ['/competition'] },
+        CONFIGURATION: { events: ['UPGRADE', 'SETPLAN', 'SET_PLAN', 'CANCEL'], paths: ['/settings', '/configuration', '/plans', '/subscriptions'] },
+      };
+      const legacy = legacyCategoryFilters[category];
+      const legacyConditions: any[] = [];
+      if (legacy?.events?.length) legacyConditions.push({ event: { in: legacy.events } });
+      for (const path of legacy?.paths ?? []) legacyConditions.push({ details: { contains: path } });
+      where.AND = [...(where.AND ?? []), { OR: [{ category }, ...legacyConditions] }];
+    }
     if (outcome) {
       const legacyOutcomeConditions: any[] = [];
       if (outcome === 'SUCCESS') legacyOutcomeConditions.push(
@@ -1192,7 +1220,7 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
       );
       if (outcome === 'REDIRECTED') legacyOutcomeConditions.push({ details: { contains: 'status: 3' } });
       if (outcome === 'NOT_RECORDED') legacyOutcomeConditions.push({ outcome: null }, { outcome: 'UNKNOWN' });
-      where.AND = [{ OR: [
+      where.AND = [...(where.AND ?? []), { OR: [
         { outcome },
         ...legacyOutcomeConditions,
       ] }];
@@ -1216,7 +1244,7 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
     const [logs, total] = await Promise.all([
       prisma.platformAuditLog.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip,
         take: limit,
         select: {
@@ -1336,15 +1364,16 @@ router.get('/activity-summary', async (req: Request, res: Response) => {
       `,
     ]);
 
-    const actionCounts = new Map<string, { category: string; action: string; summary: string; count: number }>();
+    const actionCounts = new Map<string, { category: string; action: string; summary: string; count: number; events: Set<string> }>();
     for (const group of groupedEvents) {
       const legacy = group.action ? null : normalizeLegacyPlatformAuditEvent(group.event, null);
       const action = group.action || legacy!.action;
       const category = (group.category || legacy?.category || 'OPERATIONS').toString();
-      const key = action;
       const summary = group.summary || legacy?.summary || action;
-      const current = actionCounts.get(key) || { category, action, summary, count: 0 };
+      const key = `${category}:${action}:${summary}`;
+      const current = actionCounts.get(key) || { category, action, summary, count: 0, events: new Set<string>() };
       current.count += group._count._all;
+      current.events.add(group.event);
       actionCounts.set(key, current);
     }
     const schoolCounts = new Map(groupedSchools.filter((entry) => entry.schoolId).map((entry) => [entry.schoolId!, {
@@ -1380,7 +1409,16 @@ router.get('/activity-summary', async (req: Request, res: Response) => {
       days,
       since,
       totals: { events: eventTotal, recentEvents, verificationEvents, failedEvents, schools: schools.length, schoolsWithEvents, schoolsWithoutEvents },
-      actionBreakdown: Array.from(actionCounts.values()).sort((a, b) => b.count - a.count).slice(0, 50),
+      actionBreakdown: Array.from(actionCounts.values())
+        .map((item) => ({
+          category: item.category,
+          action: item.action,
+          summary: item.summary,
+          count: item.count,
+          ...compactAuditEventFilters(Array.from(item.events)),
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 50),
       trend,
       schoolActivity,
     });

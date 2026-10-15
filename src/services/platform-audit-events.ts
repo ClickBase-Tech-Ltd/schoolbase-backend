@@ -21,6 +21,20 @@ export type PlatformAuditOutcome = 'SUCCESS' | 'REDIRECTED' | 'REJECTED' | 'FAIL
 
 const idPattern = /^(?:cm[a-z0-9]{16,}|[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}|\d{12,})$/i;
 
+export function compactAuditEventFilters(eventNames: string[]) {
+  const exactEvents = new Set<string>();
+  const eventPrefixes = new Set<string>();
+  const dynamicIdPattern = /^(.*?)(?:cm[a-z0-9]{16,}|[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}|\d{12,})(?:_|$)/i;
+
+  for (const eventName of eventNames) {
+    const match = eventName.match(dynamicIdPattern);
+    if (match?.[1]) eventPrefixes.add(match[1]);
+    else exactEvents.add(eventName);
+  }
+
+  return { events: Array.from(exactEvents), eventPrefixes: Array.from(eventPrefixes) };
+}
+
 function cleanPath(path: string): string {
   return path.split(/[?#]/, 1)[0] || '/';
 }
