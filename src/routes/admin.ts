@@ -7,7 +7,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { sendPasswordResetEmail, sendFeeReminderEmail, sendAttendanceNotificationEmail, sendTeacherWelcomeEmail, sendAdmissionNotificationEmail, sendStudentAccessReminderEmail, sendFeePaymentReceiptEmail, sendAnnouncementEmail, sendPlatformCommunicationEmail, sendSubscriptionPaymentSuccessEmail } from '../services/email.js';
+import { sendPasswordResetEmail, sendFeeReminderEmail, sendAttendanceNotificationEmail, sendTeacherWelcomeEmail, sendAdmissionNotificationEmail, sendAdmissionApplicantStatusEmail, sendStudentAccessReminderEmail, sendFeePaymentReceiptEmail, sendAnnouncementEmail, sendPlatformCommunicationEmail, sendSubscriptionPaymentSuccessEmail } from '../services/email.js';
 import { CommunicationService, RulesEngine, TemplateEngine, RecipientResolver, DeliveryQueue, DriverManager, EmailDriver, WhatsAppDriver } from '../communications/index.js';
 import baileysSessionManager from '../communications/whatsapp-baileys.js';
 import { CommunicationRulesRegistry, DEFAULT_COMMUNICATION_RULES } from '../communications/rules.js';
@@ -27,9 +27,12 @@ import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
 import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
+import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
+import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 
 const router = Router();
 const prisma = new PrismaClient();
+const admissionRetryStore = new AdmissionDeliveryRetryStore(prisma);
 const resultsDomain = new ResultsDomainService(prisma);
 const communicationRulesRegistry = new CommunicationRulesRegistry(DEFAULT_COMMUNICATION_RULES);
 
@@ -111,6 +114,15 @@ const sharedDriverManager = new DriverManager({
         String(metadata.customMessage ?? ''),
         logoUrl,
       );
+    } else if (request.event.startsWith('Admission')) {
+      await sendPlatformCommunicationEmail(
+        recipient.address,
+        recipient.name ?? 'Applicant',
+        schoolName,
+        request.subject ?? 'Admission application update',
+        request.subject ?? 'Admission application update',
+        request.body ?? '',
+      );
     } else {
       await sendFeeReminderEmail(
         recipient.address,
@@ -164,7 +176,36 @@ const sharedDriverManager = new DriverManager({
   }),
 });
 
-const sharedDeliveryQueue = new DeliveryQueue(sharedDriverManager.send.bind(sharedDriverManager));
+const sharedDeliveryQueue = new DeliveryQueue(
+  sharedDriverManager.send.bind(sharedDriverManager),
+  async (task, outcome, attemptNumber) => {
+    const metadata = task.request.metadata ?? {};
+    if (!String(task.request.event).startsWith('Admission') || typeof metadata.admissionApplicationId !== 'string') return;
+    await (prisma as any).admissionDeliveryAttempt.upsert({
+      where: {
+        admissionApplicationId_audience_channel_attemptNumber: {
+          admissionApplicationId: metadata.admissionApplicationId,
+          audience: String(metadata.audience ?? 'APPLICANT_STATUS'),
+          channel: outcome.channel,
+          attemptNumber,
+        },
+      },
+      create: {
+        admissionApplicationId: metadata.admissionApplicationId,
+        audience: String(metadata.audience ?? 'APPLICANT_STATUS'),
+        channel: outcome.channel,
+        attemptNumber,
+        status: outcome.status,
+        provider: outcome.provider,
+        providerMessageId: outcome.messageId,
+        error: outcome.error,
+      },
+      update: { status: outcome.status, provider: outcome.provider, providerMessageId: outcome.messageId, error: outcome.error },
+    });
+  },
+  admissionRetryStore,
+);
+void sharedDeliveryQueue.restorePending().catch((error) => console.error('[admissions] Could not restore durable email retries:', error));
 
 function createCommunicationService() {
   return new CommunicationService({
@@ -174,6 +215,65 @@ function createCommunicationService() {
     deliveryQueue: sharedDeliveryQueue,
     driverManager: sharedDriverManager,
   });
+}
+
+async function notifyAdmissionApplicantStatus(application: any, status: string, schoolId: string, requestedInformation?: string, statusToken?: string | null) {
+  const recipients = [
+    ...(application.email ? [{ channel: 'EMAIL' as const, address: application.email, name: `${application.firstName} ${application.lastName}`.trim() }] : []),
+    ...(application.phone ? [{ channel: 'WHATSAPP' as const, address: application.phone, name: `${application.firstName} ${application.lastName}`.trim() }] : []),
+  ];
+  if (!recipients.length) return;
+  const school = await prisma.school.findUnique({ where: { id: schoolId }, select: { name: true, slug: true, logoUrl: true } });
+  const normalizedStatus = String(status).toUpperCase();
+  const configuredFrontendUrl = String(process.env.FRONTEND_URL ?? '').split(',')[0]?.trim();
+  let frontendOrigin = 'https://www.schoolbase.live';
+  try {
+    const parsed = new URL(configuredFrontendUrl || frontendOrigin);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') frontendOrigin = `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    // Keep the canonical public host when configuration is invalid.
+  }
+  const statusUrl = statusToken && school?.slug
+    ? `${frontendOrigin}/admissions/${encodeURIComponent(school.slug)}/status#${encodeURIComponent(statusToken)}`
+    : null;
+  const emailRecipient = recipients.find((recipient) => recipient.channel === 'EMAIL');
+  if (emailRecipient && emailRecipient.address) {
+    try {
+      await sendAdmissionApplicantStatusEmail({
+        email: emailRecipient.address,
+        applicantName: emailRecipient.name || `${application.firstName ?? ''} ${application.lastName ?? ''}`.trim() || 'Applicant',
+        schoolName: school?.name || 'the school',
+        status: normalizedStatus,
+        requestedInformation,
+        statusUrl,
+        schoolLogo: school?.logoUrl ?? undefined,
+      });
+    } catch (error) {
+      console.error('[admissions] Failed to send branded applicant status email:', error);
+    }
+  }
+
+  const whatsappRecipients = recipients.filter((recipient) => recipient.channel === 'WHATSAPP');
+  const message = normalizedStatus === 'APPROVED'
+    ? `Your application to ${school?.name || 'the school'} has been approved. The admissions team will contact you with next steps.`
+    : normalizedStatus === 'REJECTED'
+      ? `Your application to ${school?.name || 'the school'} has been declined. Please contact the school if you need further information.`
+      : normalizedStatus === 'NEEDS_INFORMATION'
+        ? `${requestedInformation || 'The admissions team needs more information to continue reviewing your application.'}${statusUrl ? `\n\nReply securely or check your application status here:\n${statusUrl}` : ''}`
+        : null;
+  if (message && whatsappRecipients.length) {
+    const event = `Admission${normalizedStatus}`;
+    await createCommunicationService().dispatch({
+      event,
+      schoolId,
+      recipients: whatsappRecipients,
+      template: 'Admission',
+      subject: `Admission application update: ${normalizedStatus.replace(/_/g, ' ')}`,
+      body: message,
+      data: { schoolName: school?.name || 'your school', recipientName: `${application.firstName} ${application.lastName}`.trim(), ...(statusUrl ? { statusUrl } : {}) },
+      metadata: { admissionApplicationId: application.id, audience: `APPLICANT_${normalizedStatus}` },
+    });
+  }
 }
 
 // Setup multer for file uploads
@@ -509,6 +609,13 @@ async function resolveUserId(req: Request): Promise<string | null> {
   return null;
 }
 
+async function isSchoolAdmissionAdmin(req: Request, schoolId: string): Promise<boolean> {
+  const userId = await resolveUserId(req);
+  if (!userId) return false;
+  const user = await prisma.user.findFirst({ where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true } });
+  return Boolean(user);
+}
+
 async function resolveSchoolId(req: Request) {
   // Check unified session cookie (supports both old and new names for backward compatibility)
   const token = req.cookies?.schoolbase_session || req.cookies?.schoolbase_staff || req.cookies?.staff_session;
@@ -641,16 +748,362 @@ router.use((req: Request, res: Response, next: any) => {
 });
 
 // GET /api/admin/admissions - List admission applications for the current school
+router.get('/admissions/notifications', async (req: Request, res: Response) => {
+  try {
+    const [schoolId, userId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
+    if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
+
+    const recipient = await prisma.user.findFirst({
+      where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' },
+      select: { id: true },
+    });
+    if (!recipient) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+
+    const where = { schoolId, recipientUserId: recipient.id };
+    const [notifications, unreadCount] = await Promise.all([
+      prisma.schoolAdminNotification.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        select: {
+          id: true,
+          type: true,
+          title: true,
+          body: true,
+          createdAt: true,
+          readAt: true,
+          admissionApplication: {
+            select: {
+              id: true,
+              intendedClass: true,
+              status: true,
+            },
+          },
+        },
+      }),
+      prisma.schoolAdminNotification.count({ where: { ...where, readAt: null } }),
+    ]);
+
+    res.json({ notifications, unreadCount });
+  } catch (error) {
+    console.error('Error fetching school admission notifications:', error);
+    res.status(500).json({ error: 'Failed to fetch admission notifications' });
+  }
+});
+
+router.patch('/admissions/notifications/:notificationId/read', async (req: Request, res: Response) => {
+  try {
+    const [schoolId, userId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
+    if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
+
+    const recipient = await prisma.user.findFirst({
+      where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' },
+      select: { id: true },
+    });
+    if (!recipient) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+
+    const result = await prisma.schoolAdminNotification.updateMany({
+      where: { id: req.params.notificationId, schoolId, recipientUserId: recipient.id, readAt: null },
+      data: { readAt: new Date() },
+    });
+    if (result.count === 0) {
+      const exists = await prisma.schoolAdminNotification.findFirst({
+        where: { id: req.params.notificationId, schoolId, recipientUserId: recipient.id },
+        select: { id: true },
+      });
+      if (!exists) return res.status(404).json({ error: 'Notification not found' });
+    }
+    res.json({ success: true, read: true });
+  } catch (error) {
+    console.error('Error marking school admission notification read:', error);
+    res.status(500).json({ error: 'Failed to update admission notification' });
+  }
+});
+
+router.get('/admissions/reports', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+    const from = req.query.from ? new Date(String(req.query.from)) : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+    const to = req.query.to ? new Date(String(req.query.to)) : new Date();
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return res.status(400).json({ error: 'A valid reporting date range is required' });
+    const where = { schoolId, createdAt: { gte: from, lte: to } };
+    const [total, byStatus, byClass, firstResponse] = await Promise.all([
+      prisma.admissionApplication.count({ where }),
+      prisma.admissionApplication.groupBy({ by: ['status'], where, _count: { _all: true } }),
+      prisma.admissionApplication.groupBy({ by: ['intendedClass'], where, _count: { _all: true } }),
+      prisma.$queryRaw<Array<{ averageHours: number | null; reviewedCount: number }>>`
+        SELECT AVG(TIMESTAMPDIFF(SECOND, submittedAt, reviewedAt)) / 3600 AS averageHours,
+               COUNT(*) AS reviewedCount
+        FROM AdmissionApplication
+        WHERE schoolId = ${schoolId} AND createdAt >= ${from} AND createdAt <= ${to} AND reviewedAt IS NOT NULL
+      `,
+    ]);
+    const counts = Object.fromEntries(byStatus.map((item) => [item.status, item._count._all >= 5 ? item._count._all : null]));
+    const approvedCount = byStatus.find((item) => item.status === 'APPROVED')?._count._all ?? 0;
+    return res.json({
+      range: { from: from.toISOString(), to: to.toISOString() },
+      total,
+      statusCounts: counts,
+      suppressedStatusGroups: byStatus.filter((item) => item._count._all < 5).length,
+      approvalRate: total >= 5 && approvedCount >= 5 ? approvedCount / total : null,
+      averageHoursToFirstReview: Number(firstResponse[0]?.reviewedCount ?? 0) >= 5 ? firstResponse[0]?.averageHours ?? null : null,
+      byClass: byClass
+        .filter((item) => item._count._all >= 5)
+        .map((item) => ({ intendedClass: item.intendedClass || 'Unspecified', count: item._count._all })),
+      suppressedClassGroups: byClass.filter((item) => item._count._all < 5).length,
+    });
+  } catch (error) {
+    console.error('Error building admissions report:', error);
+    return res.status(500).json({ error: 'Failed to build admissions report' });
+  }
+});
+
+router.get('/admissions/reviewers', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+    const currentUserId = await resolveUserId(req);
+    const reviewers = await prisma.user.findMany({
+      where: { schoolId, role: 'SCHOOL_ADMIN' },
+      select: { id: true, name: true, email: true },
+      orderBy: { name: 'asc' },
+    });
+    return res.json({ reviewers, currentUserId });
+  } catch (error) {
+    console.error('Error fetching admission reviewers:', error);
+    return res.status(500).json({ error: 'Failed to fetch reviewers' });
+  }
+});
+
+router.get('/admissions/:id/events', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+    const application = await prisma.admissionApplication.findFirst({ where: { id: req.params.id, schoolId }, select: { id: true } });
+    if (!application) return res.status(404).json({ error: 'Admission application not found' });
+    const events = await prisma.admissionApplicationEvent.findMany({
+      where: { admissionApplicationId: application.id, schoolId },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      select: { id: true, type: true, fromStatus: true, toStatus: true, reason: true, metadata: true, actorName: true, createdAt: true },
+    });
+    return res.json({ events });
+  } catch (error) {
+    console.error('Error fetching admission application events:', error);
+    return res.status(500).json({ error: 'Failed to fetch application history' });
+  }
+});
+
+router.patch('/admissions/:id/review', async (req: Request, res: Response) => {
+  try {
+    const [schoolId, userId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
+    if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
+    const actor = await prisma.user.findFirst({ where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true, name: true } });
+    if (!actor) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+
+    const application = await prisma.admissionApplication.findFirst({ where: { id: req.params.id, schoolId }, select: { id: true } });
+    if (!application) return res.status(404).json({ error: 'Admission application not found' });
+    const assignedReviewerId = req.body?.assignedReviewerId === null || req.body?.assignedReviewerId === ''
+      ? null
+      : String(req.body?.assignedReviewerId ?? '').trim() || undefined;
+    if (assignedReviewerId) {
+      const reviewer = await prisma.user.findFirst({ where: { id: assignedReviewerId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true } });
+      if (!reviewer) return res.status(400).json({ error: 'Reviewer must be an admin in this school' });
+    }
+    const internalReviewNotes = req.body?.internalReviewNotes;
+    if (internalReviewNotes !== undefined && (typeof internalReviewNotes !== 'string' || internalReviewNotes.length > 10000)) {
+      return res.status(400).json({ error: 'Review notes must be text under 10,000 characters' });
+    }
+    const followUpAt = req.body?.followUpAt ? new Date(req.body.followUpAt) : req.body?.followUpAt === null ? null : undefined;
+    if (followUpAt && Number.isNaN(followUpAt.getTime())) return res.status(400).json({ error: 'Follow-up date is invalid' });
+
+    const updated = await prisma.$transaction(async (transaction) => {
+      const data = {
+        ...(assignedReviewerId !== undefined ? { assignedReviewerId } : {}),
+        ...(internalReviewNotes !== undefined ? { internalReviewNotes: internalReviewNotes.trim() || null } : {}),
+        ...(followUpAt !== undefined ? { followUpAt } : {}),
+      };
+      const record = await transaction.admissionApplication.update({ where: { id: application.id }, data });
+      await transaction.admissionApplicationEvent.create({
+        data: {
+          schoolId,
+          admissionApplicationId: application.id,
+          actorUserId: actor.id,
+          actorName: actor.name,
+          type: 'REVIEW_UPDATED',
+          metadata: { changedFields: Object.keys(data) },
+        },
+      });
+      return record;
+    });
+    return res.json({ success: true, application: updated });
+  } catch (error) {
+    console.error('Error updating admission review:', error);
+    return res.status(500).json({ error: 'Failed to update application review' });
+  }
+});
+
+router.get('/admissions/export', async (req: Request, res: Response) => {
+  try {
+    const [schoolId, actorId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
+    if (!schoolId || !actorId) return res.status(401).json({ error: 'School admin session required' });
+    const actor = await prisma.user.findFirst({ where: { id: actorId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true } });
+    if (!actor) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+
+    const status = String(req.query.status ?? '').trim().toUpperCase();
+    const intendedClass = String(req.query.intendedClass ?? '').trim().slice(0, 120);
+    const reviewerId = String(req.query.reviewerId ?? '').trim();
+    const from = req.query.from ? new Date(String(req.query.from)) : null;
+    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    if (from && Number.isNaN(from.getTime()) || to && Number.isNaN(to.getTime()) || from && to && from > to) {
+      return res.status(400).json({ error: 'A valid export date range is required' });
+    }
+    const where = {
+      schoolId,
+      ...(status && ['SUBMITTED', 'UNDER_REVIEW', 'NEEDS_INFORMATION', 'APPROVED', 'REJECTED', 'WITHDRAWN'].includes(status) ? { status } : {}),
+      ...(intendedClass ? { intendedClass: { contains: intendedClass } } : {}),
+      ...(reviewerId === 'UNASSIGNED' ? { assignedReviewerId: null } : reviewerId ? { assignedReviewerId: reviewerId } : {}),
+      ...(from || to ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
+    };
+    const applications = await prisma.admissionApplication.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 5001,
+      select: {
+        id: true, applicationNumber: true, status: true, intendedClass: true, createdAt: true,
+        reviewedAt: true, assignedReviewer: { select: { name: true } }, studentId: true,
+      },
+    });
+    if (applications.length > 5000) return res.status(413).json({ error: 'Export exceeds 5,000 rows; narrow the date range or filters' });
+    const studentIds = applications.map((application) => application.studentId).filter(Boolean) as string[];
+    const pupils = studentIds.length ? await prisma.pupil.findMany({ where: { schoolId, id: { in: studentIds } }, select: { id: true, admissionNo: true } }) : [];
+    const admissionNumbers = new Map(pupils.map((pupil) => [pupil.id, pupil.admissionNo]));
+    const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const lines = [
+      ['Application reference', 'Status', 'Intended class', 'Received at', 'First reviewed at', 'Reviewer', 'Admission number'].map(csvCell).join(','),
+      ...applications.map((application) => [
+        application.applicationNumber,
+        application.status,
+        application.intendedClass,
+        application.createdAt.toISOString(),
+        application.reviewedAt?.toISOString() ?? '',
+        application.assignedReviewer?.name ?? '',
+        application.studentId ? admissionNumbers.get(application.studentId) ?? '' : '',
+      ].map(csvCell).join(',')),
+    ];
+    await prisma.admissionExportAudit.create({
+      data: {
+        schoolId,
+        actorUserId: actor.id,
+        rowCount: applications.length,
+        filters: { status: status || null, intendedClass: intendedClass || null, reviewerId: reviewerId || null, from: from?.toISOString() ?? null, to: to?.toISOString() ?? null },
+        redacted: true,
+      },
+    });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="admissions-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).send(`\uFEFF${lines.join('\r\n')}`);
+  } catch (error) {
+    console.error('Error exporting admission applications:', error);
+    return res.status(500).json({ error: 'Failed to export admissions' });
+  }
+});
+
+router.get('/admissions/:id', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+    const application = await prisma.admissionApplication.findFirst({
+      where: { id: req.params.id, schoolId },
+      include: {
+        assignedReviewer: { select: { id: true, name: true } },
+        deliveryAttempts: {
+          orderBy: { attemptedAt: 'desc' },
+          take: 20,
+          select: { id: true, audience: true, channel: true, attemptNumber: true, status: true, provider: true, providerMessageId: true, error: true, attemptedAt: true },
+        },
+      },
+    });
+    if (!application) return res.status(404).json({ error: 'Admission application not found' });
+    return res.json({ application });
+  } catch (error) {
+    console.error('Error fetching admission application:', error);
+    return res.status(500).json({ error: 'Failed to fetch admission application' });
+  }
+});
+
 router.get('/admissions', async (req: Request, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    if (!(await isSchoolAdmissionAdmin(req, schoolId))) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
-    const applications = await prisma.admissionApplication.findMany({
-      where: { schoolId },
-      orderBy: [{ createdAt: 'desc' }],
+    const page = Math.max(1, Number.parseInt(String(req.query.page ?? '1'), 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? '25'), 10) || 25));
+    const search = String(req.query.search ?? '').trim().slice(0, 120);
+    const status = String(req.query.status ?? '').trim().toUpperCase();
+    const intendedClass = String(req.query.intendedClass ?? '').trim().slice(0, 120);
+    const reviewerId = String(req.query.reviewerId ?? '').trim();
+    const completeness = String(req.query.completeness ?? '').trim().toUpperCase();
+    const queueView = String(req.query.view ?? '').trim().toUpperCase();
+    const fromDate = req.query.from ? new Date(String(req.query.from)) : null;
+    const toDate = req.query.to ? new Date(String(req.query.to)) : null;
+    const sortBy = ['createdAt', 'updatedAt', 'status'].includes(String(req.query.sortBy)) ? String(req.query.sortBy) : 'createdAt';
+    const sortOrder = req.query.sortOrder === 'asc' ? 'asc' : 'desc';
+    const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const andConditions: any[] = [];
+    if (completeness === 'INCOMPLETE') andConditions.push({ OR: [
+      { email: null }, { phone: null }, { studentFirstName: null }, { studentLastName: null }, { guardianPhone: null }, { photoUrl: null },
+    ] });
+    if (completeness === 'COMPLETE') andConditions.push({
+      email: { not: null }, phone: { not: null }, studentFirstName: { not: null },
+      studentLastName: { not: null }, guardianPhone: { not: null }, photoUrl: { not: null },
     });
-
+    if (search) andConditions.push({ OR: [
+      { firstName: { contains: search } }, { lastName: { contains: search } },
+      { childName: { contains: search } }, { applicationNumber: { contains: search } },
+    ] });
+    const where = {
+      schoolId,
+      ...(status && ['SUBMITTED', 'UNDER_REVIEW', 'NEEDS_INFORMATION', 'APPROVED', 'REJECTED', 'WITHDRAWN'].includes(status) ? { status } : {}),
+      ...(intendedClass ? { intendedClass: { contains: intendedClass } } : {}),
+      ...(reviewerId === 'UNASSIGNED' ? { assignedReviewerId: null } : reviewerId ? { assignedReviewerId: reviewerId } : {}),
+      ...(andConditions.length ? { AND: andConditions } : {}),
+      ...(queueView === 'NEEDS_REVIEW' ? { status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } } : {}),
+      ...(queueView === 'AWAITING_FAMILY' ? { status: 'NEEDS_INFORMATION' } : {}),
+      ...(queueView === 'UNASSIGNED' ? { assignedReviewerId: null, status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } } : {}),
+      ...(queueView === 'RECENTLY_UPDATED' ? { updatedAt: { gte: recentCutoff } } : {}),
+      ...(fromDate && !Number.isNaN(fromDate.getTime()) || toDate && !Number.isNaN(toDate.getTime()) ? {
+        createdAt: {
+          ...(fromDate && !Number.isNaN(fromDate.getTime()) ? { gte: fromDate } : {}),
+          ...(toDate && !Number.isNaN(toDate.getTime()) ? { lte: toDate } : {}),
+        },
+      } : {}),
+    };
+    const [applications, total, statusCounts] = await Promise.all([
+      prisma.admissionApplication.findMany({
+        where,
+        orderBy: { [sortBy]: sortOrder },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true, applicationNumber: true, status: true, firstName: true, lastName: true,
+          childName: true, intendedClass: true, studentFirstName: true, studentMiddleName: true,
+          studentLastName: true, studentId: true, createdAt: true, updatedAt: true,
+          reviewedAt: true, reviewedBy: true, assignedReviewerId: true, followUpAt: true,
+          email: true, phone: true, guardianPhone: true, photoUrl: true,
+          assignedReviewer: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.admissionApplication.count({ where }),
+      prisma.admissionApplication.groupBy({ by: ['status'], where: { schoolId }, _count: { _all: true } }),
+    ]);
     const studentIds = applications.map((application) => application.studentId).filter(Boolean) as string[];
     const students = studentIds.length > 0
       ? await prisma.pupil.findMany({
@@ -665,6 +1118,8 @@ router.get('/admissions', async (req: Request, res: Response) => {
         ...application,
         admissionNo: application.studentId ? admissionNumbers.get(application.studentId) || null : null,
       })),
+      pagination: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) },
+      statusCounts: Object.fromEntries(statusCounts.map((item) => [item.status, item._count._all])),
     });
   } catch (error) {
     console.error('Error fetching admission applications:', error);
@@ -675,24 +1130,54 @@ router.get('/admissions', async (req: Request, res: Response) => {
 // PATCH /api/admin/admissions/:id/status - Update an admission application status
 router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
   try {
-    const schoolId = await resolveSchoolId(req);
-    if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    const [schoolId, userId] = await Promise.all([resolveSchoolId(req), resolveUserId(req)]);
+    if (!schoolId || !userId) return res.status(401).json({ error: 'School admin session required' });
+    const actor = await prisma.user.findFirst({ where: { id: userId, schoolId, role: 'SCHOOL_ADMIN' }, select: { id: true, name: true } });
+    if (!actor) return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
 
     const { id } = req.params;
     const { status } = req.body;
-    const allowedStatuses = ['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'];
+    const allowedStatuses = ['SUBMITTED', 'UNDER_REVIEW', 'NEEDS_INFORMATION', 'APPROVED', 'REJECTED', 'WITHDRAWN'];
+    const nextStatus = String(status ?? '').toUpperCase();
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
 
-    if (!allowedStatuses.includes(String(status))) {
+    if (!allowedStatuses.includes(nextStatus)) {
       return res.status(400).json({ error: 'Invalid admission status' });
     }
+    if (requiresAdmissionDecisionReason(nextStatus) && !reason) {
+      return res.status(400).json({ error: 'A reason is required for rejection or withdrawal' });
+    }
+    if (nextStatus === 'NEEDS_INFORMATION' && !reason) {
+      return res.status(400).json({ error: 'Explain what information is needed from the applicant' });
+    }
+    const publicStatusToken = nextStatus === 'NEEDS_INFORMATION' ? crypto.randomBytes(32).toString('base64url') : null;
 
     const application = await prisma.admissionApplication.findFirst({
       where: { id, schoolId },
     });
 
     if (!application) return res.status(404).json({ error: 'Admission application not found' });
+    const currentStatus = String(application.status || 'SUBMITTED').toUpperCase();
+    if (!canTransitionAdmissionStatus(currentStatus, nextStatus)) {
+      return res.status(409).json({ error: `Cannot move an application from ${currentStatus} to ${nextStatus}` });
+    }
+    if (currentStatus === nextStatus && nextStatus !== 'APPROVED') {
+      return res.json({ success: true, unchanged: true, application });
+    }
 
-    if (String(status) === 'APPROVED' && application.studentId) {
+    let classRecord: { id: string } | null = null;
+    if (nextStatus === 'APPROVED' && !application.studentId) {
+      const requestedClassId = typeof req.body?.classId === 'string' ? req.body.classId.trim() : '';
+      classRecord = requestedClassId
+        ? await prisma.class.findFirst({ where: { id: requestedClassId, schoolId }, select: { id: true } })
+        : application.intendedClass
+          ? await prisma.class.findFirst({ where: { schoolId, name: application.intendedClass.trim() }, select: { id: true } })
+          : null;
+      if (requestedClassId && !classRecord) return res.status(400).json({ error: 'Selected class is not available in this school' });
+      if (!classRecord) return res.status(400).json({ error: 'Confirm an available class placement before approving this application' });
+    }
+
+    if (isAdmissionApprovalStatus(nextStatus) && application.studentId) {
       const repaired = await prisma.$transaction(async (transaction) => {
         const existingStudent = await transaction.pupil.findFirst({
           where: { id: application.studentId!, schoolId },
@@ -736,6 +1221,15 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
             reviewedBy: application.reviewedBy || await resolveUserName(req),
           },
         });
+        if (!existingStudent.admissionNo && student.admissionNo) {
+          await transaction.admissionApplicationEvent.create({
+            data: {
+              schoolId, admissionApplicationId: application.id, actorUserId: actor.id, actorName: actor.name,
+              type: 'ADMISSION_NUMBER_REPAIRED', fromStatus: application.status, toStatus: 'APPROVED',
+              reason: reason || null, metadata: { studentId: student.id, admissionNo: student.admissionNo },
+            },
+          });
+        }
 
         return { application: repairedApplication, student };
       });
@@ -748,7 +1242,7 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
       });
     }
 
-    if (String(status) === 'APPROVED') {
+    if (isAdmissionApprovalStatus(nextStatus)) {
       const result = await prisma.$transaction(async (transaction) => {
         const school = await transaction.school.findUnique({
           where: { id: schoolId },
@@ -763,14 +1257,6 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
           year: new Date().getFullYear(),
         });
 
-        const intendedClass = application.intendedClass?.trim();
-        const classRecord = intendedClass
-          ? await transaction.class.findFirst({
-              where: { schoolId, name: intendedClass },
-              select: { id: true },
-            })
-          : null;
-
         const student = await transaction.pupil.create({
           data: {
             schoolId,
@@ -778,7 +1264,7 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
             middleName: application.studentMiddleName,
             lastName: application.studentLastName || application.childName || application.lastName,
             admissionNo,
-            classId: classRecord?.id ?? null,
+            classId: classRecord!.id,
             status: 'ACTIVE',
             isActive: true,
             admissionDate: application.admissionDate || new Date(),
@@ -819,13 +1305,24 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
           },
         });
 
-        const updated = await transaction.admissionApplication.update({
-          where: { id: application.id },
+        const updateResult = await transaction.admissionApplication.updateMany({
+          where: { id: application.id, schoolId, studentId: null, status: application.status },
           data: {
             status: 'APPROVED',
             studentId: student.id,
             reviewedAt: new Date(),
-            reviewedBy: await resolveUserName(req),
+            reviewedBy: actor.name,
+            decisionReason: reason || null,
+          },
+        });
+        if (updateResult.count !== 1) throw new Error('ADMISSION_APPROVAL_CONFLICT');
+        const updated = await transaction.admissionApplication.findUnique({ where: { id: application.id } });
+
+        await transaction.admissionApplicationEvent.create({
+          data: {
+            schoolId, admissionApplicationId: application.id, actorUserId: actor.id, actorName: actor.name,
+            type: 'STATUS_CHANGED', fromStatus: application.status, toStatus: 'APPROVED', reason: reason || null,
+            metadata: { studentId: student.id, guardianId: guardian.id, admissionNo: student.admissionNo, classId: classRecord!.id },
           },
         });
 
@@ -837,18 +1334,39 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
         details: `Approved admission converted to student: ${result.student.firstName} ${result.student.lastName}`,
         schoolId,
       }).catch((error) => console.warn('Failed to record admission conversion activity:', error));
-
+      await notifyAdmissionApplicantStatus(application, 'APPROVED', schoolId)
+        .catch((error) => console.warn('Failed to notify applicant of approval:', error));
       return res.status(200).json({ success: true, ...result });
     }
 
-    const updatedApplication = await prisma.admissionApplication.update({
-      where: { id: application.id },
-      data: {
-        status: String(status),
-        reviewedAt: new Date(),
-        reviewedBy: await resolveUserName(req),
-      },
+    const updatedApplication = await prisma.$transaction(async (transaction) => {
+      const updateResult = await transaction.admissionApplication.updateMany({
+        where: { id: application.id, schoolId, status: application.status },
+        data: {
+          status: nextStatus,
+          reviewedAt: new Date(),
+          reviewedBy: actor.name,
+          decisionReason: reason || null,
+          ...(publicStatusToken ? {
+            publicStatusTokenHash: crypto.createHash('sha256').update(publicStatusToken).digest('hex'),
+            publicStatusTokenExpiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+          } : {}),
+        },
+      });
+      if (updateResult.count !== 1) throw new Error('ADMISSION_STATUS_CONFLICT');
+      const updated = await transaction.admissionApplication.findUnique({ where: { id: application.id } });
+      await transaction.admissionApplicationEvent.create({
+        data: {
+          schoolId, admissionApplicationId: application.id, actorUserId: actor.id, actorName: actor.name,
+          type: nextStatus === 'NEEDS_INFORMATION' ? 'MORE_INFORMATION_REQUESTED' : 'STATUS_CHANGED',
+          fromStatus: application.status, toStatus: nextStatus, reason: reason || null,
+        },
+      });
+      return updated;
     });
+
+    await notifyAdmissionApplicantStatus({ ...application, id: application.id }, nextStatus, schoolId, nextStatus === 'NEEDS_INFORMATION' ? reason : undefined, publicStatusToken)
+      .catch((error) => console.warn('Failed to notify applicant of admission status:', error));
 
     res.json({ success: true, application: updatedApplication });
   } catch (error) {
@@ -1167,6 +1685,7 @@ router.get('/settings', async (req: Request, res: Response) => {
         manualPaymentAccountNumber: true,
         manualPaymentBankName: true,
         admissionsEnabled: true,
+        admissionsCapabilityEnabled: true,
         admissionsOpeningDate: true,
         admissionsClosingDate: true,
         admissionsIntroText: true,
@@ -1210,6 +1729,7 @@ router.get('/settings', async (req: Request, res: Response) => {
         manualPaymentAccountNumber: school.manualPaymentAccountNumber,
         manualPaymentBankName: school.manualPaymentBankName,
         admissionsEnabled: school.admissionsEnabled,
+        admissionsCapabilityEnabled: school.admissionsCapabilityEnabled,
         admissionsOpeningDate: school.admissionsOpeningDate,
         admissionsClosingDate: school.admissionsClosingDate,
         admissionsIntroText: school.admissionsIntroText,
@@ -1264,6 +1784,7 @@ router.post('/settings', async (req: Request, res: Response) => {
       paystackSecret,
       resultAccess,
       admissionsEnabled,
+      admissionsCapabilityEnabled,
       admissionsOpeningDate,
       admissionsClosingDate,
       admissionsIntroText,
@@ -1306,6 +1827,7 @@ router.post('/settings', async (req: Request, res: Response) => {
         stampUrl,
         logoUrl,
         admissionsEnabled: Boolean(admissionsEnabled),
+        admissionsCapabilityEnabled: Boolean(admissionsCapabilityEnabled),
         admissionsOpeningDate: admissionsOpeningDate ? new Date(admissionsOpeningDate) : null,
         admissionsClosingDate: admissionsClosingDate ? new Date(admissionsClosingDate) : null,
         admissionsIntroText: admissionsIntroText || null,
@@ -1422,6 +1944,7 @@ router.get('/settings/data', async (req: Request, res: Response) => {
         manualPaymentAccountNumber: true,
         manualPaymentBankName: true,
         admissionsEnabled: true,
+        admissionsCapabilityEnabled: true,
         admissionsOpeningDate: true,
         admissionsClosingDate: true,
         admissionsIntroText: true,
@@ -1474,6 +1997,7 @@ router.get('/settings/data', async (req: Request, res: Response) => {
         manualPaymentAccountNumber: school.manualPaymentAccountNumber,
         manualPaymentBankName: school.manualPaymentBankName,
         admissionsEnabled: school.admissionsEnabled,
+        admissionsCapabilityEnabled: school.admissionsCapabilityEnabled,
         admissionsOpeningDate: school.admissionsOpeningDate,
         admissionsClosingDate: school.admissionsClosingDate,
         admissionsIntroText: school.admissionsIntroText,

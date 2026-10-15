@@ -1,0 +1,23 @@
+CREATE TABLE `AdmissionDeliveryRetry` (
+  `id` VARCHAR(191) NOT NULL,
+  `admissionApplicationId` VARCHAR(255) NOT NULL,
+  `schoolId` VARCHAR(191) NOT NULL,
+  `audience` VARCHAR(32) NOT NULL,
+  `event` VARCHAR(64) NOT NULL,
+  `recipient` JSON NOT NULL,
+  `content` JSON NOT NULL,
+  `task` JSON NOT NULL,
+  `attempts` INTEGER NOT NULL DEFAULT 0,
+  `lastError` TEXT NULL,
+  `nextAttemptAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `lockExpiresAt` DATETIME(3) NULL,
+  `expiresAt` DATETIME(3) NOT NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedAt` DATETIME(3) NOT NULL,
+  `status` VARCHAR(24) NOT NULL DEFAULT 'QUEUED',
+  INDEX `AdmissionDeliveryRetry_due_idx` (`status`, `nextAttemptAt`, `lockExpiresAt`),
+  INDEX `AdmissionDeliveryRetry_school_status_idx` (`schoolId`, `status`),
+  PRIMARY KEY (`id`),
+  CONSTRAINT `AdmissionDeliveryRetry_application_fkey` FOREIGN KEY (`admissionApplicationId`) REFERENCES `AdmissionApplication` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `AdmissionDeliveryRetry_school_fkey` FOREIGN KEY (`schoolId`) REFERENCES `School` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

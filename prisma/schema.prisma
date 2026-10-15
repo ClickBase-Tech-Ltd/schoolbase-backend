@@ -56,6 +56,7 @@ model School {
   email                         String?
   websiteEnabled                Boolean                  @default(true)
   showPositions                 Boolean                  @default(false)
+  admissionsCapabilityEnabled  Boolean                  @default(false)
   admissionsEnabled             Boolean                  @default(false)
   admissionsOpeningDate         DateTime?
   admissionsClosingDate         DateTime?
@@ -66,6 +67,9 @@ model School {
   updatedAt                     DateTime                 @updatedAt
   academicYears                 AcademicYear[]
   admissionApplications         AdmissionApplication[]
+  schoolAdminNotifications     SchoolAdminNotification[]
+  admissionApplicationEvents   AdmissionApplicationEvent[]
+  admissionExportAudits        AdmissionExportAudit[]
   admissionCounters             AdmissionCounter[]
   announcements                 Announcement[]
   assessments                   Assessment[]
@@ -514,6 +518,10 @@ model User {
   postedTransactions    FinancialTransaction[] @relation("FinancialTransactionPostedBy")
   reversedTransactions  FinancialTransaction[] @relation("FinancialTransactionReversedBy")
   auditLogChanges       FinancialAuditLog[]
+  admissionNotifications SchoolAdminNotification[]
+  assignedAdmissionApplications AdmissionApplication[] @relation("AdmissionReviewer")
+  admissionApplicationEvents AdmissionApplicationEvent[] @relation("AdmissionEventActor")
+  admissionExportAudits AdmissionExportAudit[] @relation("AdmissionExportActor")
   competitionAccount    CompetitionPupilAccount?  @relation("CompetitionPupilAccountUser")
   competitionAccountsLinked CompetitionPupilAccount[] @relation("CompetitionPupilAccountLinkedBy")
   competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
@@ -2656,6 +2664,9 @@ model AdmissionApplication {
   id                   String    @id @default(cuid()) @db.VarChar(255)
   schoolId             String    @db.VarChar(255)
   applicationNumber    String?   @db.VarChar(255)
+  requestKey           String?   @db.VarChar(255)
+  publicStatusTokenHash String?  @unique(map: "AdmissionApplication_status_token_key") @db.VarChar(64)
+  publicStatusTokenExpiresAt DateTime? @db.DateTime(0)
   status               String    @default("SUBMITTED") @db.VarChar(255)
   firstName            String    @db.VarChar(255)
   lastName             String    @db.VarChar(255)
@@ -2691,13 +2702,121 @@ model AdmissionApplication {
   submittedAt          DateTime  @default(now()) @db.DateTime(0)
   reviewedAt           DateTime? @db.DateTime(0)
   reviewedBy           String?   @db.VarChar(255)
+  assignedReviewerId   String?   @db.VarChar(191)
+  internalReviewNotes  String?   @db.LongText
+  followUpAt           DateTime? @db.DateTime(0)
+  decisionReason       String?   @db.LongText
   createdAt            DateTime  @default(now()) @db.DateTime(0)
   updatedAt            DateTime  @updatedAt @db.DateTime(0)
   school               School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  notifications        SchoolAdminNotification[]
+  deliveryAttempts     AdmissionDeliveryAttempt[]
+  deliveryRetries      AdmissionDeliveryRetry[]
+  assignedReviewer     User?     @relation("AdmissionReviewer", fields: [assignedReviewerId], references: [id], onDelete: SetNull)
+  events               AdmissionApplicationEvent[]
 
   @@index([schoolId], map: "AdmissionApplication_schoolId_fkey")
   @@index([status], map: "AdmissionApplication_status_idx")
   @@index([studentId], map: "AdmissionApplication_studentId_idx")
+  @@index([schoolId, assignedReviewerId, status, createdAt], map: "AdmissionApplication_queue_idx")
+  @@unique([schoolId, applicationNumber], map: "AdmissionApplication_school_app_ref_key")
+  @@unique([schoolId, requestKey], map: "AdmissionApplication_school_request_key")
+}
+
+model AdmissionApplicationEvent {
+  id                     String               @id @default(cuid()) @db.VarChar(191)
+  schoolId               String               @db.VarChar(191)
+  admissionApplicationId String               @db.VarChar(255)
+  actorUserId            String?              @db.VarChar(191)
+  actorName              String               @db.VarChar(191)
+  type                   String               @db.VarChar(64)
+  fromStatus             String?              @db.VarChar(64)
+  toStatus               String?              @db.VarChar(64)
+  reason                 String?              @db.LongText
+  metadata               Json?
+  createdAt              DateTime             @default(now())
+  school                 School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  admissionApplication   AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
+  actor                  User?                @relation("AdmissionEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, admissionApplicationId, createdAt], map: "AdmissionApplicationEvent_scope_created_idx")
+  @@index([actorUserId, createdAt], map: "AdmissionApplicationEvent_actor_created_idx")
+}
+
+model AdmissionExportAudit {
+  id          String   @id @default(cuid()) @db.VarChar(191)
+  schoolId    String   @db.VarChar(191)
+  actorUserId String   @db.VarChar(191)
+  rowCount    Int
+  filters     Json?
+  redacted    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  school      School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  actor       User     @relation("AdmissionExportActor", fields: [actorUserId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, createdAt])
+  @@index([actorUserId, createdAt])
+}
+
+model SchoolAdminNotification {
+  id                    String              @id @default(cuid()) @db.VarChar(191)
+  schoolId              String              @db.VarChar(191)
+  recipientUserId       String              @db.VarChar(191)
+  admissionApplicationId String              @db.VarChar(255)
+  type                  String              @default("ADMISSION_APPLICATION") @db.VarChar(64)
+  title                 String              @db.VarChar(180)
+  body                  String              @db.VarChar(500)
+  createdAt             DateTime            @default(now())
+  readAt                DateTime?
+  school                School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  recipient             User                @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+  admissionApplication  AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
+
+  @@unique([recipientUserId, admissionApplicationId, type], map: "SchoolAdminNotification_recipient_application_type_key")
+  @@index([recipientUserId, readAt, createdAt])
+  @@index([schoolId, createdAt])
+  @@index([admissionApplicationId])
+}
+
+model AdmissionDeliveryAttempt {
+  id                     String               @id @default(cuid()) @db.VarChar(191)
+  admissionApplicationId String               @db.VarChar(255)
+  audience               String               @db.VarChar(32)
+  channel                String               @db.VarChar(64)
+  attemptNumber          Int
+  status                 String               @db.VarChar(32)
+  provider               String?              @db.VarChar(128)
+  providerMessageId      String?              @db.VarChar(255)
+  error                  String?              @db.Text
+  attemptedAt            DateTime             @default(now())
+  admissionApplication   AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
+
+  @@unique([admissionApplicationId, audience, channel, attemptNumber], map: "AdmissionDeliveryAttempt_once_idx")
+  @@index([admissionApplicationId, attemptedAt])
+  @@index([status, attemptedAt])
+}
+
+model AdmissionDeliveryRetry {
+  id                     String               @id @db.VarChar(191)
+  admissionApplicationId String               @db.VarChar(255)
+  schoolId               String               @db.VarChar(191)
+  audience               String               @db.VarChar(32)
+  event                  String               @db.VarChar(64)
+  recipient              Json
+  content                Json
+  task                   Json
+  attempts               Int                  @default(0)
+  lastError              String?              @db.Text
+  nextAttemptAt          DateTime             @default(now())
+  lockExpiresAt          DateTime?
+  expiresAt              DateTime
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+  admissionApplication   AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
+
+  @@index([nextAttemptAt, lockExpiresAt])
+  @@index([schoolId, status])
+  status                 String               @default("QUEUED") @db.VarChar(24)
 }
 
 model AdmissionCounter {

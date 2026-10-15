@@ -58,17 +58,24 @@ const BRAND = {
 
 const DEFAULT_EMAIL_LOGO = 'https://schoolbase.live/logo.png';
 
-function buildAssetUrl(value?: string | null): string | null {
-  if (!value) return null;
+export function buildEmailAssetUrlCandidates(value?: string | null): string[] {
+  if (!value) return [];
+  if (/^https?:\/\//.test(value)) return [value];
 
-  if (/^https?:\/\//.test(value)) {
-    return value;
-  }
+  const assetPath = value.startsWith('/') ? value : `/${value}`;
+  const configuredBases = [
+    process.env.BACKEND_URL,
+    process.env.API_URL,
+    process.env.BACKEND_API_URL,
+    process.env.NEXT_PUBLIC_API_URL,
+    'http://localhost:3006',
+    'https://api.schoolbase.live',
+  ].filter((base): base is string => Boolean(base));
 
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.BACKEND_URL || 'http://localhost:3006';
-  const normalizedBase = baseUrl.replace(/\/$/, '');
-
-  return new URL(value.startsWith('/') ? value : `/${value}`, normalizedBase).toString();
+  return [...new Set(configuredBases.map((base) => {
+    const normalizedBase = base.replace(/\/+$/, '').replace(/\/api$/, '');
+    return new URL(assetPath, normalizedBase).toString();
+  }))];
 }
 
 function getLogoExtension(contentType: string): string {
@@ -87,12 +94,12 @@ function getLogoContentType(value: string): string {
   return 'image/png';
 }
 
-async function fetchInlineLogo(value?: string | null) {
-  let assetUrl: string | null = null;
+export async function fetchInlineLogo(value?: string | null) {
+  if (!value) return null;
 
-  try {
-    if (value && value.startsWith('/') && !/^https?:\/\//.test(value)) {
-      const localPath = path.join(process.cwd(), value.replace(/^\/+/, ''));
+  if (value.startsWith('/') && !/^https?:\/\//.test(value)) {
+    const localPath = path.join(process.cwd(), value.replace(/^\/+/, ''));
+    try {
       const content = await readFile(localPath);
       const cid = `school-logo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -105,30 +112,35 @@ async function fetchInlineLogo(value?: string | null) {
           contentType: getLogoContentType(localPath),
         },
       };
+    } catch {
+      // The logo may be stored on a different backend instance; try its public asset URL below.
     }
-
-    assetUrl = buildAssetUrl(value);
-    if (!assetUrl) return null;
-
-    const response = await fetch(assetUrl);
-    if (!response.ok) return null;
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get('content-type') || 'image/png';
-    const cid = `school-logo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    return {
-      src: `cid:${cid}`,
-      attachment: {
-        filename: `school-logo.${getLogoExtension(contentType)}`,
-        content: buffer,
-        cid,
-        contentType,
-      },
-    };
-  } catch {
-    return null;
   }
+
+  for (const assetUrl of buildEmailAssetUrlCandidates(value)) {
+    try {
+      const response = await fetch(assetUrl);
+      if (!response.ok) continue;
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const contentType = response.headers.get('content-type') || 'image/png';
+      const cid = `school-logo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      return {
+        src: `cid:${cid}`,
+        attachment: {
+          filename: `school-logo.${getLogoExtension(contentType)}`,
+          content: buffer,
+          cid,
+          contentType,
+        },
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 const EMAIL_STYLES = `
@@ -1250,6 +1262,98 @@ export async function sendTeacherWelcomeEmail(
   }
 }
 
+export function buildAdmissionApplicantEmailContent(input: {
+  schoolName: string;
+  subject: string;
+  body: string;
+  logoSrc: string;
+}) {
+  const escapeHtml = (value: string) => value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  const bodyHtml = input.body
+    .split(/\n\s*\n/)
+    .filter((paragraph) => paragraph.trim())
+    .map((paragraph) => {
+      const escaped = escapeHtml(paragraph).replace(/\n/g, '<br>');
+      const linked = escaped.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" style="color: ${BRAND.primary};">$1</a>');
+      return `<p>${linked}</p>`;
+    })
+    .join('');
+
+  return {
+    text: `${input.body}\n\nWarm regards,\n${input.schoolName} Admissions Team\n\nQuestions? Contact support@schoolbase.live`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <style>${EMAIL_STYLES}</style>
+        </head>
+        <body>
+          <div class="email-container">
+            <div class="header">
+              <img src="${input.logoSrc}" alt="${escapeHtml(input.schoolName)}" class="logo" style="width: 60px; height: 60px; border-radius: 50%; object-fit: cover;">
+              <h1>${escapeHtml(input.schoolName)}</h1>
+              <p class="header-subtitle">${escapeHtml(input.subject)}</p>
+            </div>
+            <div class="content">
+              ${bodyHtml}
+              <p style="margin-top: 32px;">Warm regards,<br><strong>${escapeHtml(input.schoolName)} Admissions Team</strong></p>
+              <p>Questions? Contact <a href="mailto:support@schoolbase.live" style="color: ${BRAND.primary};">SchoolBase Support</a>.</p>
+            </div>
+            <div class="footer">
+              <p class="footer-text">&copy; 2026 SchoolBase. All rights reserved.</p>
+              <p class="footer-text">Support: <a href="mailto:support@schoolbase.live">support@schoolbase.live</a></p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `,
+  };
+}
+
+export async function sendAdmissionApplicantEmail(
+  email: string,
+  schoolName: string,
+  subject: string,
+  body: string,
+  schoolLogo?: string | null,
+) {
+  try {
+    if (!isValidEmail(email)) {
+      throw new Error(`Invalid email address: ${email}`);
+    }
+
+    const schoolLogoInline = await fetchInlineLogo(schoolLogo);
+    const attachments = schoolLogoInline?.attachment ? [schoolLogoInline.attachment] : undefined;
+    const content = buildAdmissionApplicantEmailContent({
+      schoolName,
+      subject,
+      body,
+      logoSrc: schoolLogoInline?.src ?? DEFAULT_EMAIL_LOGO,
+    });
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+      to: email,
+      subject,
+      text: content.text,
+      ...(attachments ? { attachments } : {}),
+      html: content.html,
+    });
+
+    console.log('Branded admission applicant email sent to:', email);
+    return true;
+  } catch (error) {
+    console.error('Failed to send branded admission applicant email:', error);
+    throw error;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TEMPLATE 6: ATTENDANCE NOTIFICATION EMAIL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1715,7 +1819,7 @@ export async function sendAdmissionNotificationEmail(
           <body>
             <div class="email-container">
               <div class="header">
-                ${schoolLogoInline ? `<img src="${schoolLogoInline.src}" alt="${schoolName}" class="logo" style="width: 60px; height: 60px; border-radius: 50%; object-fit: cover;">` : ''}
+                ${schoolLogoInline ? `<img src="${schoolLogoInline.src}" alt="${schoolName}" class="logo" style="width: 60px; height: 60px; border-radius: 50%; object-fit: cover;">` : `<img src="${DEFAULT_EMAIL_LOGO}" alt="SchoolBase Logo" class="logo" />`}
                 <h1>${schoolName}</h1>
                 <p class="header-subtitle">Student Registration</p>
               </div>
@@ -1749,6 +1853,126 @@ export async function sendAdmissionNotificationEmail(
     return true;
   } catch (error) {
     console.error('Failed to send admission notification email:', error);
+    throw error;
+  }
+}
+
+export async function sendAdmissionApplicantStatusEmail({
+  email,
+  applicantName,
+  schoolName,
+  status,
+  requestedInformation,
+  statusUrl,
+  schoolLogo,
+}: {
+  email: string;
+  applicantName: string;
+  schoolName: string;
+  status: 'APPROVED' | 'REJECTED' | 'NEEDS_INFORMATION' | string;
+  requestedInformation?: string | null;
+  statusUrl?: string | null;
+  schoolLogo?: string | null;
+}) {
+  try {
+    if (!isValidEmail(email)) {
+      throw new Error(`Invalid email address: ${email}`);
+    }
+
+    const normalizedStatus = String(status || 'UPDATE').toUpperCase();
+    const title = normalizedStatus === 'APPROVED'
+      ? 'Application Approved'
+      : normalizedStatus === 'REJECTED'
+        ? 'Application Update'
+        : normalizedStatus === 'NEEDS_INFORMATION'
+          ? 'Additional Information Needed'
+          : 'Application Update';
+
+    const introText = normalizedStatus === 'APPROVED'
+      ? `Your application to <strong>${schoolName}</strong> has been approved. The admissions team will contact you with the next steps shortly.`
+      : normalizedStatus === 'REJECTED'
+        ? `Your application to <strong>${schoolName}</strong> has been reviewed. Please contact the school if you would like further information about the decision.`
+        : normalizedStatus === 'NEEDS_INFORMATION'
+          ? `The admissions team needs a little more information before they can complete your application review.`
+          : `Your application to <strong>${schoolName}</strong> has been updated.`;
+
+    const schoolLogoInline = await fetchInlineLogo(schoolLogo);
+    const attachments = schoolLogoInline?.attachment ? [schoolLogoInline.attachment] : undefined;
+    const textBody = [
+      `${title} - ${schoolName}`,
+      '',
+      `Hello ${applicantName},`,
+      '',
+      normalizedStatus === 'APPROVED'
+        ? `Your application to ${schoolName} has been approved. The admissions team will contact you with next steps.`
+        : normalizedStatus === 'REJECTED'
+          ? `Your application to ${schoolName} has been reviewed. Please contact the school if you need further information.`
+          : normalizedStatus === 'NEEDS_INFORMATION'
+            ? `${requestedInformation || 'The admissions team needs more information to continue reviewing your application.'}`
+            : `Your application to ${schoolName} has an update.`,
+      '',
+      statusUrl ? `Check your application status here: ${statusUrl}` : '',
+      '',
+      `Best regards,`,
+      `${schoolName} Admissions Team`,
+    ].join('\n');
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+      to: email,
+      subject: `${title} - ${schoolName}`,
+      text: textBody,
+      ...(attachments ? { attachments } : {}),
+      html: `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <style>${EMAIL_STYLES}</style>
+          </head>
+          <body>
+            <div class="email-container">
+              <div class="header">
+                ${schoolLogoInline ? `<img src="${schoolLogoInline.src}" alt="${schoolName}" class="logo" style="width: 60px; height: 60px; border-radius: 50%; object-fit: cover;">` : `<img src="${DEFAULT_EMAIL_LOGO}" alt="SchoolBase Logo" class="logo" />`}
+                <h1>${schoolName}</h1>
+                <p class="header-subtitle">${title}</p>
+              </div>
+              <div class="content">
+                <p>Hello ${applicantName},</p>
+                <p>${introText}</p>
+
+                ${normalizedStatus === 'NEEDS_INFORMATION' && requestedInformation ? `
+                  <div class="info-box">
+                    <p><strong>Required information:</strong></p>
+                    <p>${requestedInformation}</p>
+                  </div>
+                ` : ''}
+
+                ${normalizedStatus === 'NEEDS_INFORMATION' || statusUrl ? `
+                  <div class="button-container">
+                    <a href="${statusUrl || 'https://schoolbase.live'}" class="button">${normalizedStatus === 'NEEDS_INFORMATION' ? 'Review Your Application' : 'View Status'}</a>
+                  </div>
+                ` : ''}
+
+                ${statusUrl ? `<p>Need to check progress or respond securely? Visit: <a href="${statusUrl}" style="color: ${BRAND.primary};">${statusUrl}</a></p>` : ''}
+
+                <p>Thank you for choosing ${schoolName}. We look forward to supporting your child’s education journey.</p>
+                <p>Warm regards,<br><strong>${schoolName} Admissions Team</strong></p>
+              </div>
+              <div class="footer">
+                <p class="footer-text">&copy; 2026 SchoolBase. All rights reserved.</p>
+                <p class="footer-text">Questions? Contact <a href="mailto:support@schoolbase.live">support@schoolbase.live</a></p>
+              </div>
+            </div>
+          </body>
+        </html>
+      `,
+    });
+
+    console.log(`Admission applicant status email sent to: ${email} (${normalizedStatus})`);
+    return true;
+  } catch (error) {
+    console.error('Failed to send admission applicant status email:', error);
     throw error;
   }
 }

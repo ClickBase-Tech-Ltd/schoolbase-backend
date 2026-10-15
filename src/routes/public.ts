@@ -1,19 +1,22 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash, randomUUID } from 'crypto';
 import multer from 'multer';
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import ReportCardService from '../services/report-card.service.js';
-import { sendPlatformCommunicationEmail } from '../services/email.js';
+import { sendAdmissionApplicantEmail, sendPlatformCommunicationEmail } from '../services/email.js';
 import { CommunicationService, RulesEngine, TemplateEngine, RecipientResolver, DeliveryQueue, DriverManager, EmailDriver, WhatsAppDriver } from '../communications/index.js';
 import baileysSessionManager from '../communications/whatsapp-baileys.js';
 import { CommunicationRulesRegistry, DEFAULT_COMMUNICATION_RULES } from '../communications/rules.js';
 import { normalizeAdmissionStatus } from './admissions-utils.js';
+import { getPublicAdmissionStatus, submitPublicAdmissionReply } from '../services/public-admission-status.js';
 import { getConfiguredPaymentPlans, getPublicPaymentPlans } from '../services/platform-settings.js';
 import { getActivePlacementAds, isValidLandingUrl, normalizePlacementType } from './ads-utils.js';
 import { sendAdvertiserApplicationNotification, sendAdvertiserStatusEmail } from '../services/email.js';
 import { whatsappDeliveryStore } from '../services/whatsapp-delivery-store.js';
+import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 
 type PublicAdmissionsSchool = {
   id: string;
@@ -24,6 +27,7 @@ type PublicAdmissionsSchool = {
   address: string | null;
   city: string | null;
   admissionsEnabled: boolean;
+  admissionsCapabilityEnabled: boolean;
   admissionsOpeningDate: Date | null;
   admissionsClosingDate: Date | null;
   admissionsIntroText: string | null;
@@ -47,10 +51,12 @@ type ExtendedPrismaClient = PrismaClient & {
   adAnalyticsEvent: any;
   adPlacement: any;
   advertiser: any;
+  admissionDeliveryAttempt: any;
 };
 
 const router = Router();
 const prisma = new PrismaClient() as ExtendedPrismaClient;
+const publicAdmissionRetryStore = new AdmissionDeliveryRetryStore(prisma);
 const adApplicationAttempts = new Map<string, number[]>();
 
 router.get('/pricing', async (_req: Request, res: Response) => {
@@ -215,10 +221,27 @@ const reportCardService = new ReportCardService(prisma);
 const publicCommunicationRulesRegistry = new CommunicationRulesRegistry(DEFAULT_COMMUNICATION_RULES);
 
 const publicSharedDriverManager = new DriverManager({
-  EMAIL: new EmailDriver(async ({ recipient, request }) => {
+  EMAIL: new EmailDriver(async ({ recipient, request, content }) => {
     const schoolName = String(request.data?.schoolName ?? 'SchoolBase');
     const subject = String(request.subject ?? 'Admission notification');
     const body = String(request.body ?? '');
+    if (request.event === 'AdmissionCreated' && request.metadata?.audience === 'APPLICANT') {
+      await sendAdmissionApplicantEmail(
+        recipient.address,
+        schoolName,
+        subject,
+        String(request.body ?? content.body),
+        typeof request.data?.schoolLogo === 'string' ? request.data.schoolLogo : undefined,
+      );
+
+      return {
+        channel: 'EMAIL',
+        recipient: recipient.address,
+        status: 'SENT',
+        provider: 'email-service',
+      } as const;
+    }
+
     await sendPlatformCommunicationEmail(
       recipient.address,
       recipient.name ?? 'Recipient',
@@ -260,7 +283,41 @@ const publicSharedDriverManager = new DriverManager({
   }),
 });
 
-const publicSharedDeliveryQueue = new DeliveryQueue(publicSharedDriverManager.send.bind(publicSharedDriverManager));
+const publicSharedDeliveryQueue = new DeliveryQueue(
+  publicSharedDriverManager.send.bind(publicSharedDriverManager),
+  async (task, outcome, attemptNumber) => {
+    const metadata = task.request.metadata ?? {};
+    if (task.request.event !== 'AdmissionCreated' || typeof metadata.admissionApplicationId !== 'string') return;
+    await prisma.admissionDeliveryAttempt.upsert({
+      where: {
+        admissionApplicationId_audience_channel_attemptNumber: {
+          admissionApplicationId: metadata.admissionApplicationId,
+          audience: String(metadata.audience ?? 'UNKNOWN'),
+          channel: outcome.channel,
+          attemptNumber,
+        },
+      },
+      create: {
+        admissionApplicationId: metadata.admissionApplicationId,
+        audience: String(metadata.audience ?? 'UNKNOWN'),
+        channel: outcome.channel,
+        attemptNumber,
+        status: outcome.status,
+        provider: outcome.provider,
+        providerMessageId: outcome.messageId,
+        error: outcome.error,
+      },
+      update: {
+        status: outcome.status,
+        provider: outcome.provider,
+        providerMessageId: outcome.messageId,
+        error: outcome.error,
+      },
+    });
+  },
+  publicAdmissionRetryStore,
+);
+void publicSharedDeliveryQueue.restorePending().catch((error) => console.error('[admissions] Could not restore durable email retries:', error));
 
 function createPublicCommunicationService() {
   return new CommunicationService({
@@ -316,6 +373,7 @@ function normalizePublicAdmissionValue(value: unknown): string | null {
 type AdmissionNotificationSchool = {
   id: string;
   name: string;
+  logoUrl: string | null;
   email: string | null;
   phone: string | null;
 };
@@ -333,21 +391,18 @@ async function notifyAdmissionSubmissionRecipients(
     note: string | null;
     createdAt: Date;
     guardianEmail: string | null;
+    statusUrl: string | null;
   }
 ) {
   const schoolSubject = 'New admission application received';
   const schoolBody = `A new admission application has been submitted for ${school.name}.
 
 Applicant: ${application.firstName} ${application.lastName}
-Email: ${application.email ?? 'N/A'}
-Phone: ${application.phone ?? 'N/A'}
-Student: ${application.childName ?? 'N/A'}
 Intended Class: ${application.intendedClass ?? 'N/A'}
 Submitted At: ${application.createdAt.toLocaleString()}
 
 Review the application in the admissions admin dashboard.`;
 
-  const applicantSubject = 'Your admission application has been received';
   const applicantBody = `Hello ${application.firstName} ${application.lastName},
 
 Thank you for applying to ${school.name}. We have received your admission request for ${application.childName ?? 'your child'} in ${application.intendedClass ?? 'the requested class'}.
@@ -355,48 +410,70 @@ Thank you for applying to ${school.name}. We have received your admission reques
 Our admissions team will review your application and contact you with the next update.
 
 If you need help, you can reply to this email or contact the school directly.`;
+  const applicantConfirmationBody = application.statusUrl
+    ? `${applicantBody}\n\nCheck your application or reply to a request securely here:\n${application.statusUrl}`
+    : applicantBody;
 
-  const recipients = [] as Array<{ channel: 'EMAIL' | 'WHATSAPP'; address: string; name: string }>;
+  const staffRecipients = [] as Array<{ channel: 'EMAIL' | 'WHATSAPP'; address: string; name: string }>;
   if (school.email) {
-    recipients.push({ channel: 'EMAIL', address: school.email, name: 'Admissions Team' });
+    staffRecipients.push({ channel: 'EMAIL', address: school.email, name: 'Admissions Team' });
   }
   if (school.phone) {
-    recipients.push({ channel: 'WHATSAPP', address: school.phone, name: 'Admissions Team' });
+    staffRecipients.push({ channel: 'WHATSAPP', address: school.phone, name: 'Admissions Team' });
   }
+  const applicantRecipients = [] as Array<{ channel: 'EMAIL' | 'WHATSAPP'; address: string; name: string }>;
   if (application.email) {
-    recipients.push({ channel: 'EMAIL', address: application.email, name: `${application.firstName} ${application.lastName}`.trim() || 'Applicant' });
+    applicantRecipients.push({ channel: 'EMAIL', address: application.email, name: `${application.firstName} ${application.lastName}`.trim() || 'Applicant' });
   }
   if (application.phone) {
-    recipients.push({ channel: 'WHATSAPP', address: application.phone, name: `${application.firstName} ${application.lastName}`.trim() || 'Applicant' });
-  }
-
-  if (recipients.length === 0) {
-    return;
+    applicantRecipients.push({ channel: 'WHATSAPP', address: application.phone, name: `${application.firstName} ${application.lastName}`.trim() || 'Applicant' });
   }
 
   const communicationService = createPublicCommunicationService();
+  const dispatches = [
+    { audience: 'SCHOOL', recipients: staffRecipients, subject: schoolSubject, body: schoolBody },
+    { audience: 'APPLICANT', recipients: applicantRecipients, subject: 'Your admission application has been received', body: applicantConfirmationBody },
+  ];
+  for (const delivery of dispatches) {
+    if (delivery.recipients.length === 0) continue;
+    await communicationService.dispatch({
+      event: 'AdmissionCreated',
+      schoolId: school.id,
+      recipients: delivery.recipients,
+      template: 'Admission',
+      subject: delivery.subject,
+      body: delivery.body,
+      data: {
+        schoolName: school.name,
+        schoolLogo: school.logoUrl,
+        studentName: delivery.audience === 'SCHOOL' ? 'Applicant' : application.childName ?? `${application.firstName} ${application.lastName}`.trim(),
+        className: application.intendedClass ?? 'N/A',
+        admissionNo: 'N/A',
+        recipientName: delivery.audience === 'SCHOOL' ? 'Admissions Team' : `${application.firstName} ${application.lastName}`.trim(),
+        ...(delivery.audience === 'APPLICANT' && application.statusUrl ? { statusUrl: application.statusUrl } : {}),
+      },
+      metadata: {
+        admissionApplicationId: application.id,
+        audience: delivery.audience,
+        schoolName: school.name,
+      },
+    });
+  }
+}
 
-  await communicationService.dispatch({
-    event: 'AdmissionCreated',
-    schoolId: school.id,
-    recipients,
-    template: 'Admission',
-    subject: schoolSubject,
-    body: schoolBody,
-    data: {
-      schoolName: school.name,
-      studentName: application.childName ?? `${application.firstName} ${application.lastName}`.trim(),
-      className: application.intendedClass ?? 'N/A',
-      admissionNo: 'N/A',
-      recipientName: `${application.firstName} ${application.lastName}`.trim(),
-    },
-    metadata: {
-      schoolName: school.name,
-      studentName: application.childName ?? `${application.firstName} ${application.lastName}`.trim(),
-      className: application.intendedClass ?? 'N/A',
-      admissionNo: 'N/A',
-    },
-  });
+function getAdmissionsFrontendOrigin(): string {
+  const configured = String(process.env.FRONTEND_URL ?? '').split(',')[0]?.trim();
+  try {
+    const parsed = new URL(configured || 'https://www.schoolbase.live');
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    // Use the canonical public application host when configuration is invalid.
+  }
+  return 'https://www.schoolbase.live';
+}
+
+function buildPublicAdmissionStatusUrl(schoolSlug: string, token: string): string {
+  return `${getAdmissionsFrontendOrigin()}/admissions/${encodeURIComponent(schoolSlug)}/status#${encodeURIComponent(token)}`;
 }
 
 const publicUploadDir = path.join(process.cwd(), 'uploads', 'photos');
@@ -406,11 +483,26 @@ if (!fs.existsSync(publicUploadDir)) {
 
 const publicStorage = multer.diskStorage({
   destination: publicUploadDir,
-  filename: (_req, _file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`;
+  filename: (_req, file, cb) => {
+    const extension = file.mimetype === 'image/png' ? '.png' : file.mimetype === 'image/webp' ? '.webp' : '.jpg';
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(7)}${extension}`;
     cb(null, uniqueName);
   },
 });
+
+function matchesPublicImageSignature(filePath: string): boolean {
+  const descriptor = fs.openSync(filePath, 'r');
+  try {
+    const header = Buffer.alloc(12);
+    const bytesRead = fs.readSync(descriptor, header, 0, header.length, 0);
+    const isJpeg = bytesRead >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    const isPng = bytesRead >= 8 && header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const isWebp = bytesRead >= 12 && header.toString('ascii', 0, 4) === 'RIFF' && header.toString('ascii', 8, 12) === 'WEBP';
+    return isJpeg || isPng || isWebp;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
 
 const publicFileFilter = (_req: any, file: any, cb: any) => {
   const allowedMimes = ['image/jpeg', 'image/png', 'image/webp'];
@@ -489,6 +581,7 @@ router.get('/admissions/:schoolSlug/settings', async (req: Request, res: Respons
         address: true,
         city: true,
         admissionsEnabled: true,
+        admissionsCapabilityEnabled: true,
         admissionsOpeningDate: true,
         admissionsClosingDate: true,
         admissionsIntroText: true,
@@ -522,7 +615,8 @@ router.get('/admissions/:schoolSlug/settings', async (req: Request, res: Respons
 
     res.json({
       ok: true,
-      enabled: Boolean(school.admissionsEnabled),
+      enabled: Boolean(school.admissionsCapabilityEnabled && school.admissionsEnabled),
+      capabilityEnabled: Boolean(school.admissionsCapabilityEnabled),
       school: {
         id: school.id,
         name: school.name,
@@ -566,6 +660,10 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
   });
 }, async (req: Request, res: Response) => {
   try {
+    if (req.file && !matchesPublicImageSignature(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'The uploaded file is not a valid JPEG, PNG, or WebP image' });
+    }
     const schoolSlug = normalizePublicAdmissionValue(req.body?.schoolSlug);
     const firstName = normalizePublicAdmissionValue(req.body?.firstName);
     const lastName = normalizePublicAdmissionValue(req.body?.lastName);
@@ -595,6 +693,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
     const guardianOccupation = normalizePublicAdmissionValue(req.body?.guardianOccupation);
     const note = normalizePublicAdmissionValue(req.body?.note);
     const requestId = normalizePublicAdmissionValue(req.headers['x-admission-request-id']);
+    const publicStatusToken = normalizePublicAdmissionValue(req.headers['x-admission-status-token']);
     const parentName = `${guardianFirst || firstName || ''} ${guardianLast || lastName || ''}`.trim() || null;
     const childName = `${studentFirstName || ''} ${studentLastName || ''}`.trim() || null;
 
@@ -612,7 +711,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
 
     const school = await prisma.school.findUnique({
       where: { slug: schoolSlug },
-      select: { id: true, name: true, slug: true, email: true, phone: true, admissionsContactInfo: true, address: true, primaryColor: true, logoUrl: true, city: true, admissionsEnabled: true, admissionsOpeningDate: true, admissionsClosingDate: true, admissionsIntroText: true, admissionsRequirements: true },
+      select: { id: true, name: true, slug: true, email: true, phone: true, admissionsContactInfo: true, address: true, primaryColor: true, logoUrl: true, city: true, admissionsCapabilityEnabled: true, admissionsEnabled: true, admissionsOpeningDate: true, admissionsClosingDate: true, admissionsIntroText: true, admissionsRequirements: true },
     });
 
     if (!school) {
@@ -620,6 +719,9 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
     }
 
     const now = new Date();
+    if (!school.admissionsCapabilityEnabled) {
+      return res.status(404).json({ error: 'Online admissions are not available' });
+    }
     if (!school.admissionsEnabled) {
       return res.status(403).json({ error: 'Online admissions are currently closed' });
     }
@@ -640,7 +742,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
 
     if (requestId) {
       const previousApplication = await prisma.admissionApplication.findFirst({
-        where: { schoolId: school.id, applicationNumber: requestId },
+        where: { schoolId: school.id, requestKey: requestId },
         select: {
           id: true,
           firstName: true,
@@ -655,6 +757,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
       });
 
       if (previousApplication) {
+        if (req.file) fs.unlink(req.file.path, () => undefined);
         return res.status(200).json({
           ok: true,
           message: 'Admission request already received.',
@@ -666,10 +769,14 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
       }
     }
 
-    const application = await prisma.admissionApplication.create({
-      data: {
+    const application = await prisma.$transaction(async (transaction) => {
+      const createdApplication = await transaction.admissionApplication.create({
+        data: {
         schoolId: school.id,
-        applicationNumber: requestId,
+        requestKey: requestId,
+        applicationNumber: `ADM-${new Date().getFullYear()}-${createHash('sha256').update(`${school.id}:${requestId || randomUUID()}`).digest('hex').slice(0, 8).toUpperCase()}`,
+        publicStatusTokenHash: publicStatusToken ? createHash('sha256').update(publicStatusToken).digest('hex') : null,
+        publicStatusTokenExpiresAt: publicStatusToken ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) : null,
         firstName,
         lastName,
         email,
@@ -702,18 +809,51 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
         guardianAltPhone,
         guardianOccupation,
         studentId: null,
-      },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        email: true,
-        phone: true,
-        childName: true,
-        intendedClass: true,
-        status: true,
-        createdAt: true,
-      },
+        },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          childName: true,
+          intendedClass: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+
+      const admissionAdmins = await transaction.user.findMany({
+        where: { schoolId: school.id, role: 'SCHOOL_ADMIN' },
+        select: { id: true },
+      });
+      if (admissionAdmins.length > 0) {
+        const applicantName = `${firstName} ${lastName}`.trim();
+        await transaction.schoolAdminNotification.createMany({
+          data: admissionAdmins.map((recipient) => ({
+            schoolId: school.id,
+            recipientUserId: recipient.id,
+            admissionApplicationId: createdApplication.id,
+            type: 'ADMISSION_APPLICATION',
+            title: 'New admission application',
+            body: `${applicantName}${intendedClass ? ` · ${intendedClass}` : ''} · received ${createdApplication.createdAt.toLocaleString()}`.slice(0, 500),
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      await transaction.admissionApplicationEvent.create({
+        data: {
+          schoolId: school.id,
+          admissionApplicationId: createdApplication.id,
+          actorName: 'Public applicant',
+          type: 'APPLICATION_SUBMITTED',
+          toStatus: 'SUBMITTED',
+          metadata: { source: 'PUBLIC_FORM' },
+        },
+      });
+
+      return createdApplication;
     }) as {
       id: string;
       firstName: string;
@@ -738,6 +878,7 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
         note: note ?? null,
         createdAt: application.createdAt,
         guardianEmail,
+        statusUrl: publicStatusToken ? buildPublicAdmissionStatusUrl(school.slug, publicStatusToken) : null,
       });
     } catch (notificationError) {
       console.warn('Failed to send admission submission notification:', notificationError);
@@ -752,63 +893,66 @@ router.post('/admissions', (req: Request, res: Response, next: any) => {
       },
     });
   } catch (error) {
+    const prismaError = error as { code?: string; meta?: { target?: string[] } };
+    const retryRequestId = normalizePublicAdmissionValue(req.headers['x-admission-request-id']);
+    const retrySchoolSlug = normalizePublicAdmissionValue(req.body?.schoolSlug);
+    if (prismaError?.code === 'P2002' && retryRequestId && retrySchoolSlug) {
+      const school = await prisma.school.findUnique({ where: { slug: retrySchoolSlug }, select: { id: true } }).catch(() => null);
+      const existing = school?.id ? await prisma.admissionApplication.findFirst({
+        where: { schoolId: school.id, requestKey: retryRequestId },
+        select: { id: true, firstName: true, lastName: true, email: true, phone: true, childName: true, intendedClass: true, status: true, createdAt: true },
+      }).catch(() => null) : null;
+      if (existing) {
+        if (req.file) fs.unlink(req.file.path, () => undefined);
+        return res.status(200).json({
+          ok: true,
+          message: 'Admission request already received.',
+          application: { ...existing, status: normalizeAdmissionStatus(existing.status) },
+        });
+      }
+    }
     console.error('Error creating public admission application:', error);
     res.status(500).json({ error: 'Failed to submit admission request' });
   }
 });
 
-router.get('/admissions/status', async (req: Request, res: Response) => {
+router.post('/admissions/status/reply', async (req: Request, res: Response) => {
   try {
-    const schoolSlug = normalizePublicAdmissionValue(req.query.schoolSlug);
-    const email = normalizePublicAdmissionValue(req.query.email);
+    const schoolSlug = normalizePublicAdmissionValue(req.body?.schoolSlug);
+    const statusToken = normalizePublicAdmissionValue(req.body?.token);
+    if (!schoolSlug || !statusToken || statusToken.length < 32 || statusToken.length > 256) {
+      return res.status(400).json({ error: 'A valid application access token is required' });
+    }
+    const result = await submitPublicAdmissionReply(prisma, {
+      schoolSlug,
+      token: statusToken,
+      message: req.body?.message,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.status(result.status).json({ ok: true, status: 'UNDER_REVIEW', message: result.message });
+  } catch (error) {
+    console.error('Error saving applicant admission reply:', error);
+    return res.status(500).json({ error: 'Unable to send your reply right now' });
+  }
+});
 
-    if (!schoolSlug || !email) {
-      return res.status(400).json({ error: 'School slug and email are required' });
+router.post('/admissions/status', async (req: Request, res: Response) => {
+  try {
+    const schoolSlug = normalizePublicAdmissionValue(req.body?.schoolSlug);
+    const statusToken = normalizePublicAdmissionValue(req.body?.token);
+
+    if (!schoolSlug || !statusToken || statusToken.length < 32 || statusToken.length > 256) {
+      return res.status(400).json({ error: 'School slug and a valid application access token are required' });
     }
 
-    const school = await prisma.school.findUnique({
-      where: { slug: schoolSlug },
-      select: { id: true },
-    });
-
-    if (!school) {
+    const result = await getPublicAdmissionStatus(prisma, schoolSlug, statusToken);
+    if (result === null) {
       return res.status(404).json({ error: 'School not found' });
     }
-
-    const application = await prisma.admissionApplication.findFirst({
-      where: {
-        schoolId: school.id,
-        email,
-      },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        email: true,
-        status: true,
-        createdAt: true,
-      },
-    }) as {
-      id: string;
-      firstName: string;
-      lastName: string;
-      email: string | null;
-      status: string;
-      createdAt: Date;
-    } | null;
-
-    if (!application) {
-      return res.status(404).json({ error: 'No admission request found for that email' });
+    if (result === false) {
+      return res.status(404).json({ error: 'Application status could not be verified' });
     }
-
-    res.json({
-      ok: true,
-      application: {
-        ...application,
-        status: normalizeAdmissionStatus(application.status),
-      },
-    });
+    res.json({ ok: true, ...result });
   } catch (error) {
     console.error('Error fetching admissions status:', error);
     res.status(500).json({ error: 'Failed to fetch admissions status' });

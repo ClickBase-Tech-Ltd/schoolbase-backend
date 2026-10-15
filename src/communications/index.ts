@@ -16,6 +16,13 @@ export interface DeliveryTask {
   createdAt: string;
 }
 
+export interface DurableDeliveryQueueStore {
+  save(task: DeliveryTask): Promise<void>;
+  loadPending(): Promise<DeliveryTask[]>;
+  claim(taskId: string, now: Date, lockExpiresAt: Date): Promise<boolean>;
+  complete(taskId: string): Promise<void>;
+}
+
 export interface DeliveryQueueSummary {
   pendingCount: number;
   nextRunAt?: string;
@@ -212,8 +219,21 @@ export class DeliveryQueue {
       request: CommunicationRequest,
       recipient: CommunicationRecipient,
       content: { subject: string; body: string }
-    ) => Promise<DeliveryOutcome>
+    ) => Promise<DeliveryOutcome>,
+     private readonly onOutcome?: (task: DeliveryTask, outcome: DeliveryOutcome, attemptNumber: number) => Promise<void>,
+    private readonly durableStore?: DurableDeliveryQueueStore,
   ) {}
+
+  async restorePending() {
+    if (!this.durableStore) return 0;
+    const pending = await this.durableStore.loadPending();
+    const knownIds = new Set(this.queue.map((task) => task.id));
+    for (const task of pending) {
+      if (!knownIds.has(task.id)) this.queue.push(task);
+    }
+    this.scheduleNextRetry();
+    return pending.length;
+  }
 
   async enqueue(request: CommunicationRequest, recipient: CommunicationRecipient, content: { subject: string; body: string }) {
     const task: DeliveryTask = {
@@ -231,6 +251,7 @@ export class DeliveryQueue {
       task.attempts += 1;
       task.lastError = outcome.error;
       task.nextAttemptAt = Date.now() + this.delayForAttempt(task.attempts);
+      await this.persistRetry(task);
       this.queue.push(task);
       this.scheduleNextRetry();
     }
@@ -272,6 +293,7 @@ export class DeliveryQueue {
 
     const task = this.queue[index];
     task.nextAttemptAt = Date.now();
+    await this.persistRetry(task);
     this.scheduleNextRetry();
     return true;
   }
@@ -299,12 +321,25 @@ export class DeliveryQueue {
     this.queue = this.queue.filter((task) => task.nextAttemptAt > now);
 
     for (const task of readyTasks) {
+      if (this.durableStore) {
+        const now = new Date();
+        const claimed = await this.durableStore.claim(task.id, now, new Date(now.getTime() + 120_000)).catch((error) => {
+          console.error('[DeliveryQueue] Failed to claim durable retry:', error);
+          return false;
+        });
+        if (!claimed) continue;
+      }
       const outcome = await this.sendTask(task);
       if (outcome.status === 'FAILED' && task.attempts < this.maxAttempts) {
         task.attempts += 1;
         task.lastError = outcome.error;
         task.nextAttemptAt = Date.now() + this.delayForAttempt(task.attempts);
+        await this.persistRetry(task);
         this.queue.push(task);
+      } else {
+        await this.durableStore?.complete(task.id).catch((error) => {
+          console.error('[DeliveryQueue] Failed to complete durable retry:', error);
+        });
       }
     }
 
@@ -313,19 +348,32 @@ export class DeliveryQueue {
     }
   }
 
+  private async persistRetry(task: DeliveryTask) {
+    await this.durableStore?.save(task).catch((error) => {
+      console.error('[DeliveryQueue] Failed to persist retry job:', error);
+    });
+  }
+
   private async sendTask(task: DeliveryTask) {
     try {
       const result = await this.sendFn(task.request, task.recipient, task.content);
+      await this.onOutcome?.(task, result, task.attempts + 1).catch((error) => {
+        console.error('[DeliveryQueue] Failed to persist provider outcome:', error);
+      });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return {
+      const outcome: DeliveryOutcome = {
         channel: task.recipient.channel,
         recipient: task.recipient.address,
         status: 'FAILED' as const,
         provider: 'delivery-queue',
         error: message,
       };
+      await this.onOutcome?.(task, outcome, task.attempts + 1).catch((persistError) => {
+        console.error('[DeliveryQueue] Failed to persist provider outcome:', persistError);
+      });
+      return outcome;
     }
   }
 }
