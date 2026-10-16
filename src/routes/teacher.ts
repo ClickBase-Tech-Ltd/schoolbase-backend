@@ -105,6 +105,58 @@ function normalizeTeacherResultScores(
 router.use(verifyAuth);
 router.use(requireTeacher);
 
+router.get('/school', async (req: AuthenticatedRequest, res) => {
+  try {
+    const schoolId = req.user?.schoolId;
+    if (!schoolId) return res.status(403).json({ error: 'Teacher session has no school scope' });
+
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        initials: true,
+        tagline: true,
+        logoUrl: true,
+        phone: true,
+        email: true,
+        address: true,
+        city: true,
+        country: true,
+        currency: true,
+        timezone: true,
+        websiteEnabled: true,
+        manualPaymentAccountName: true,
+        manualPaymentAccountNumber: true,
+        manualPaymentBankName: true,
+        paymentAccounts: {
+          where: { isActive: true },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          select: {
+            id: true,
+            label: true,
+            bankName: true,
+            accountName: true,
+            accountNumber: true,
+            branchName: true,
+            currency: true,
+            purpose: true,
+            isDefault: true,
+            isActive: true,
+          },
+        },
+      },
+    });
+
+    if (!school) return res.status(404).json({ error: 'School not found' });
+    return res.json(school);
+  } catch (error) {
+    console.error('[GET /api/teacher/school] Failed to fetch teacher school profile:', error);
+    return res.status(500).json({ error: 'Failed to fetch school profile' });
+  }
+});
+
 // GET /api/teacher/dashboard - Teacher dashboard data
 router.get('/dashboard', async (req: AuthenticatedRequest, res) => {
   try {
