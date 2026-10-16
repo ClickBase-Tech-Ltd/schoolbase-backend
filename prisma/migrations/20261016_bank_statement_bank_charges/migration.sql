@@ -1,2 +1,3 @@
-ALTER TABLE `BankStatementReconciliationEvent`
-  MODIFY `action` ENUM('PREPARED', 'APPROVED', 'REOPENED', 'VOIDED', 'BANK_CHARGE_RECORDED') NOT NULL;
+-- The reconciliation event table is created by 20261016_bank_statement_review_controls.
+-- Keep this failed migration name available for Prisma recovery; the enum change is
+-- applied after the table exists by 20261017_bank_charge_reconciliation_action.
