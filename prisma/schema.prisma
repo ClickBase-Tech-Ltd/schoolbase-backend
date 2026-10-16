@@ -112,6 +112,12 @@ model School {
   auditLogs                     PlatformAuditLog[]
   emailLogs                     EmailLog[]
   accountCategories             AccountCategory[]
+  accountingAccounts            AccountingAccount[]
+  accountingJournalEntries      AccountingJournalEntry[]
+  accountingPeriods             AccountingPeriod[]
+  bankStatementImports          BankStatementImport[]
+  bankStatementEvents           BankStatementReconciliationEvent[]
+  cashbookExportAudits          CashbookExportAudit[]
   financialTransactions         FinancialTransaction[]
   financialAuditLogs            FinancialAuditLog[]
   idCardQuotes                  IdCardQuote[]
@@ -518,6 +524,7 @@ model User {
   postedTransactions    FinancialTransaction[] @relation("FinancialTransactionPostedBy")
   reversedTransactions  FinancialTransaction[] @relation("FinancialTransactionReversedBy")
   auditLogChanges       FinancialAuditLog[]
+  cashbookExports       CashbookExportAudit[]
   admissionNotifications SchoolAdminNotification[]
   assignedAdmissionApplications AdmissionApplication[] @relation("AdmissionReviewer")
   admissionApplicationEvents AdmissionApplicationEvent[] @relation("AdmissionEventActor")
@@ -1938,19 +1945,22 @@ enum AdjustmentStatus {
 }
 
 model Payment {
-  id         String        @id @default(cuid())
-  invoiceId  String?
-  amount     Int
-  method     PaymentMethod
-  reference  String?
-  paidAt     DateTime      @default(now())
-  recordedBy String?
-  note       String?
-  invoice    Invoice?      @relation(fields: [invoiceId], references: [id])
-  allocations PaymentAllocation[]
+  id            String        @id @default(cuid())
+  invoiceId     String?
+  amount        Int
+  method        PaymentMethod
+  reference     String?
+  idempotencyKey String?      @db.VarChar(191)
+  paidAt        DateTime      @default(now())
+  recordedBy    String?
+  note          String?
+  invoice       Invoice?      @relation(fields: [invoiceId], references: [id])
+  allocations   PaymentAllocation[]
   accountingTransactions FinancialTransaction[] @relation("PaymentAccountingTransactions")
 
+  @@unique([invoiceId, idempotencyKey])
   @@index([invoiceId], map: "Payment_invoiceId_fkey")
+  @@index([idempotencyKey])
 }
 
 model PaymentAllocation {
@@ -3126,6 +3136,50 @@ enum TransactionStatus {
   VOIDED
 }
 
+enum AccountingAccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum AccountingJournalLineSide {
+  DEBIT
+  CREDIT
+}
+
+enum AccountingJournalStatus {
+  DRAFT
+  POSTED
+  VOIDED
+}
+
+enum AccountingPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+enum BankStatementImportStatus {
+  IMPORTED
+  PREPARED
+  RECONCILED
+  VOIDED
+}
+
+enum BankStatementReconciliationAction {
+  PREPARED
+  APPROVED
+  REOPENED
+  VOIDED
+  BANK_CHARGE_RECORDED
+}
+
+enum BankStatementDirection {
+  DEBIT
+  CREDIT
+}
+
 model EmailLog {
   id             String      @id @default(cuid())
   schoolId       String?
@@ -3163,6 +3217,160 @@ model AccountCategory {
   @@unique([schoolId, type, name])
   @@index([schoolId])
   @@index([type])
+}
+
+model AccountingAccount {
+  id               String                  @id @default(cuid())
+  schoolId          String
+  school            School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  code             String
+  name             String
+  type             AccountingAccountType
+  description      String?
+  isActive         Boolean                 @default(true)
+  parentAccountId  String?
+  parentAccount    AccountingAccount?      @relation("AccountingAccountParent", fields: [parentAccountId], references: [id], onDelete: SetNull)
+  childAccounts    AccountingAccount[]     @relation("AccountingAccountParent")
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  journalLines     AccountingJournalLine[]
+  bankStatementImports BankStatementImport[]
+
+  @@unique([schoolId, code])
+  @@index([schoolId, type])
+}
+
+model AccountingJournalEntry {
+  id              String                    @id @default(cuid())
+  schoolId        String
+  school          School                    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  reference       String
+  description     String?
+  entryDate       DateTime
+  status          AccountingJournalStatus   @default(DRAFT)
+  sourceType      String?
+  sourceId        String?
+  idempotencyKey  String?                   @db.VarChar(191)
+  createdBy       String
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  postedAt        DateTime?
+  lines           AccountingJournalLine[]
+
+  @@unique([schoolId, idempotencyKey])
+  @@index([schoolId, entryDate])
+}
+
+model AccountingPeriod {
+  id                    String                  @id @default(cuid())
+  schoolId              String
+  school                School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name                  String
+  startDate             DateTime
+  endDate               DateTime
+  status                AccountingPeriodStatus  @default(OPEN)
+  ledgerBalanceMinor    Int                     @default(0)
+  bankStatementMinor    Int                     @default(0)
+  differenceMinor       Int                     @default(0)
+  totalDebitMinor       Int                     @default(0)
+  totalCreditMinor      Int                     @default(0)
+  isBankReconciled      Boolean                 @default(false)
+  hasOpenEntries        Boolean                 @default(false)
+  closedAt              DateTime?
+  closedBy              String?
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+
+  @@unique([schoolId, name])
+  @@index([schoolId, status])
+}
+
+model AccountingJournalLine {
+  id            String                 @id @default(cuid())
+  journalEntryId String
+  journalEntry  AccountingJournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountId     String
+  account       AccountingAccount      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  side          AccountingJournalLineSide
+  amount        Int
+  description   String?
+  createdAt     DateTime               @default(now())
+  bankStatementMatches BankStatementMatch[]
+
+  @@index([journalEntryId])
+  @@index([accountId])
+}
+
+model BankStatementImport {
+  id                String                     @id @default(cuid())
+  schoolId          String
+  school            School                     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  accountingAccountId String
+  accountingAccount AccountingAccount          @relation(fields: [accountingAccountId], references: [id], onDelete: Restrict)
+  periodStart       DateTime
+  periodEnd         DateTime
+  openingBalanceMinor Int
+  closingBalanceMinor Int
+  fileName          String
+  checksum          String                     @db.Char(64)
+  status            BankStatementImportStatus  @default(IMPORTED)
+  importedBy        String
+  importedAt        DateTime                   @default(now())
+  reconciledBy      String?
+  reconciledAt      DateTime?
+  preparedBy        String?
+  preparedAt        DateTime?
+  lines             BankStatementLine[]
+  events            BankStatementReconciliationEvent[]
+
+  @@index([schoolId, accountingAccountId, checksum])
+  @@index([schoolId, periodStart, periodEnd])
+  @@index([accountingAccountId, status])
+}
+
+model BankStatementReconciliationEvent {
+  id        String                           @id @default(cuid())
+  schoolId  String
+  school    School                           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  importId  String
+  statementImport BankStatementImport        @relation(fields: [importId], references: [id], onDelete: Cascade)
+  actorId   String
+  action    BankStatementReconciliationAction
+  reason    String?                          @db.LongText
+  metadata  String?                          @db.LongText
+  createdAt DateTime                         @default(now())
+
+  @@index([schoolId, importId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model BankStatementLine {
+  id                    String                 @id @default(cuid())
+  importId              String
+  statementImport       BankStatementImport    @relation(fields: [importId], references: [id], onDelete: Cascade)
+  transactionDate       DateTime
+  description           String
+  reference             String?
+  direction             BankStatementDirection
+  amountMinor           Int
+  createdAt             DateTime               @default(now())
+  matches               BankStatementMatch[]
+
+  @@index([importId, transactionDate])
+}
+
+model BankStatementMatch {
+  id               String              @id @default(cuid())
+  statementLineId  String
+  statementLine    BankStatementLine   @relation(fields: [statementLineId], references: [id], onDelete: Cascade)
+  journalLineId    String
+  journalLine      AccountingJournalLine @relation(fields: [journalLineId], references: [id], onDelete: Restrict)
+  amountMinor      Int
+  matchedBy        String
+  matchedAt        DateTime            @default(now())
+
+  @@unique([statementLineId, journalLineId])
+  @@index([journalLineId])
 }
 
 model FinancialTransaction {
@@ -3223,4 +3431,18 @@ model FinancialAuditLog {
 
   @@index([schoolId])
   @@index([transactionId])
+}
+
+model CashbookExportAudit {
+  id         String   @id @default(cuid())
+  schoolId   String
+  school     School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  actorId    String
+  actor      User     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  filters    String   @db.LongText
+  rowCount   Int
+  exportedAt DateTime @default(now())
+
+  @@index([schoolId, exportedAt])
+  @@index([actorId, exportedAt])
 }

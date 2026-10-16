@@ -37,6 +37,7 @@ const summary = calculateSchoolFinanceSummary({
 
 assert.equal(summary.monthlyIncome, 38000);
 assert.equal(summary.monthlyExpenses, 5000);
+assert.equal(summary.netMovement, 33000);
 assert.equal(summary.cashPosition, 33000);
 
 console.log('bursar overview summary test passed');

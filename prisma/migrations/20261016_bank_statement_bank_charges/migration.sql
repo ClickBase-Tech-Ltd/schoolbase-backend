@@ -1,0 +1,2 @@
+ALTER TABLE `BankStatementReconciliationEvent`
+  MODIFY `action` ENUM('PREPARED', 'APPROVED', 'REOPENED', 'VOIDED', 'BANK_CHARGE_RECORDED') NOT NULL;

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Router, Request, Response } from 'express';
 import { jwtVerify, SignJWT } from 'jose';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { PaymentMethod, Prisma, PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import path from 'path';
@@ -30,6 +30,8 @@ import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
 import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
+import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
+import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 
@@ -4056,7 +4058,12 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
       return res.status(400).json({ error: 'School ID required' });
     }
 
-    const { invoiceId, amount, method, reference, allocations } = req.body;
+    const { invoiceId, amount, method, reference, allocations, idempotencyKey } = req.body;
+    const normalizedIdempotencyKey = normalizePaymentIdempotencyKey(idempotencyKey);
+
+    if (idempotencyKey !== undefined && idempotencyKey !== null && normalizedIdempotencyKey === null) {
+      return res.status(400).json({ error: 'Payment idempotency key is invalid' });
+    }
 
     // Validate required fields
     if (!invoiceId || !amount || !method) {
@@ -4086,25 +4093,65 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
-    // Convert amount from string to integer (amount * 100 for cents)
-    const amountInCents = Math.round(parseFloat(amount as any) * 100);
-
-    if (amountInCents <= 0) {
-      return res.status(400).json({ error: 'Payment amount must be greater than 0' });
+    const amountInCents = parsePositiveAmountMinor(amount);
+    if (amountInCents === null) {
+      return res.status(400).json({ error: 'Payment amount must be a valid positive amount' });
     }
-
-    // Check if payment exceeds outstanding balance
-    const outstanding = invoice.amountDue - invoice.amountPaid;
-    if (amountInCents > outstanding) {
-      return res.status(400).json({ error: `Payment amount cannot exceed outstanding balance of ${(outstanding / 100).toFixed(2)}` });
+    if (typeof method !== 'string' || !Object.values(PaymentMethod).includes(method as PaymentMethod)) {
+      return res.status(400).json({ error: 'Payment method is invalid' });
     }
-
-    const newAmountPaid = invoice.amountPaid + amountInCents;
-    const newStatus = newAmountPaid >= invoice.amountDue ? 'PAID' : 'PART_PAID';
 
     const itemAllocations = Array.isArray(allocations)
       ? allocations.filter((allocation: any) => allocation && allocation.invoiceItemId && Number(allocation.amount) > 0)
       : [];
+
+    if (normalizedIdempotencyKey) {
+      const existingPayment = await prisma.payment.findFirst({
+        where: {
+          invoiceId,
+          idempotencyKey: normalizedIdempotencyKey,
+        },
+        include: {
+          allocations: true,
+        },
+      });
+
+      if (existingPayment) {
+        if (!matchesPaymentIdempotencyRequest({
+          existing: existingPayment,
+          requested: { amount: amountInCents, method, reference, idempotencyKey: normalizedIdempotencyKey, allocations: itemAllocations },
+        })) {
+          return res.status(409).json({
+            error: 'Payment idempotency key already exists for a different payload. Please retry with the same payment data or use a new idempotency key.',
+          });
+        }
+
+        return res.status(200).json({
+          success: true,
+          idempotent: true,
+          message: 'Payment already recorded',
+          payment: {
+            id: existingPayment.id,
+            amount: (existingPayment.amount / 100).toFixed(2),
+            method: existingPayment.method,
+            reference: existingPayment.reference,
+            paidAt: existingPayment.paidAt,
+          },
+          invoice: {
+            id: invoice.id,
+            amountDue: (invoice.amountDue / 100).toFixed(2),
+            amountPaid: (invoice.amountPaid / 100).toFixed(2),
+            status: invoice.status,
+          },
+        });
+      }
+    }
+
+    // Idempotent retries must be recognized before checking the now-updated invoice balance.
+    const outstanding = invoice.amountDue - invoice.amountPaid;
+    if (amountInCents > outstanding) {
+      return res.status(400).json({ error: `Payment amount cannot exceed outstanding balance of ${(outstanding / 100).toFixed(2)}` });
+    }
 
     const allocationRows: Array<{ invoiceItemId: string; amount: number }> = [];
     for (const allocation of itemAllocations) {
@@ -4155,20 +4202,69 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
       select: { currency: true },
     }))?.currency ?? 'NGN';
 
-    const { payment, updatedInvoice } = await prisma.$transaction(async (transaction) => {
+    const { payment, updatedInvoice, committedAllocationRows } = await prisma.$transaction(async (transaction) => {
+      const currentInvoice = await transaction.invoice.findFirst({
+        where: { id: invoiceId, schoolId },
+        include: {
+          pupil: { select: { firstName: true, lastName: true } },
+          items: {
+            include: { allocations: { select: { amount: true } } },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      });
+      if (!currentInvoice) throw new Error('INVOICE_NOT_FOUND');
+
+      const currentOutstanding = currentInvoice.amountDue - currentInvoice.amountPaid;
+      if (amountInCents > currentOutstanding) throw new Error('PAYMENT_EXCEEDS_BALANCE');
+
+      const committedAllocationRows: Array<{ invoiceItemId: string; amount: number }> = [];
+      for (const allocation of itemAllocations) {
+        const item = currentInvoice.items.find((invoiceItem) => invoiceItem.id === String(allocation.invoiceItemId));
+        if (!item) throw new Error('INVALID_PAYMENT_ALLOCATION_ITEM');
+        const allocationAmount = Math.round(Number(allocation.amount) * 100);
+        const alreadyAllocated = item.allocations.reduce((sum, existing) => sum + existing.amount, 0);
+        const itemBalance = Math.max(0, item.amount * item.quantity - alreadyAllocated);
+        if (!Number.isSafeInteger(allocationAmount) || allocationAmount <= 0 || allocationAmount > itemBalance) {
+          throw new Error('PAYMENT_ALLOCATION_EXCEEDS_ITEM_BALANCE');
+        }
+        committedAllocationRows.push({ invoiceItemId: item.id, amount: allocationAmount });
+      }
+
+      const committedAllocatedTotal = committedAllocationRows.reduce((sum, allocation) => sum + allocation.amount, 0);
+      const committedAllocationValidation = validateInvoicePaymentAllocation({
+        paymentAmountMinor: amountInCents,
+        allocatedAmountMinor: committedAllocatedTotal,
+        outstandingMinor: currentOutstanding,
+      });
+      if (!committedAllocationValidation.valid) throw new Error(committedAllocationValidation.error);
+
+      const nextAmountPaid = currentInvoice.amountPaid + amountInCents;
+      const nextStatus = nextAmountPaid >= currentInvoice.amountDue ? 'PAID' : 'PART_PAID';
+      const invoiceUpdate = await transaction.invoice.updateMany(buildInvoicePaymentCompareAndSet({
+        invoiceId,
+        schoolId,
+        currentAmountPaid: currentInvoice.amountPaid,
+        currentStatus: currentInvoice.status,
+        paymentAmountMinor: amountInCents,
+        nextStatus,
+      }));
+      if (invoiceUpdate.count !== 1) throw new Error('INVOICE_PAYMENT_CONFLICT');
+
       const payment = await transaction.payment.create({
         data: {
           invoiceId,
           amount: amountInCents,
           method,
-          reference: reference || null,
+          idempotencyKey: normalizedIdempotencyKey ?? null,
+          reference: reference || normalizedIdempotencyKey || null,
           recordedBy: userId ?? null,
         },
       });
 
-      if (allocationRows.length > 0) {
+      if (committedAllocationRows.length > 0) {
         await transaction.paymentAllocation.createMany({
-          data: allocationRows.map((allocation) => ({
+          data: committedAllocationRows.map((allocation) => ({
             paymentId: payment.id,
             invoiceItemId: allocation.invoiceItemId,
             amount: allocation.amount,
@@ -4176,24 +4272,22 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
         });
       }
 
-      const updatedInvoice = await transaction.invoice.update({
-        where: { id: invoiceId },
-        data: {
-          amountPaid: newAmountPaid,
-          status: newStatus,
-        },
+      const updatedInvoice = await transaction.invoice.findFirst({
+        where: { id: invoiceId, schoolId },
+        select: { id: true, amountDue: true, amountPaid: true, status: true },
       });
+      if (!updatedInvoice) throw new Error('INVOICE_NOT_FOUND');
 
       if (accountingRecorderId) {
-        const unallocatedAmount = allocationValidation.unallocatedAmountMinor;
+        const unallocatedAmount = committedAllocationValidation.unallocatedAmountMinor;
         const accountingRows = [
-          ...allocationRows,
+          ...committedAllocationRows,
           ...(unallocatedAmount > 0 ? [{ invoiceItemId: null, amount: unallocatedAmount }] : []),
         ];
 
         for (const [index, allocation] of accountingRows.entries()) {
           const invoiceItem = allocation.invoiceItemId
-            ? invoice.items.find((item) => item.id === allocation.invoiceItemId)
+            ? currentInvoice.items.find((item) => item.id === allocation.invoiceItemId)
             : null;
           const accountingCategoryName = invoiceItem?.name?.trim() || 'Other Income';
           const accountingCategory = await transaction.accountCategory.upsert({
@@ -4231,8 +4325,8 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
               paymentId: index === 0 ? payment.id : null,
               invoiceId,
               invoiceItemId: allocation.invoiceItemId,
-              description: `Fee payment received for ${invoiceItem?.name || 'school fees'} - ${invoice.pupil.firstName} ${invoice.pupil.lastName} (${invoice.invoiceNo})`,
-              referenceNumber: invoice.invoiceNo || payment.reference || payment.id,
+              description: `Fee payment received for ${invoiceItem?.name || 'school fees'} - ${currentInvoice.pupil.firstName} ${currentInvoice.pupil.lastName} (${currentInvoice.invoiceNo})`,
+              referenceNumber: currentInvoice.invoiceNo || payment.reference || payment.id,
               transactionDate: new Date(),
               status: 'POSTED',
               createdBy: accountingRecorderId,
@@ -4260,11 +4354,57 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
             });
           }
         }
+
+        const cashAccount = await transaction.accountingAccount.findFirst({
+          where: { schoolId, code: '1010', isActive: true },
+          select: { id: true },
+        });
+        const feeIncomeAccount = await transaction.accountingAccount.findFirst({
+          where: { schoolId, code: '4000', isActive: true },
+          select: { id: true },
+        });
+
+        if (cashAccount && feeIncomeAccount) {
+          const paymentJournal = buildFeePaymentJournalEntry({
+            amountMinor: amountInCents,
+            reference: `FEE-PAY-${payment.id}`,
+            description: `${currentInvoice.pupil.firstName} ${currentInvoice.pupil.lastName} payment`,
+          });
+
+          if (!paymentJournal.valid) {
+            throw new Error(paymentJournal.error ?? 'INVALID_FEE_PAYMENT_POSTING');
+          }
+
+          const journalEntry = await transaction.accountingJournalEntry.create({
+            data: {
+              schoolId,
+              reference: paymentJournal.journal.reference,
+              description: `Fee payment recorded for ${currentInvoice.invoiceNo || payment.id}`,
+              entryDate: new Date(),
+              status: 'POSTED',
+              sourceType: 'FEE_PAYMENT',
+              sourceId: payment.id,
+              idempotencyKey: normalizedIdempotencyKey ?? `fee-payment-${payment.id}`,
+              createdBy: accountingRecorderId,
+              postedAt: new Date(),
+            },
+          });
+
+          await transaction.accountingJournalLine.createMany({
+            data: paymentJournal.journal.lines.map((line) => ({
+              journalEntryId: journalEntry.id,
+              accountId: line.side === 'DEBIT' ? cashAccount.id : feeIncomeAccount.id,
+              side: line.side,
+              amount: line.amount,
+              description: line.description,
+            })),
+          });
+        }
       } else {
         throw new Error('Unable to resolve a staff user for accounting synchronization');
       }
 
-      return { payment, updatedInvoice };
+      return { payment, updatedInvoice, committedAllocationRows };
     });
 
     const refreshedInvoice = await prisma.invoice.findUnique({
@@ -4288,13 +4428,13 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
     const pupilName = `${invoice.pupil.firstName} ${invoice.pupil.lastName}`;
     const className = invoice.pupil.class?.name || 'Unknown Class';
     const amountPaidFormatted = (amountInCents / 100).toFixed(2);
-    const newPaidAmountFormatted = (newAmountPaid / 100).toFixed(2);
+    const newPaidAmountFormatted = (updatedInvoice.amountPaid / 100).toFixed(2);
     const balanceAmount = Math.max(0, updatedInvoice.amountDue - updatedInvoice.amountPaid) / 100;
     const balance = balanceAmount.toFixed(2);
     const paymentItemSummary = formatFeeItemsForMessage(
       invoice.items.map((item) => {
         const previousPaid = item.allocations.reduce((sum, allocation) => sum + allocation.amount, 0);
-        const currentAllocation = allocationRows.find((allocation) => allocation.invoiceItemId === item.id)?.amount ?? 0;
+        const currentAllocation = committedAllocationRows.find((allocation) => allocation.invoiceItemId === item.id)?.amount ?? 0;
         const totalPaidForItem = previousPaid + currentAllocation;
         return {
           name: item.name,
@@ -4419,6 +4559,76 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
     });
   } catch (error) {
     console.error('Error recording payment:', error);
+    const isUniqueConstraintConflict = typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'P2002';
+    const requestBody = req.body ?? {};
+    const replayIdempotencyKey = normalizePaymentIdempotencyKey(requestBody.idempotencyKey);
+    const replayAmountMinor = parsePositiveAmountMinor(requestBody.amount);
+    const replayInvoiceId = typeof requestBody.invoiceId === 'string' ? requestBody.invoiceId : null;
+    const isPaymentRaceConflict = error instanceof Error
+      && ['INVOICE_PAYMENT_CONFLICT', 'PAYMENT_EXCEEDS_BALANCE'].includes(error.message);
+    if ((isUniqueConstraintConflict || isPaymentRaceConflict)
+      && replayIdempotencyKey
+      && replayAmountMinor !== null
+      && replayInvoiceId
+      && typeof requestBody.method === 'string') {
+      const existingPayment = await prisma.payment.findFirst({
+        where: { invoiceId: replayInvoiceId, idempotencyKey: replayIdempotencyKey },
+        include: { allocations: true },
+      });
+      if (existingPayment) {
+        if (!matchesPaymentIdempotencyRequest({
+          existing: existingPayment,
+          requested: {
+            amount: replayAmountMinor,
+            method: requestBody.method,
+            reference: requestBody.reference,
+            idempotencyKey: replayIdempotencyKey,
+            allocations: requestBody.allocations,
+          },
+        })) {
+          return res.status(409).json({
+            error: 'Payment idempotency key already exists for a different payload. Please retry with the same payment data or use a new idempotency key.',
+          });
+        }
+        const currentInvoice = await prisma.invoice.findFirst({
+          where: { id: replayInvoiceId, schoolId: (req as any).user?.schoolId },
+          select: { id: true, amountDue: true, amountPaid: true, status: true },
+        });
+        return res.status(200).json({
+          success: true,
+          idempotent: true,
+          message: 'Payment already recorded',
+          payment: {
+            id: existingPayment.id,
+            amount: (existingPayment.amount / 100).toFixed(2),
+            method: existingPayment.method,
+            reference: existingPayment.reference,
+            paidAt: existingPayment.paidAt,
+          },
+          invoice: currentInvoice ? {
+            id: currentInvoice.id,
+            amountDue: (currentInvoice.amountDue / 100).toFixed(2),
+            amountPaid: (currentInvoice.amountPaid / 100).toFixed(2),
+            status: currentInvoice.status,
+          } : undefined,
+        });
+      }
+    }
+    if (error instanceof Error && error.message === 'INVOICE_NOT_FOUND') {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+    if (error instanceof Error && error.message === 'PAYMENT_EXCEEDS_BALANCE') {
+      return res.status(409).json({ error: 'The invoice balance changed. Refresh it and retry with the current outstanding amount.' });
+    }
+    if (error instanceof Error && error.message === 'INVOICE_PAYMENT_CONFLICT') {
+      return res.status(409).json({ error: 'Another payment updated this invoice. Refresh it before recording another payment.' });
+    }
+    if (error instanceof Error && ['INVALID_PAYMENT_ALLOCATION_ITEM', 'PAYMENT_ALLOCATION_EXCEEDS_ITEM_BALANCE', 'ALLOCATIONS_EXCEED_PAYMENT'].includes(error.message)) {
+      return res.status(409).json({ error: 'Invoice item balances changed. Refresh the invoice and review the payment allocation.' });
+    }
     res.status(500).json({ error: 'Failed to record payment' });
   }
 });
