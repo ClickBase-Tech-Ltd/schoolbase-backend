@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { PaymentMethod, Prisma, PrismaClient } from '@prisma/client';
-import { AuthenticatedRequest, requireAccountingAccess, verifyAuth } from '../middleware/roleAuth.js';
+import { AuthenticatedRequest, requireBursar, verifyAuth } from '../middleware/roleAuth.js';
 import { validateAccountingJournalEntry } from '../services/accounting-journal.js';
 import { calculateAccountingBalances } from '../services/accounting-ledger.js';
 import { buildFeePaymentJournalEntry, buildOpeningBalanceJournalLines } from '../services/accounting-posting.js';
@@ -159,7 +159,7 @@ async function resolveFeeInvoicesForAcademicContext(schoolId: string, academicYe
 
 // Middleware: Apply to all routes
 router.use(verifyAuth);
-router.use(requireAccountingAccess);
+router.use(requireBursar);
 
 /**
  * GET /api/bursar/overview

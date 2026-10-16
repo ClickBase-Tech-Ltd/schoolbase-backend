@@ -5,7 +5,7 @@ import { recordActivity } from '../middleware/activityAudit.js';
 import bcrypt from 'bcryptjs';
 import { resolveSupportedCurrency } from '../services/currency.js';
 import { getSessionSecret } from '../services/security-config.js';
-import { verifyAuth, type AuthenticatedRequest } from '../middleware/roleAuth.js';
+import { verifyAuth, requireParent, type AuthenticatedRequest } from '../middleware/roleAuth.js';
 import { resolveCompetitionFeature } from '../services/competition-feature-gate.js';
 
 const router = Router();
@@ -13,6 +13,11 @@ const prisma = new PrismaClient() as PrismaClient & {
   resultPin: any;
   resultPinBatch: any;
 };
+
+router.use((req, res, next) => {
+  if (req.method === 'POST' && (req.path === '/login' || req.path === '/verify')) return next();
+  verifyAuth(req as AuthenticatedRequest, res, () => requireParent(req as AuthenticatedRequest, res, next));
+});
 
 function secret() {
   return getSessionSecret();
@@ -265,6 +270,7 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     const token = await signToken({
+      role: 'PARENT',
       guardianId: guardian.id,
       guardianIds: sameSchoolGuardians.map((item) => item.id),
       schoolId: guardian.schoolId,
@@ -293,6 +299,9 @@ router.post('/verify', async (req: Request, res: Response) => {
     const token = sessionCookie.split('=')[1];
     const { payload } = await jwtVerify(token, secret());
     const data = payload as any;
+    if (data.role !== 'PARENT' || typeof data.guardianId !== 'string' || !data.guardianId) {
+      return res.json({ authenticated: false });
+    }
 
     return res.json({
       authenticated: true,

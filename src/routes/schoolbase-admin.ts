@@ -21,6 +21,7 @@ import { URL } from 'node:url';
 import { compactAuditEventFilters, inferPlatformAuditOutcome, normalizeLegacyPlatformAuditEvent, sanitizeLegacyAuditDetails } from '../services/platform-audit-events.js';
 
 const router = Router();
+type PlatformAdminRequest = Request & { platformAdminUserId?: string };
 type AdsPrismaClient = PrismaClient & {
   advertiser: any;
   adCampaign: any;
@@ -189,6 +190,9 @@ function secret() {
 
 // Middleware to verify platform admin session
 const requirePlatformAdminSession = async (req: Request, res: Response): Promise<string | null> => {
+  const cachedUserId = (req as PlatformAdminRequest).platformAdminUserId;
+  if (cachedUserId) return cachedUserId;
+
   try {
     const cookieToken = req.cookies?.schoolbase_session;
     const headerToken = req.get('x-schoolbase-session') || req.get('X-Schoolbase-Session');
@@ -206,13 +210,25 @@ const requirePlatformAdminSession = async (req: Request, res: Response): Promise
       return null;
     }
 
-    return payload.userId as string;
+    const userId = typeof payload.userId === 'string' ? payload.userId : null;
+    if (!userId) {
+      res.status(401).json({ message: 'Unauthorized - invalid session' });
+      return null;
+    }
+    (req as PlatformAdminRequest).platformAdminUserId = userId;
+    return userId;
   } catch (error) {
     console.error('[ADMIN] Session verification error:', error);
     res.status(401).json({ message: 'Unauthorized - invalid session' });
     return null;
   }
 };
+
+router.use(async (req: Request, res: Response, next) => {
+  const userId = await requirePlatformAdminSession(req, res);
+  if (!userId) return;
+  next();
+});
 
 router.get('/ads/overview', async (req: Request, res: Response) => {
   const session = await requirePlatformAdminSession(req, res);

@@ -52,6 +52,18 @@ export function requireTeacher(req: AuthenticatedRequest, res: Response, next: N
   next();
 }
 
+export function requireParent(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  if (req.user.role !== 'PARENT') {
+    return res.status(403).json({ error: 'Forbidden: Parent access required' });
+  }
+
+  next();
+}
+
 // Ensure user is an admin
 export function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!req.user) {

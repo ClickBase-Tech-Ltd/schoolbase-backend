@@ -22,6 +22,12 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     let schoolId: string;
     try {
       const verified = await jwtVerify(token, secret());
+      if (verified.payload.role !== 'SCHOOL_ADMIN') {
+        return res.status(403).json({ error: 'Forbidden: School Admin access required' });
+      }
+      if (typeof verified.payload.schoolId !== 'string' || !verified.payload.schoolId) {
+        return res.status(403).json({ error: 'Invalid school session' });
+      }
       schoolId = verified.payload.schoolId as string;
     } catch (error) {
       return res.status(401).json({ error: 'Invalid token' });

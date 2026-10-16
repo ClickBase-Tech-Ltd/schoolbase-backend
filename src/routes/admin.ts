@@ -21,10 +21,11 @@ import { buildAdmissionInboxWhere, buildAdmissionNotificationRecipientWhere } fr
 import { evaluateSchoolWhatsAppSend, getPersistedSchoolWhatsAppPolicyRecord, readSchoolWhatsAppPolicy } from '../services/whatsapp-policy.js';
 import { whatsappDeliveryStore } from '../services/whatsapp-delivery-store.js';
 import type { NextFunction } from 'express';
-import { requireAccountingAccess, verifyAuth } from '../middleware/roleAuth.js';
+import { requireAccountingAccess, verifyAuth, type AuthenticatedRequest } from '../middleware/roleAuth.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { buildGuardianNotificationRecipients } from '../services/guardian-notification-recipients.js';
 import { buildSchoolAdminMembershipWhere, resolveSchoolScope } from '../services/security-context.js';
+import { adminRouteAccess, isAdminRouteAllowed } from '../services/admin-route-access.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
@@ -716,6 +717,19 @@ async function resolveUserName(req: Request): Promise<string | null> {
 }
 
 // Apply subscription guard to school-scoped routes, excluding a small set of public endpoints
+router.use((req, res, next) => {
+  const access = adminRouteAccess(req.path, req.method);
+  if (access === 'PUBLIC' || access === 'SIGNED_TOKEN') return next();
+
+  verifyAuth(req as AuthenticatedRequest, res, () => {
+    const role = (req as AuthenticatedRequest).user?.role;
+    if (!isAdminRouteAllowed(access, role)) {
+      return res.status(403).json({ error: 'Forbidden: role is not authorized for this admin resource' });
+    }
+    next();
+  });
+});
+
 router.use((req: Request, res: Response, next: any) => {
   const allowlist = [
     '/verify',
