@@ -1,0 +1,56 @@
+ALTER TABLE `User`
+  MODIFY `role` ENUM('PLATFORM_ADMIN', 'PARTNER_ADMIN', 'SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'PARENT', 'STUDENT', 'STAFF') NOT NULL,
+  ADD COLUMN `isActive` BOOLEAN NOT NULL DEFAULT true;
+
+CREATE TABLE `EmployeeProfile` (
+  `id` VARCHAR(191) NOT NULL,
+  `schoolId` VARCHAR(191) NOT NULL,
+  `userId` VARCHAR(191) NOT NULL,
+  `staffNumber` VARCHAR(191) NOT NULL,
+  `firstName` VARCHAR(191) NOT NULL,
+  `middleName` VARCHAR(191) NULL,
+  `lastName` VARCHAR(191) NOT NULL,
+  `phone` VARCHAR(191) NULL,
+  `photoUrl` VARCHAR(191) NULL,
+  `jobTitle` VARCHAR(191) NOT NULL,
+  `department` VARCHAR(191) NULL,
+  `classification` ENUM('ACADEMIC', 'NON_ACADEMIC') NOT NULL,
+  `employmentType` ENUM('FULL_TIME', 'PART_TIME', 'CONTRACT', 'TEMPORARY') NOT NULL DEFAULT 'FULL_TIME',
+  `employmentStatus` ENUM('ACTIVE', 'SUSPENDED', 'RESIGNED', 'TERMINATED') NOT NULL DEFAULT 'ACTIVE',
+  `startDate` DATE NOT NULL,
+  `endDate` DATE NULL,
+  `emergencyContactName` VARCHAR(191) NULL,
+  `emergencyContactPhone` VARCHAR(191) NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedAt` DATETIME(3) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE INDEX `EmployeeProfile_userId_key` (`userId`),
+  UNIQUE INDEX `EmployeeProfile_schoolId_staffNumber_key` (`schoolId`, `staffNumber`),
+  INDEX `EmployeeProfile_schoolId_employmentStatus_lastName_firstName_idx` (`schoolId`, `employmentStatus`, `lastName`, `firstName`),
+  INDEX `EmployeeProfile_schoolId_department_employmentStatus_idx` (`schoolId`, `department`, `employmentStatus`),
+  CONSTRAINT `EmployeeProfile_schoolId_fkey` FOREIGN KEY (`schoolId`) REFERENCES `School` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `EmployeeProfile_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `User` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE `StaffEmploymentEvent` (
+  `id` VARCHAR(191) NOT NULL,
+  `schoolId` VARCHAR(191) NOT NULL,
+  `employeeId` VARCHAR(191) NOT NULL,
+  `actorUserId` VARCHAR(191) NULL,
+  `eventType` VARCHAR(191) NOT NULL,
+  `effectiveAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `reason` TEXT NULL,
+  `previousStatus` ENUM('ACTIVE', 'SUSPENDED', 'RESIGNED', 'TERMINATED') NULL,
+  `nextStatus` ENUM('ACTIVE', 'SUSPENDED', 'RESIGNED', 'TERMINATED') NULL,
+  `previousJobTitle` VARCHAR(191) NULL,
+  `nextJobTitle` VARCHAR(191) NULL,
+  `previousDepartment` VARCHAR(191) NULL,
+  `nextDepartment` VARCHAR(191) NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  INDEX `StaffEmploymentEvent_schoolId_employeeId_effectiveAt_idx` (`schoolId`, `employeeId`, `effectiveAt`),
+  INDEX `StaffEmploymentEvent_actorUserId_createdAt_idx` (`actorUserId`, `createdAt`),
+  CONSTRAINT `StaffEmploymentEvent_schoolId_fkey` FOREIGN KEY (`schoolId`) REFERENCES `School` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `StaffEmploymentEvent_employeeId_fkey` FOREIGN KEY (`employeeId`) REFERENCES `EmployeeProfile` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `StaffEmploymentEvent_actorUserId_fkey` FOREIGN KEY (`actorUserId`) REFERENCES `User` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

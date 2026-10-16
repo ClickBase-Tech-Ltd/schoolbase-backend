@@ -167,6 +167,10 @@ async function loadRoutes() {
     console.log('✓ Loaded dashboard routes');
     const { default: teacherRoutes } = await import('./routes/teacher.js');
     console.log('✓ Loaded teacher routes');
+    const { default: staffRoutes } = await import('./routes/staff.js');
+    console.log('✓ Loaded staff routes');
+    const { default: staffAttendanceScanRoutes } = await import('./routes/staff-attendance-scan.js');
+    console.log('✓ Loaded staff attendance scan routes');
     const { default: timetableRoutes } = await import('./routes/timetable.js');
     console.log('✓ Loaded timetable routes');
     const { default: supportChatRoutes, platformSupportChatRouter } = await import('./routes/support-chat.js');
@@ -208,6 +212,8 @@ async function loadRoutes() {
     app.use('/api/parent', parentRoutes);
     app.use('/api/admin', dashboardRoutes);
     app.use('/api/teacher', teacherRoutes);
+    app.use('/api/staff/attendance', staffAttendanceScanRoutes);
+    app.use('/api/staff', staffRoutes);
     app.use('/api/bursar', bursarRoutes);
     app.use('/api/competition', competitionRoutes);
     app.use('/schoolbase-admin/api/competition', competitionRoutes);

@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { jwtVerify } from 'jose';
+import { PrismaClient } from '@prisma/client';
 import { getSessionSecret } from '../services/security-config.js';
 
 const SECRET = getSessionSecret();
+const prisma = new PrismaClient();
 
 export interface AuthenticatedRequest extends Request {
   user?: {
@@ -17,27 +19,50 @@ export interface AuthenticatedRequest extends Request {
 }
 
 // Verify JWT token and extract user data
-export async function verifyAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  try {
-    // Check unified session cookie, with backward compatibility for legacy cookies
-    const token = req.cookies?.schoolbase_session || req.cookies?.schoolbase_staff || req.cookies?.staff_session;
-    
-    if (!token) {
-      return res.status(401).json({ error: 'No authentication token' });
-    }
+export function createVerifyAuth(database: Pick<PrismaClient, 'user' | 'guardian'>, secret: Uint8Array = SECRET) {
+  return async function verifyAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      const token = req.cookies?.schoolbase_session || req.cookies?.schoolbase_staff || req.cookies?.staff_session;
 
-    const { payload } = await jwtVerify(token, SECRET);
-    
-    if (!payload || typeof payload !== 'object') {
+      if (!token) {
+        return res.status(401).json({ error: 'No authentication token' });
+      }
+
+      const { payload } = await jwtVerify(token, secret);
+
+      if (!payload || typeof payload !== 'object') {
+        return res.status(401).json({ error: 'Invalid token' });
+      }
+
+      const userId = typeof payload.userId === 'string' ? payload.userId : null;
+      if (!userId) {
+        const guardianId = typeof payload.guardianId === 'string' ? payload.guardianId : null;
+        if (payload.role !== 'PARENT' || !guardianId) return res.status(401).json({ error: 'Invalid token' });
+        const guardian = await database.guardian.findUnique({ where: { id: guardianId }, select: { id: true, schoolId: true } });
+        if (!guardian || (typeof payload.schoolId === 'string' && payload.schoolId !== guardian.schoolId)) {
+          return res.status(401).json({ error: 'Session is no longer active' });
+        }
+        req.user = payload as any;
+        next();
+        return;
+      }
+      const user = await database.user.findUnique({
+        where: { id: userId },
+        select: { id: true, schoolId: true, role: true, isActive: true },
+      });
+      if (!user || !user.isActive || user.role !== payload.role || (user.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)) {
+        return res.status(401).json({ error: 'Session is no longer active' });
+      }
+
+      req.user = payload as any;
+      next();
+    } catch (error) {
       return res.status(401).json({ error: 'Invalid token' });
     }
-
-    req.user = payload as any;
-    next();
-  } catch (error) {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
+  };
 }
+
+export const verifyAuth = createVerifyAuth(prisma);
 
 // Ensure user is a teacher
 export function requireTeacher(req: AuthenticatedRequest, res: Response, next: NextFunction) {

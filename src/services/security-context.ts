@@ -20,6 +20,7 @@ const KNOWN_ROLES = new Set([
   'STUDENT',
   'PARENT',
   'BURSAR',
+  'STAFF',
   'PLATFORM_ADMIN',
   'ADMIN',
 ]);

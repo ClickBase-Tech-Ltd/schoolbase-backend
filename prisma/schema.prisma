@@ -76,6 +76,11 @@ model School {
   assessmentComponents          AssessmentComponent[]
   assessmentTemplates           AssessmentTemplate[]
   attendance                    AttendanceRecord[]
+  staffAttendancePolicies       StaffAttendancePolicy[]
+  attendanceStations            AttendanceStation[]
+  attendanceStationEvents       AttendanceStationEvent[]
+  staffAttendanceRecords        StaffAttendanceRecord[]
+  staffAttendanceEvents         StaffAttendanceEvent[]
   behaviourAssessments          BehaviourAssessment[]
   classes                       Class[]
   feeSchedules                  FeeSchedule[]
@@ -106,6 +111,9 @@ model School {
   subjectClasses                SubjectClass[]
   teacherClasses                TeacherClass[]
   teacherSubjects               TeacherSubject[]
+  employeeProfiles             EmployeeProfile[]
+  staffEmploymentEvents        StaffEmploymentEvent[]
+  staffNumberCounters          StaffNumberCounter[]
   users                         User[]
   supportRequests               SupportRequest[]
   platformSupportRequests       PlatformSupportRequest[]
@@ -505,10 +513,13 @@ model User {
   name              String
   role              UserRole
   passwordHash      String?
+  isActive          Boolean               @default(true)
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @default(now()) @updatedAt
   teacherClasses    TeacherClass[]
   teacherSubjects   TeacherSubject[]
+  staffAttendanceEvents StaffAttendanceEvent[] @relation("StaffAttendanceEventActor")
+  attendanceStationEvents AttendanceStationEvent[]
   platformAuditLogs PlatformAuditLog[]
   supportNotes      SupportInternalNote[] @relation("SupportNoteAuthor")
   createdSupportRequests SupportRequest[] @relation("SupportRequestCreator")
@@ -518,6 +529,8 @@ model User {
   timetableEntries  TimetableEntry[]
   passwordResets    PasswordReset[]
   school            School?               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  employeeProfile   EmployeeProfile?
+  staffEmploymentEvents StaffEmploymentEvent[] @relation("StaffEmploymentEventActor")
   
   // Financial transactions
   createdTransactions   FinancialTransaction[] @relation("FinancialTransactionCreatedBy")
@@ -534,6 +547,94 @@ model User {
   competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
 
   @@index([schoolId], map: "User_schoolId_fkey")
+}
+
+model EmployeeProfile {
+  id                    String                   @id @default(cuid())
+  schoolId              String
+  userId                String                   @unique
+  staffNumber           String
+  firstName             String
+  middleName            String?
+  lastName              String
+  phone                 String?
+  photoUrl              String?
+  jobTitle              String
+  department            String?
+  classification        EmployeeClassification
+  employmentType        EmploymentType           @default(FULL_TIME)
+  employmentStatus      EmploymentStatus         @default(ACTIVE)
+  startDate             DateTime                 @db.Date
+  endDate               DateTime?                @db.Date
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+  school                School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user                  User                     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  employmentEvents      StaffEmploymentEvent[]
+  staffAttendanceRecords StaffAttendanceRecord[]
+  staffAttendanceEvents  StaffAttendanceEvent[]
+
+  @@unique([schoolId, staffNumber])
+  @@index([schoolId, employmentStatus, lastName, firstName])
+  @@index([schoolId, department, employmentStatus])
+}
+
+model StaffNumberCounter {
+  id        String   @id @default(cuid())
+  schoolId  String
+  year      Int
+  lastSeq   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([schoolId, year])
+}
+
+model StaffEmploymentEvent {
+  id                   String           @id @default(cuid())
+  schoolId             String
+  employeeId           String
+  actorUserId           String?
+  eventType            String
+  effectiveAt          DateTime         @default(now())
+  reason               String?          @db.Text
+  previousStatus       EmploymentStatus?
+  nextStatus           EmploymentStatus?
+  previousJobTitle     String?
+  nextJobTitle         String?
+  previousDepartment   String?
+  nextDepartment       String?
+  previousStaffNumber  String?
+  nextStaffNumber      String?
+  createdAt            DateTime         @default(now())
+  school               School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  employee             EmployeeProfile  @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  actor                User?            @relation("StaffEmploymentEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, employeeId, effectiveAt])
+  @@index([actorUserId, createdAt])
+}
+
+enum EmployeeClassification {
+  ACADEMIC
+  NON_ACADEMIC
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  TEMPORARY
+}
+
+enum EmploymentStatus {
+  ACTIVE
+  SUSPENDED
+  RESIGNED
+  TERMINATED
 }
 
 model CompetitionPupilAccount {
@@ -1782,6 +1883,116 @@ model SubjectClass {
   @@index([subjectId], map: "SubjectClass_subjectId_fkey")
 }
 
+model StaffAttendancePolicy {
+  id                         String                  @id @default(cuid())
+  schoolId                   String
+  name                       String                  @default("Standard attendance")
+  shiftStartTime             String                  @default("08:30")
+  checkInGraceMinutes        Int                     @default(15)
+  checkOutCutoffMinutes      Int                     @default(540)
+  requireCheckout            Boolean                 @default(true)
+  workDays                   String                  @default("1,2,3,4,5")
+  effectiveFrom              DateTime                @db.Date
+  effectiveTo                DateTime?               @db.Date
+  isActive                   Boolean                 @default(true)
+  createdAt                  DateTime                @default(now())
+  updatedAt                  DateTime                @updatedAt
+  school                     School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendanceRecords          StaffAttendanceRecord[]
+
+  @@unique([schoolId, name, effectiveFrom], map: "staff_att_policy_effective_key")
+  @@index([schoolId, isActive, effectiveFrom, effectiveTo], map: "staff_att_policy_active_dates_idx")
+}
+
+model AttendanceStation {
+  id                    String                 @id @default(cuid())
+  schoolId              String
+  publicCode            String                 @unique(map: "attendance_station_public_code_key") @default(cuid())
+  name                  String
+  locationLabel         String?
+  isActive              Boolean                @default(true)
+  tokenVersion          Int                    @default(1)
+  lastCodeIssuedAt      DateTime?
+  scanWindowStartedAt   DateTime?
+  scanWindowCount       Int                    @default(0)
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  school                School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendanceEvents      StaffAttendanceEvent[]
+  stationEvents         AttendanceStationEvent[]
+
+  @@unique([schoolId, name], map: "attendance_station_school_name_key")
+  @@index([schoolId, isActive], map: "attendance_station_school_active_idx")
+}
+
+model AttendanceStationEvent {
+  id          String             @id @default(cuid())
+  schoolId    String
+  stationId   String
+  actorUserId String?
+  eventType   String
+  reason      String?            @db.Text
+  details     Json?
+  createdAt   DateTime           @default(now())
+  school      School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  station     AttendanceStation  @relation(fields: [stationId], references: [id], onDelete: Restrict)
+  actor       User?              @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, stationId, createdAt], map: "attendance_station_event_history_idx")
+  @@index([actorUserId, createdAt], map: "attendance_station_event_actor_idx")
+}
+
+model StaffAttendanceRecord {
+  id          String                 @id @default(cuid())
+  schoolId    String
+  employeeId  String
+  policyId    String?
+  date        DateTime               @db.Date
+  shiftKey    String                 @default("DEFAULT")
+  checkInAt   DateTime?
+  checkOutAt  DateTime?
+  status      StaffAttendanceStatus  @default(PRESENT)
+  reason      String?                @db.Text
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  school      School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  employee    EmployeeProfile        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  policy      StaffAttendancePolicy? @relation(fields: [policyId], references: [id], onDelete: SetNull)
+  events      StaffAttendanceEvent[]
+
+  @@unique([schoolId, employeeId, date, shiftKey], map: "staff_att_record_employee_date_shift_key")
+  @@index([schoolId, date, status], map: "staff_att_record_school_date_status_idx")
+  @@index([employeeId, date], map: "staff_att_record_employee_date_idx")
+  @@index([schoolId, policyId, date], map: "staff_att_record_policy_date_idx")
+}
+
+model StaffAttendanceEvent {
+  id              String                 @id @default(cuid())
+  schoolId        String
+  attendanceId    String
+  employeeId      String
+  actorUserId     String?
+  stationId       String?
+  eventType       String
+  status          StaffAttendanceStatus?
+  reason          String                 @db.Text
+  idempotencyKey  String?
+  beforeSnapshot  Json?
+  afterSnapshot   Json?
+  details         Json?
+  createdAt       DateTime               @default(now())
+  school          School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendance      StaffAttendanceRecord  @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
+  employee        EmployeeProfile        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  actor           User?                  @relation("StaffAttendanceEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  station         AttendanceStation?     @relation(fields: [stationId], references: [id], onDelete: SetNull)
+
+  @@unique([schoolId, idempotencyKey], map: "staff_att_event_idempotency_key")
+  @@index([schoolId, attendanceId, createdAt], map: "staff_att_event_record_date_idx")
+  @@index([employeeId, createdAt], map: "staff_att_event_employee_date_idx")
+  @@index([schoolId, stationId, createdAt], map: "staff_att_event_station_date_idx")
+}
+
 model AttendanceRecord {
   id        String           @id @default(cuid())
   schoolId  String
@@ -2914,6 +3125,7 @@ enum UserRole {
   TEACHER
   PARENT
   STUDENT
+  STAFF
 }
 
 enum CompetitionPupilAccountStatus {
@@ -3083,6 +3295,13 @@ enum ResultStatus {
   APPROVED
   PUBLISHED
   ARCHIVED
+}
+
+enum StaffAttendanceStatus {
+  PRESENT
+  LATE
+  MISSING_CHECKOUT
+  ABSENT
 }
 
 enum AttendanceStatus {

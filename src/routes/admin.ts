@@ -25,12 +25,15 @@ import { requireAccountingAccess, verifyAuth, type AuthenticatedRequest } from '
 import { recordActivity } from '../middleware/activityAudit.js';
 import { buildGuardianNotificationRecipients } from '../services/guardian-notification-recipients.js';
 import { buildSchoolAdminMembershipWhere, resolveSchoolScope } from '../services/security-context.js';
-import { adminRouteAccess, isAdminRouteAllowed } from '../services/admin-route-access.js';
+import { createAdminRouteAuthorization } from '../middleware/adminRouteAuthorization.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
 import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
+import { reserveNextStaffNumber } from '../services/staff-number.js';
+import { buildStaffAttendanceSummary, computeStaffAttendanceStatus, getSchoolLocalDate, isEmployeeExpectedOnDate, isStaffAttendanceWorkday, isValidSchoolDate, parseWorkDays, schoolLocalTimeToUtc } from '../services/staff-attendance.js';
+import { createStaffAttendanceRouter } from './staff-attendance.js';
 import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
 import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
@@ -310,6 +313,24 @@ const upload = multer({
   fileFilter,
   limits: { fileSize: 4 * 1024 * 1024 }, // 4MB
 });
+const staffPhotoUpload = multer({
+  storage: multer.diskStorage({
+    destination: uploadDir,
+    filename: (_req, file, cb) => {
+      const extension = file.mimetype === 'image/png' ? '.png' : '.jpg';
+      cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${extension}`);
+    },
+  }),
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'image/jpeg' || file.mimetype === 'image/png') cb(null, true);
+    else cb(new Error('Staff photos must be JPEG or PNG images.'), false);
+  },
+  limits: { fileSize: 4 * 1024 * 1024 },
+});
+
+function discardStaffPhoto(req: Request) {
+  if (req.file) fs.unlink(req.file.path, () => undefined);
+}
 const studentImportUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -717,18 +738,7 @@ async function resolveUserName(req: Request): Promise<string | null> {
 }
 
 // Apply subscription guard to school-scoped routes, excluding a small set of public endpoints
-router.use((req, res, next) => {
-  const access = adminRouteAccess(req.path, req.method);
-  if (access === 'PUBLIC' || access === 'SIGNED_TOKEN') return next();
-
-  verifyAuth(req as AuthenticatedRequest, res, () => {
-    const role = (req as AuthenticatedRequest).user?.role;
-    if (!isAdminRouteAllowed(access, role)) {
-      return res.status(403).json({ error: 'Forbidden: role is not authorized for this admin resource' });
-    }
-    next();
-  });
-});
+router.use(createAdminRouteAuthorization(verifyAuth));
 
 router.use((req: Request, res: Response, next: any) => {
   const allowlist = [
@@ -5929,7 +5939,7 @@ router.get('/teachers/data', async (req: Request, res: Response) => {
         orderBy: { name: 'asc' },
       }),
       prisma.user.findMany({
-        where: { schoolId, role: { in: ['TEACHER', 'BURSAR'] } },
+        where: { schoolId, isActive: true, role: { in: ['TEACHER', 'BURSAR'] } },
         orderBy: { name: 'asc' },
         include: {
           teacherClasses: { include: { class: true } },
@@ -5942,6 +5952,804 @@ router.get('/teachers/data', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching teachers data:', error);
     res.status(500).json({ error: 'Failed to fetch teachers data' });
+  }
+});
+
+router.get('/staff', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School session required' });
+
+    if (req.query.mode === 'linkable-users') {
+      const accountSearch = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
+      const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
+      const users = await prisma.user.findMany({
+        where: {
+          schoolId,
+          isActive: true,
+          role: { in: ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF'] },
+          employeeProfile: { is: null },
+          ...((accountSearch || accountId) ? { OR: [
+            ...(accountId ? [{ id: accountId }] : []),
+            ...(accountSearch ? [{ name: { contains: accountSearch } }, { email: { contains: accountSearch } }] : []),
+          ] } : {}),
+        },
+        orderBy: { name: 'asc' },
+        take: 100,
+        select: { id: true, name: true, email: true, role: true },
+      });
+      return res.json({ users });
+    }
+
+    const page = Math.max(1, Math.min(10000, Number.parseInt(String(req.query.page || '1'), 10) || 1));
+    const pageSize = Math.max(1, Math.min(100, Number.parseInt(String(req.query.pageSize || '50'), 10) || 50));
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
+    const requestedStatus = typeof req.query.status === 'string' ? req.query.status.toUpperCase() : 'ACTIVE';
+    const requestedClassification = typeof req.query.classification === 'string' ? req.query.classification.toUpperCase() : 'ALL';
+    const where: any = { schoolId };
+    if (requestedStatus === 'ACTIVE' || requestedStatus === 'SUSPENDED') where.employmentStatus = requestedStatus;
+    else if (requestedStatus === 'FORMER') where.employmentStatus = { in: ['RESIGNED', 'TERMINATED'] };
+    else if (requestedStatus !== 'ALL') return res.status(400).json({ error: 'Choose a valid staff status filter.' });
+    if (requestedClassification === 'ACADEMIC' || requestedClassification === 'NON_ACADEMIC') where.classification = requestedClassification;
+    else if (requestedClassification !== 'ALL') return res.status(400).json({ error: 'Choose a valid classification filter.' });
+    if (search) {
+      where.OR = [
+        { firstName: { contains: search } },
+        { middleName: { contains: search } },
+        { lastName: { contains: search } },
+        { staffNumber: { contains: search } },
+        { jobTitle: { contains: search } },
+      ];
+    }
+
+    const [employees, total, statusGroups, unlinkedUsers, unlinkedUsersTotal] = await Promise.all([
+      prisma.employeeProfile.findMany({
+        where,
+        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          staffNumber: true,
+          firstName: true,
+          middleName: true,
+          lastName: true,
+          phone: true,
+          photoUrl: true,
+          jobTitle: true,
+          department: true,
+          classification: true,
+          employmentType: true,
+          employmentStatus: true,
+          startDate: true,
+          endDate: true,
+          user: { select: { id: true, email: true, role: true, isActive: true } },
+        },
+      }),
+      prisma.employeeProfile.count({ where }),
+      prisma.employeeProfile.groupBy({ by: ['employmentStatus'], where: { schoolId }, _count: { _all: true } }),
+      prisma.user.findMany({
+        where: { schoolId, isActive: true, role: { in: ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF'] }, employeeProfile: { is: null } },
+        orderBy: { name: 'asc' },
+        take: 100,
+        select: { id: true, name: true, email: true, role: true },
+      }),
+      prisma.user.count({ where: { schoolId, isActive: true, role: { in: ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF'] }, employeeProfile: { is: null } } }),
+    ]);
+    const statusCounts = { active: 0, suspended: 0, former: 0 };
+    for (const group of statusGroups) {
+      if (group.employmentStatus === 'ACTIVE') statusCounts.active = group._count._all;
+      else if (group.employmentStatus === 'SUSPENDED') statusCounts.suspended = group._count._all;
+      else statusCounts.former += group._count._all;
+    }
+    return res.json({ employees, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) }, statusCounts, unlinkedUsers, unlinkedUsersTotal });
+  } catch (error) {
+    console.error('Error fetching staff directory:', error);
+    return res.status(500).json({ error: 'Failed to fetch staff directory' });
+  }
+});
+
+router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId || await resolveSchoolId(req);
+  if (!schoolId || session?.role !== 'SCHOOL_ADMIN') {
+    discardStaffPhoto(req);
+    return res.status(403).json({ error: 'School administrator access required' });
+  }
+
+  const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName.trim() : '';
+  const middleName = typeof req.body?.middleName === 'string' ? req.body.middleName.trim() : '';
+  const lastName = typeof req.body?.lastName === 'string' ? req.body.lastName.trim() : '';
+  const jobTitle = typeof req.body?.jobTitle === 'string' ? req.body.jobTitle.trim() : '';
+  const department = typeof req.body?.department === 'string' ? req.body.department.trim() : '';
+  const classification = String(req.body?.classification || '').toUpperCase();
+  const employmentType = String(req.body?.employmentType || 'FULL_TIME').toUpperCase();
+  const startDateValue = typeof req.body?.startDate === 'string' ? req.body.startDate : '';
+  const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+  const emergencyContactName = typeof req.body?.emergencyContactName === 'string' ? req.body.emergencyContactName.trim() : '';
+  const emergencyContactPhone = typeof req.body?.emergencyContactPhone === 'string' ? req.body.emergencyContactPhone.trim() : '';
+  const accountMode = req.body?.accountMode === 'link' ? 'link' : 'create';
+  const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+
+  const dateMatch = /^\d{4}-\d{2}-\d{2}$/.test(startDateValue);
+  const startDate = dateMatch ? new Date(`${startDateValue}T00:00:00.000Z`) : new Date(Number.NaN);
+  if (!firstName || !lastName || !jobTitle || !dateMatch || Number.isNaN(startDate.getTime()) || startDate.toISOString().slice(0, 10) !== startDateValue) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'First name, last name, job title and a valid start date are required.' });
+  }
+  if (jobTitle.length > 120 || department.length > 120 || firstName.length > 100 || lastName.length > 100 || middleName.length > 100) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'One or more staff fields exceed the allowed length.' });
+  }
+  if (phone.length > 40 || emergencyContactName.length > 120 || emergencyContactPhone.length > 40) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Contact details exceed the allowed length.' });
+  }
+  if (!['ACADEMIC', 'NON_ACADEMIC'].includes(classification)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Choose an academic or non-academic classification.' });
+  }
+  if (!['FULL_TIME', 'PART_TIME', 'CONTRACT', 'TEMPORARY'].includes(employmentType)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Choose a valid employment type.' });
+  }
+
+  const accountName = [firstName, middleName, lastName].filter(Boolean).join(' ');
+  try {
+    const employee = await prisma.$transaction(async (tx) => {
+      const actor = await tx.user.findFirst({ where: { id: session.userId, schoolId, role: 'SCHOOL_ADMIN', isActive: true }, select: { id: true } });
+      if (!actor) throw Object.assign(new Error('School administrator account is unavailable.'), { statusCode: 403 });
+      const school = await tx.school.findUnique({ where: { id: schoolId }, select: { name: true, initials: true } });
+      if (!school) throw Object.assign(new Error('School not found.'), { statusCode: 404 });
+      const staffNumber = await reserveNextStaffNumber({ transaction: tx, schoolId, schoolName: school.name, schoolInitials: school.initials });
+
+      let employeeUserId = userId;
+      if (accountMode === 'link') {
+        if (!employeeUserId) throw Object.assign(new Error('Choose an existing school account to link.'), { statusCode: 400 });
+        const existingUser = await tx.user.findFirst({
+          where: { id: employeeUserId, schoolId, isActive: true, role: { in: ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF'] }, employeeProfile: { is: null } },
+          select: { id: true },
+        });
+        if (!existingUser) throw Object.assign(new Error('That account cannot be linked. Refresh the directory and choose an unlinked account from this school.'), { statusCode: 409 });
+      } else {
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+        const password = typeof req.body?.password === 'string' ? req.body.password : '';
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+          throw Object.assign(new Error('Enter a valid email address for the staff account.'), { statusCode: 400 });
+        }
+        if (password.length < 8 || password.length > 128) {
+          throw Object.assign(new Error('Password must be between 8 and 128 characters.'), { statusCode: 400 });
+        }
+        const passwordHash = await bcrypt.hash(password, 10);
+        const createdUser = await tx.user.create({
+          data: { schoolId, email, name: accountName, role: 'STAFF', passwordHash, isActive: true },
+          select: { id: true },
+        });
+        employeeUserId = createdUser.id;
+      }
+
+      const createdEmployee = await tx.employeeProfile.create({
+        data: {
+          schoolId,
+          userId: employeeUserId,
+          staffNumber,
+          firstName,
+          middleName: middleName || null,
+          lastName,
+          phone: phone || null,
+          photoUrl: req.file ? `/uploads/photos/${req.file.filename}` : null,
+          jobTitle,
+          department: department || null,
+          classification: classification as 'ACADEMIC' | 'NON_ACADEMIC',
+          employmentType: employmentType as 'FULL_TIME' | 'PART_TIME' | 'CONTRACT' | 'TEMPORARY',
+          employmentStatus: 'ACTIVE',
+          startDate,
+          emergencyContactName: emergencyContactName || null,
+          emergencyContactPhone: emergencyContactPhone || null,
+        },
+        select: { id: true, staffNumber: true, firstName: true, lastName: true, jobTitle: true, employmentStatus: true, userId: true },
+      });
+      await tx.staffEmploymentEvent.create({
+        data: {
+          schoolId,
+          employeeId: createdEmployee.id,
+          actorUserId: actor.id,
+          eventType: 'EMPLOYED',
+          effectiveAt: startDate,
+          nextStatus: 'ACTIVE',
+          nextJobTitle: jobTitle,
+          nextDepartment: department || null,
+        },
+      });
+      return createdEmployee;
+    });
+    return res.status(201).json({ employee });
+  } catch (error) {
+    if (req.file) fs.unlink(req.file.path, () => undefined);
+    const statusCode = Number((error as { statusCode?: number })?.statusCode);
+    if ((error as { code?: string })?.code === 'P2002') return res.status(409).json({ error: 'That email or staff number is already in use.' });
+    console.error('Error registering staff member:', error instanceof Error ? error.message : 'Unknown error');
+    return res.status(statusCode || 500).json({ error: statusCode ? (error as Error).message : 'Failed to register staff member.' });
+  }
+});
+
+router.patch('/staff/:employeeId/status', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId;
+  const nextStatus = String(req.body?.employmentStatus || '').toUpperCase();
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (session?.role !== 'SCHOOL_ADMIN' || !schoolId) return res.status(403).json({ error: 'School administrator access required' });
+  if (!['ACTIVE', 'SUSPENDED', 'RESIGNED', 'TERMINATED'].includes(nextStatus)) return res.status(400).json({ error: 'Choose a valid employment status.' });
+  if (reason.length < 8 || reason.length > 1000) return res.status(400).json({ error: 'Provide a status-change reason between 8 and 1,000 characters.' });
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const employee = await tx.employeeProfile.findFirst({
+        where: { id: req.params.employeeId, schoolId },
+        select: { id: true, userId: true, employmentStatus: true, jobTitle: true, department: true },
+      });
+      if (!employee) throw Object.assign(new Error('Staff profile not found.'), { statusCode: 404 });
+      if (['RESIGNED', 'TERMINATED'].includes(employee.employmentStatus) && nextStatus !== employee.employmentStatus) {
+        throw Object.assign(new Error('A former employee cannot be reactivated through status editing. Register a new employment record.'), { statusCode: 409 });
+      }
+      const terminal = nextStatus === 'RESIGNED' || nextStatus === 'TERMINATED';
+      if (employee.employmentStatus === nextStatus) return { id: employee.id, employmentStatus: nextStatus, isActive: nextStatus === 'ACTIVE' };
+      await tx.employeeProfile.update({
+        where: { id: employee.id },
+        data: { employmentStatus: nextStatus as 'ACTIVE' | 'SUSPENDED' | 'RESIGNED' | 'TERMINATED', endDate: terminal ? new Date() : null },
+      });
+      await tx.user.update({ where: { id: employee.userId }, data: { isActive: nextStatus === 'ACTIVE' } });
+      await tx.staffEmploymentEvent.create({
+        data: {
+          schoolId,
+          employeeId: employee.id,
+          actorUserId: session.userId,
+          eventType: 'STATUS_CHANGED',
+          reason,
+          previousStatus: employee.employmentStatus,
+          nextStatus: nextStatus as 'ACTIVE' | 'SUSPENDED' | 'RESIGNED' | 'TERMINATED',
+          previousJobTitle: employee.jobTitle,
+          nextJobTitle: employee.jobTitle,
+          previousDepartment: employee.department,
+          nextDepartment: employee.department,
+        },
+      });
+      return { id: employee.id, employmentStatus: nextStatus, isActive: nextStatus === 'ACTIVE' };
+    });
+    return res.json({ employee: result });
+  } catch (error) {
+    const statusCode = Number((error as { statusCode?: number })?.statusCode);
+    return res.status(statusCode || 500).json({ error: statusCode ? (error as Error).message : 'Failed to update staff status.' });
+  }
+});
+
+router.get('/staff/:employeeId', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId;
+  if (session?.role !== 'SCHOOL_ADMIN' || !schoolId) {
+    discardStaffPhoto(req);
+    return res.status(403).json({ error: 'School administrator access required' });
+  }
+
+  try {
+    const employee = await prisma.employeeProfile.findFirst({
+      where: { id: req.params.employeeId, schoolId },
+      select: {
+        id: true,
+        staffNumber: true,
+        firstName: true,
+        middleName: true,
+        lastName: true,
+        phone: true,
+        photoUrl: true,
+        jobTitle: true,
+        department: true,
+        classification: true,
+        employmentType: true,
+        employmentStatus: true,
+        startDate: true,
+        endDate: true,
+        emergencyContactName: true,
+        emergencyContactPhone: true,
+        user: { select: { id: true, email: true, role: true, isActive: true } },
+        employmentEvents: {
+          orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }],
+          take: 100,
+          select: {
+            id: true,
+            eventType: true,
+            effectiveAt: true,
+            reason: true,
+            previousStatus: true,
+            nextStatus: true,
+            previousJobTitle: true,
+            nextJobTitle: true,
+            previousDepartment: true,
+            nextDepartment: true,
+            actor: { select: { name: true } },
+          },
+        },
+      },
+    });
+    if (!employee) return res.status(404).json({ error: 'Staff profile not found.' });
+    return res.json({ employee });
+  } catch (error) {
+    console.error('Error fetching staff profile:', error instanceof Error ? error.message : 'Unknown error');
+    return res.status(500).json({ error: 'Failed to fetch staff profile.' });
+  }
+});
+
+router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId;
+  if (session?.role !== 'SCHOOL_ADMIN' || !schoolId) return res.status(403).json({ error: 'School administrator access required' });
+
+  const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName.trim() : '';
+  const middleName = typeof req.body?.middleName === 'string' ? req.body.middleName.trim() : '';
+  const lastName = typeof req.body?.lastName === 'string' ? req.body.lastName.trim() : '';
+  const jobTitle = typeof req.body?.jobTitle === 'string' ? req.body.jobTitle.trim() : '';
+  const department = typeof req.body?.department === 'string' ? req.body.department.trim() : '';
+  const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+  const classification = String(req.body?.classification || '').toUpperCase();
+  const employmentType = String(req.body?.employmentType || '').toUpperCase();
+  const startDateValue = typeof req.body?.startDate === 'string' ? req.body.startDate : '';
+  const emergencyContactName = typeof req.body?.emergencyContactName === 'string' ? req.body.emergencyContactName.trim() : '';
+  const emergencyContactPhone = typeof req.body?.emergencyContactPhone === 'string' ? req.body.emergencyContactPhone.trim() : '';
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const dateMatch = /^\d{4}-\d{2}-\d{2}$/.test(startDateValue);
+  const startDate = dateMatch ? new Date(`${startDateValue}T00:00:00.000Z`) : new Date(Number.NaN);
+
+  if (!firstName || !lastName || !jobTitle || !dateMatch || Number.isNaN(startDate.getTime()) || startDate.toISOString().slice(0, 10) !== startDateValue) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'First name, last name, job title and a valid start date are required.' });
+  }
+  if (!['ACADEMIC', 'NON_ACADEMIC'].includes(classification) || !['FULL_TIME', 'PART_TIME', 'CONTRACT', 'TEMPORARY'].includes(employmentType)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Choose valid employment classification and type values.' });
+  }
+  if (reason.length < 8 || reason.length > 1000) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Provide an update reason between 8 and 1,000 characters.' });
+  }
+
+  try {
+    const { employee, previousPhotoUrl } = await prisma.$transaction(async (tx) => {
+      const current = await tx.employeeProfile.findFirst({ where: { id: req.params.employeeId, schoolId } });
+      if (!current) throw Object.assign(new Error('Staff profile not found.'), { statusCode: 404 });
+      const updated = await tx.employeeProfile.update({
+        where: { id: current.id },
+        data: {
+          firstName,
+          middleName: middleName || null,
+          lastName,
+          phone: phone || null,
+          ...(req.file ? { photoUrl: `/uploads/photos/${req.file.filename}` } : {}),
+          jobTitle,
+          department: department || null,
+          classification: classification as 'ACADEMIC' | 'NON_ACADEMIC',
+          employmentType: employmentType as 'FULL_TIME' | 'PART_TIME' | 'CONTRACT' | 'TEMPORARY',
+          startDate,
+          emergencyContactName: emergencyContactName || null,
+          emergencyContactPhone: emergencyContactPhone || null,
+        },
+        select: { id: true, staffNumber: true, firstName: true, middleName: true, lastName: true, photoUrl: true, jobTitle: true, department: true, employmentStatus: true },
+      });
+      await tx.staffEmploymentEvent.create({
+        data: {
+          schoolId,
+          employeeId: current.id,
+          actorUserId: session.userId,
+          eventType: 'PROFILE_UPDATED',
+          reason,
+          previousStatus: current.employmentStatus,
+          nextStatus: current.employmentStatus,
+          previousJobTitle: current.jobTitle,
+          nextJobTitle: jobTitle,
+          previousDepartment: current.department,
+          nextDepartment: department || null,
+        },
+      });
+      return { employee: updated, previousPhotoUrl: current.photoUrl };
+    });
+    if (req.file && previousPhotoUrl && previousPhotoUrl !== employee.photoUrl && previousPhotoUrl.startsWith('/uploads/photos/')) {
+      const previousPath = path.join(uploadDir, path.basename(previousPhotoUrl));
+      fs.unlink(previousPath, () => undefined);
+    }
+    return res.json({ employee });
+  } catch (error) {
+    discardStaffPhoto(req);
+    const statusCode = Number((error as { statusCode?: number })?.statusCode);
+    return res.status(statusCode || 500).json({ error: statusCode ? (error as Error).message : 'Failed to update staff profile.' });
+  }
+});
+
+router.use('/staff-attendance', createStaffAttendanceRouter(prisma));
+
+router.get('/staff-attendance/policy', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId || await resolveSchoolId(req);
+  if (!schoolId) return res.status(401).json({ error: 'School session required' });
+  if (session?.role !== 'SCHOOL_ADMIN') {
+    return res.status(403).json({ error: 'School administrator access required' });
+  }
+
+  try {
+    const school = await prisma.school.findUnique({ where: { id: schoolId }, select: { timezone: true } });
+    if (!school) return res.status(404).json({ error: 'School not found' });
+    const requestedDate = typeof req.query.date === 'string' ? req.query.date : getSchoolLocalDate(new Date(), school.timezone);
+    if (!isValidSchoolDate(requestedDate)) {
+      return res.status(400).json({ error: 'Provide a valid school-local date.' });
+    }
+    const policy = await prisma.staffAttendancePolicy.findFirst({
+      where: {
+        schoolId,
+        isActive: true,
+        effectiveFrom: { lte: new Date(`${requestedDate}T00:00:00.000Z`) },
+        OR: [{ effectiveTo: null }, { effectiveTo: { gte: new Date(`${requestedDate}T00:00:00.000Z`) } }],
+      },
+      orderBy: { effectiveFrom: 'desc' },
+    });
+
+    return res.json({
+      policy: policy ?? {
+        schoolId,
+        name: 'Standard attendance',
+        shiftStartTime: '08:30',
+        checkInGraceMinutes: 15,
+        checkOutCutoffMinutes: 540,
+        requireCheckout: true,
+        workDays: '1,2,3,4,5',
+        effectiveFrom: '1970-01-01',
+        effectiveTo: null,
+        isActive: true,
+      },
+      timeZone: school.timezone,
+    });
+  } catch (error) {
+    console.error('Error fetching staff attendance policy:', error);
+    return res.status(500).json({ error: 'Failed to fetch attendance policy' });
+  }
+});
+
+router.put('/staff-attendance/policy', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId || await resolveSchoolId(req);
+  if (!schoolId || session?.role !== 'SCHOOL_ADMIN') {
+    return res.status(403).json({ error: 'School administrator access required' });
+  }
+
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() || 'Standard attendance' : 'Standard attendance';
+  const shiftStartTime = typeof req.body?.shiftStartTime === 'string' ? req.body.shiftStartTime.trim() : '';
+  const checkInGraceMinutes = Number(req.body?.checkInGraceMinutes);
+  const checkOutCutoffMinutes = Number(req.body?.checkOutCutoffMinutes);
+  const requireCheckout = req.body?.requireCheckout !== false;
+  const workDays = typeof req.body?.workDays === 'string' ? req.body.workDays.trim() : '';
+  const effectiveFrom = typeof req.body?.effectiveFrom === 'string' ? req.body.effectiveFrom : '';
+
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(shiftStartTime)) {
+    return res.status(400).json({ error: 'Shift start time must be in HH:MM format.' });
+  }
+  if (!Number.isInteger(checkInGraceMinutes) || checkInGraceMinutes < 0 || checkInGraceMinutes > 180
+    || !Number.isInteger(checkOutCutoffMinutes) || checkOutCutoffMinutes < 60 || checkOutCutoffMinutes > 1440) {
+    return res.status(400).json({ error: 'Set a valid grace period and checkout cutoff.' });
+  }
+  const workDayValues = parseWorkDays(workDays);
+  if (!workDayValues.length || workDayValues.length !== new Set(workDays.split(',').map((value: string) => Number(value.trim()))).size) {
+    return res.status(400).json({ error: 'Choose one or more workdays using ISO weekday numbers from 1 to 7.' });
+  }
+  if (!isValidSchoolDate(effectiveFrom)) {
+    return res.status(400).json({ error: 'Provide a valid policy effective-from date.' });
+  }
+
+  try {
+    const date = new Date(`${effectiveFrom}T00:00:00.000Z`);
+    const previousDate = new Date(date.getTime() - 86_400_000);
+    const policy = await prisma.$transaction(async (tx) => {
+      const existing = await tx.staffAttendancePolicy.findFirst({
+        where: { schoolId, name, effectiveFrom: date },
+      });
+      if (existing) {
+        const used = await tx.staffAttendanceRecord.count({ where: { schoolId, policyId: existing.id } });
+        if (used > 0) throw Object.assign(new Error('This policy version already has attendance records; choose a later effective date.'), { statusCode: 409 });
+        return tx.staffAttendancePolicy.update({
+          where: { id: existing.id },
+          data: { shiftStartTime, checkInGraceMinutes, checkOutCutoffMinutes, requireCheckout, workDays: workDayValues.join(','), isActive: true },
+        });
+      }
+
+      const priorPolicies = await tx.staffAttendancePolicy.findMany({
+        where: { schoolId, name, isActive: true, effectiveFrom: { lt: date }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: date } }] },
+        select: { id: true },
+      });
+      for (const prior of priorPolicies) {
+        await tx.staffAttendancePolicy.update({ where: { id: prior.id }, data: { effectiveTo: previousDate } });
+      }
+
+      return tx.staffAttendancePolicy.create({
+        data: { schoolId, name, shiftStartTime, checkInGraceMinutes, checkOutCutoffMinutes, requireCheckout, workDays: workDayValues.join(','), effectiveFrom: date, isActive: true },
+      });
+    });
+
+    return res.json({ policy });
+  } catch (error) {
+    const statusCode = Number((error as { statusCode?: number })?.statusCode);
+    if (statusCode) return res.status(statusCode).json({ error: (error as Error).message });
+    console.error('Error saving staff attendance policy:', error);
+    return res.status(500).json({ error: 'Failed to save attendance policy' });
+  }
+});
+
+router.get('/staff-attendance', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId || await resolveSchoolId(req);
+  if (!schoolId) return res.status(401).json({ error: 'School session required' });
+  if (session?.role !== 'SCHOOL_ADMIN') {
+    return res.status(403).json({ error: 'School administrator access required' });
+  }
+
+  try {
+    const school = await prisma.school.findUnique({ where: { id: schoolId }, select: { timezone: true } });
+    if (!school) return res.status(404).json({ error: 'School not found' });
+    const rawDate = typeof req.query.date === 'string' ? req.query.date : getSchoolLocalDate(new Date(), school.timezone);
+    if (!isValidSchoolDate(rawDate)) {
+      return res.status(400).json({ error: 'Provide a valid school-local date.' });
+    }
+    const attendanceDate = new Date(`${rawDate}T00:00:00.000Z`);
+    const policy = await prisma.staffAttendancePolicy.findFirst({
+      where: { schoolId, isActive: true, effectiveFrom: { lte: attendanceDate }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: attendanceDate } }] },
+      orderBy: { effectiveFrom: 'desc' },
+    }) ?? {
+      id: null,
+      schoolId,
+      name: 'Standard attendance',
+      shiftStartTime: '08:30',
+      checkInGraceMinutes: 15,
+      checkOutCutoffMinutes: 540,
+      requireCheckout: true,
+      workDays: '1,2,3,4,5',
+      effectiveFrom: new Date('1970-01-01T00:00:00.000Z'),
+      effectiveTo: null,
+      isActive: true,
+    };
+    const employees = await prisma.employeeProfile.findMany({
+      where: {
+        schoolId,
+        employmentStatus: 'ACTIVE',
+        startDate: { lte: attendanceDate },
+        AND: [{ OR: [{ endDate: null }, { endDate: { gte: attendanceDate } }] }],
+        user: { isActive: true },
+      },
+      select: { id: true, firstName: true, lastName: true, staffNumber: true, jobTitle: true, employmentStatus: true, startDate: true, endDate: true, user: { select: { isActive: true } } },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+    });
+    const records = await prisma.staffAttendanceRecord.findMany({ where: { schoolId, date: attendanceDate, shiftKey: 'DEFAULT' } });
+    const recordsByEmployee = new Map(records.map((record) => [record.employeeId, record]));
+    const now = new Date();
+    const expectedEmployees = employees.filter((employee) => isEmployeeExpectedOnDate({
+      localDate: rawDate,
+      startDate: employee.startDate,
+      endDate: employee.endDate,
+      employmentStatus: employee.employmentStatus,
+      userIsActive: employee.user.isActive,
+      policy,
+    }));
+    const roster = isStaffAttendanceWorkday(rawDate, policy) ? expectedEmployees.map((employee) => {
+      const record = recordsByEmployee.get(employee.id);
+      const status = record?.status === 'ABSENT' ? 'ABSENT' : computeStaffAttendanceStatus({
+        policy,
+        timeZone: school.timezone,
+        localDate: rawDate,
+        checkInAt: record?.checkInAt ?? null,
+        checkOutAt: record?.checkOutAt ?? null,
+        now,
+      });
+      return {
+        id: record?.id ?? null,
+        employeeId: employee.id,
+        date: rawDate,
+        status,
+        checkInAt: record?.checkInAt?.toISOString() ?? null,
+        checkOutAt: record?.checkOutAt?.toISOString() ?? null,
+        reason: record?.reason ?? null,
+        employee: { id: employee.id, firstName: employee.firstName, lastName: employee.lastName, staffNumber: employee.staffNumber, jobTitle: employee.jobTitle, employmentStatus: employee.employmentStatus },
+      };
+    }) : [];
+    const summary = buildStaffAttendanceSummary(roster.map(({ status }) => ({ status })));
+
+    return res.json({
+      date: rawDate,
+      timeZone: school.timezone,
+      isWorkday: isStaffAttendanceWorkday(rawDate, policy),
+      policy,
+      summary,
+      records: roster,
+    });
+  } catch (error) {
+    console.error('Error fetching staff attendance records:', error);
+    return res.status(500).json({ error: 'Failed to fetch staff attendance records' });
+  }
+});
+
+router.post('/staff-attendance', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId || await resolveSchoolId(req);
+  if (!schoolId || session?.role !== 'SCHOOL_ADMIN') {
+    return res.status(403).json({ error: 'School administrator access required' });
+  }
+
+  const employeeId = typeof req.body?.employeeId === 'string' ? req.body.employeeId.trim() : '';
+  const rawDate = typeof req.body?.date === 'string' ? req.body.date : '';
+  let date = rawDate;
+  const action = typeof req.body?.action === 'string' ? req.body.action.toUpperCase() : '';
+  const checkInTime = typeof req.body?.checkInTime === 'string' ? req.body.checkInTime : null;
+  const checkOutTime = typeof req.body?.checkOutTime === 'string' ? req.body.checkOutTime : null;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const requestedIdempotencyKey = req.get('Idempotency-Key') || req.body?.idempotencyKey;
+  const idempotencyKey = typeof requestedIdempotencyKey === 'string' && requestedIdempotencyKey.length <= 191 ? requestedIdempotencyKey.trim() : '';
+
+  if (!employeeId) return res.status(400).json({ error: 'Choose a staff member to register.' });
+  if (date && !isValidSchoolDate(date)) return res.status(400).json({ error: 'Provide a valid school-local date.' });
+  if (!['CHECK_IN', 'CHECK_OUT', 'CORRECT', 'ABSENT'].includes(action)) return res.status(400).json({ error: 'Choose a valid attendance action.' });
+  if (action === 'CORRECT' && !checkInTime && !checkOutTime) return res.status(400).json({ error: 'Provide a corrected check-in or checkout time.' });
+  if (action !== 'CORRECT' && (checkInTime || checkOutTime)) return res.status(400).json({ error: 'Client-provided timestamps are allowed only for a reasoned correction.' });
+  if ((checkInTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(checkInTime)) || (checkOutTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(checkOutTime))) return res.status(400).json({ error: 'Enter valid school-local check-in and checkout times.' });
+  if (reason.length < 8 || reason.length > 1000) return res.status(400).json({ error: 'Provide a reason between 8 and 1,000 characters.' });
+  if (!idempotencyKey) return res.status(400).json({ error: 'An idempotency key is required for attendance writes.' });
+
+  try {
+    const school = await prisma.school.findUnique({ where: { id: schoolId }, select: { timezone: true } });
+    if (!school) return res.status(404).json({ error: 'School not found' });
+    if (!date) date = getSchoolLocalDate(new Date(), school.timezone);
+    if ((action === 'CHECK_IN' || action === 'CHECK_OUT') && getSchoolLocalDate(new Date(), school.timezone) !== date) {
+      return res.status(400).json({ error: 'Server-timestamped check-in/out is available only for the current school-local date. Use a reasoned correction for historical entries.' });
+    }
+    const attendanceDate = new Date(`${date}T00:00:00.000Z`);
+    const policy = await prisma.staffAttendancePolicy.findFirst({
+      where: { schoolId, isActive: true, effectiveFrom: { lte: attendanceDate }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: attendanceDate } }] },
+      orderBy: { effectiveFrom: 'desc' },
+    }) ?? {
+      id: null,
+      schoolId,
+      name: 'Standard attendance',
+      shiftStartTime: '08:30',
+      checkInGraceMinutes: 15,
+      checkOutCutoffMinutes: 540,
+      requireCheckout: true,
+      workDays: '1,2,3,4,5',
+      effectiveFrom: new Date('1970-01-01T00:00:00.000Z'),
+      effectiveTo: null,
+      isActive: true,
+    };
+    if (!isStaffAttendanceWorkday(date, policy)) return res.status(400).json({ error: 'The selected date is outside the configured workdays or policy dates.' });
+    const correctedCheckInAt = action === 'CORRECT' && checkInTime ? schoolLocalTimeToUtc(date, checkInTime, school.timezone) : null;
+    const correctedCheckOutAt = action === 'CORRECT' && checkOutTime ? schoolLocalTimeToUtc(date, checkOutTime, school.timezone) : null;
+    if (correctedCheckInAt && correctedCheckOutAt && correctedCheckOutAt < correctedCheckInAt) return res.status(400).json({ error: 'Check-out must be after check-in.' });
+
+    const result = await prisma.$transaction(async (tx) => {
+      const duplicateEvent = await tx.staffAttendanceEvent.findFirst({ where: { schoolId, idempotencyKey } });
+      if (duplicateEvent) {
+        const duplicateRecord = await tx.staffAttendanceRecord.findFirst({ where: { id: duplicateEvent.attendanceId, schoolId } });
+        if (!duplicateRecord || duplicateRecord.employeeId !== employeeId || duplicateRecord.date.getTime() !== attendanceDate.getTime()) {
+          throw Object.assign(new Error('That idempotency key was already used for a different attendance operation.'), { statusCode: 409 });
+        }
+        return { record: duplicateRecord, duplicate: true, created: false };
+      }
+      const actor = await tx.user.findFirst({ where: { id: session.userId, schoolId, role: 'SCHOOL_ADMIN', isActive: true }, select: { id: true } });
+      if (!actor) throw Object.assign(new Error('School administrator account is unavailable.'), { statusCode: 403 });
+      const employee = await tx.employeeProfile.findFirst({
+        where: { id: employeeId, schoolId, employmentStatus: 'ACTIVE', startDate: { lte: attendanceDate }, AND: [{ OR: [{ endDate: null }, { endDate: { gte: attendanceDate } }] }], user: { isActive: true } },
+        select: { id: true },
+      });
+      if (!employee) throw Object.assign(new Error('Staff profile not found or not expected on this date.'), { statusCode: 404 });
+      const existing = await tx.staffAttendanceRecord.findFirst({ where: { schoolId, employeeId, date: attendanceDate, shiftKey: 'DEFAULT' } });
+      const acceptedAt = new Date();
+      let nextCheckIn = existing?.checkInAt ?? null;
+      let nextCheckOut = existing?.checkOutAt ?? null;
+      if (action === 'CHECK_IN') {
+        if (existing?.checkInAt) throw Object.assign(new Error('A check-in is already recorded. Use a reasoned correction to change it.'), { statusCode: 409 });
+        nextCheckIn = acceptedAt;
+      } else if (action === 'CHECK_OUT') {
+        if (!existing?.checkInAt || existing.checkOutAt) throw Object.assign(new Error('A single check-in is required before checkout, and checkout can be recorded only once.'), { statusCode: 409 });
+        nextCheckOut = acceptedAt;
+      } else if (action === 'CORRECT') {
+        nextCheckIn = correctedCheckInAt ?? existing?.checkInAt ?? null;
+        nextCheckOut = correctedCheckOutAt ?? existing?.checkOutAt ?? null;
+      } else {
+        nextCheckIn = null;
+        nextCheckOut = null;
+      }
+      if (action === 'ABSENT' && computeStaffAttendanceStatus({ policy, timeZone: school.timezone, localDate: date, checkInAt: null, checkOutAt: null, now: acceptedAt }) === 'PENDING') {
+        throw Object.assign(new Error('An employee cannot be marked absent before the configured school-local cutoff.'), { statusCode: 400 });
+      }
+      const status = action === 'ABSENT' ? 'ABSENT' : computeStaffAttendanceStatus({ policy, timeZone: school.timezone, localDate: date, checkInAt: nextCheckIn, checkOutAt: nextCheckOut, now: acceptedAt });
+      if (status === 'PENDING' || status === 'NOT_CHECKED_IN' || status === 'NON_WORKDAY') throw Object.assign(new Error('Attendance needs a check-in time or an explicit absence decision.'), { statusCode: 400 });
+      const beforeSnapshot = existing ? {
+        date: date,
+        shiftKey: existing.shiftKey,
+        checkInAt: existing.checkInAt?.toISOString() ?? null,
+        checkOutAt: existing.checkOutAt?.toISOString() ?? null,
+        status: existing.status,
+        reason: existing.reason,
+      } : null;
+      const data = {
+        schoolId,
+        employeeId,
+        policyId: policy.id,
+        date: attendanceDate,
+        shiftKey: 'DEFAULT',
+        checkInAt: nextCheckIn,
+        checkOutAt: nextCheckOut,
+        status,
+        reason,
+      };
+      const record = existing
+        ? await tx.staffAttendanceRecord.update({ where: { id: existing.id }, data: { policyId: policy.id, checkInAt: nextCheckIn, checkOutAt: nextCheckOut, status, reason } })
+        : await tx.staffAttendanceRecord.create({ data });
+      const afterSnapshot = {
+        date,
+        shiftKey: 'DEFAULT',
+        checkInAt: record.checkInAt?.toISOString() ?? null,
+        checkOutAt: record.checkOutAt?.toISOString() ?? null,
+        status: record.status,
+        reason: record.reason,
+      };
+      await tx.staffAttendanceEvent.create({
+        data: {
+          schoolId,
+          attendanceId: record.id,
+          employeeId,
+          actorUserId: actor.id,
+          eventType: action === 'CHECK_IN' ? 'MANUAL_CHECK_IN' : action === 'CHECK_OUT' ? 'MANUAL_CHECK_OUT' : action === 'ABSENT' ? 'MANUAL_ABSENCE' : 'MANUAL_CORRECTION',
+          status,
+          reason,
+          idempotencyKey,
+          beforeSnapshot,
+          afterSnapshot,
+        },
+      });
+      return { record, duplicate: false, created: !existing };
+    });
+
+    return res.status(result.duplicate || !result.created ? 200 : 201).json({ record: result.record, duplicate: result.duplicate });
+  } catch (error) {
+    const statusCode = Number((error as { statusCode?: number })?.statusCode);
+    if (statusCode) return res.status(statusCode).json({ error: (error as Error).message });
+    if ((error as { code?: string })?.code === 'P2002') return res.status(409).json({ error: 'An attendance record already exists for this employee and date. Reload it before correcting.' });
+    console.error('Error creating staff attendance record:', error);
+    return res.status(500).json({ error: 'Failed to save staff attendance' });
+  }
+});
+
+router.get('/staff-attendance/:attendanceId/events', async (req: Request, res: Response) => {
+  const session = (req as AuthenticatedRequest).user;
+  const schoolId = session?.schoolId;
+  if (!schoolId || session?.role !== 'SCHOOL_ADMIN') return res.status(403).json({ error: 'School administrator access required' });
+
+  try {
+    const attendance = await prisma.staffAttendanceRecord.findFirst({
+      where: { id: req.params.attendanceId, schoolId },
+      select: { id: true },
+    });
+    if (!attendance) return res.status(404).json({ error: 'Attendance record not found.' });
+
+    const events = await prisma.staffAttendanceEvent.findMany({
+      where: { attendanceId: attendance.id, schoolId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        eventType: true,
+        status: true,
+        reason: true,
+        beforeSnapshot: true,
+        afterSnapshot: true,
+        createdAt: true,
+        actor: { select: { name: true } },
+      },
+    });
+    return res.json({ events });
+  } catch (error) {
+    console.error('Error fetching staff attendance history:', error);
+    return res.status(500).json({ error: 'Failed to fetch attendance history.' });
   }
 });
 
@@ -7881,15 +8689,39 @@ router.delete('/teachers/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
-    // Delete teacher and all associations
-    await prisma.user.delete({
-      where: { id },
+    const actorUserId = await resolveUserId(req);
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id }, data: { isActive: false } });
+      const employee = await tx.employeeProfile.findFirst({
+        where: { userId: id, schoolId, employmentStatus: 'ACTIVE' },
+        select: { id: true, employmentStatus: true, jobTitle: true, department: true },
+      });
+      if (employee) {
+        await tx.employeeProfile.update({ where: { id: employee.id }, data: { employmentStatus: 'TERMINATED', endDate: new Date() } });
+        await tx.staffEmploymentEvent.create({
+          data: {
+            schoolId,
+            employeeId: employee.id,
+            actorUserId,
+            eventType: 'STATUS_CHANGED',
+            reason: 'Deactivated from the existing teacher and bursar management screen.',
+            previousStatus: employee.employmentStatus,
+            nextStatus: 'TERMINATED',
+            previousJobTitle: employee.jobTitle,
+            nextJobTitle: employee.jobTitle,
+            previousDepartment: employee.department,
+            nextDepartment: employee.department,
+          },
+        });
+      }
+      await tx.teacherClass.deleteMany({ where: { teacherId: id, schoolId } });
+      await tx.teacherSubject.deleteMany({ where: { teacherId: id, schoolId } });
     });
 
-    res.json({ success: true, message: 'Teacher deleted' });
+    res.json({ success: true, message: 'Staff account deactivated; historical records were retained.' });
   } catch (error) {
-    console.error('Error deleting teacher:', error);
-    res.status(500).json({ error: 'Failed to delete teacher' });
+    console.error('Error deactivating teacher:', error);
+    res.status(500).json({ error: 'Failed to deactivate staff account' });
   }
 });
 

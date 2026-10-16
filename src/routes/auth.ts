@@ -44,6 +44,7 @@ router.post('/platform-login', async (req: Request, res: Response) => {
         role: true,
         passwordHash: true,
         schoolId: true,
+        isActive: true,
       },
     });
 
@@ -53,6 +54,11 @@ router.post('/platform-login', async (req: Request, res: Response) => {
       return res.status(401).json({ 
         error: 'Invalid email or password.' 
       });
+    }
+
+    if (!user.isActive) {
+      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
+      return res.status(403).json({ error: 'This account is inactive. Contact your school administrator.' });
     }
 
     // Password invalid
@@ -136,6 +142,7 @@ async function handleSchoolLogin(req: Request, res: Response) {
         role: true,
         passwordHash: true,
         schoolId: true,
+        isActive: true,
       },
     });
 
@@ -176,6 +183,11 @@ async function handleSchoolLogin(req: Request, res: Response) {
       return res.status(401).json({
         error: 'Invalid email or password.',
       });
+    }
+
+    if (!user.isActive) {
+      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
+      return res.status(403).json({ error: 'This account is inactive. Contact your school administrator.' });
     }
 
     // Password invalid
@@ -257,6 +269,24 @@ async function verifySessionRoute(req: Request, res: Response) {
     }
 
     const { payload } = await jwtVerify(token, secret());
+    const userId = payload && typeof payload.userId === 'string' ? payload.userId : null;
+    if (!userId) {
+      const guardianId = payload && typeof payload.guardianId === 'string' ? payload.guardianId : null;
+      if (!guardianId) return res.status(401).json({ authenticated: false, error: 'Invalid session' });
+      const guardian = await prisma.guardian.findUnique({ where: { id: guardianId }, select: { id: true, schoolId: true } });
+      if (!guardian || (typeof payload.schoolId === 'string' && payload.schoolId !== guardian.schoolId)) {
+        return res.status(401).json({ authenticated: false, error: 'Session is no longer active' });
+      }
+      return res.json({ authenticated: true, user: payload, session: payload, school: null });
+    }
+
+    const activeUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, schoolId: true, role: true, isActive: true },
+    });
+    if (!activeUser || !activeUser.isActive || activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)) {
+      return res.status(401).json({ authenticated: false, error: 'Session is no longer active' });
+    }
 
     let schoolInfo = null;
     try {

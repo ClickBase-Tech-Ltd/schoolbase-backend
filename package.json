@@ -14,6 +14,12 @@
     "test:invoice-payment": "tsx tests/invoice-payment-allocation.test.ts",
     "test:competition": "tsx tests/competition-feature-gate.test.ts && tsx tests/competition-pupil-identity.test.ts && tsx tests/competition-scoring.test.ts && tsx tests/competition-audience.test.ts && tsx tests/competition-rewards.test.ts && tsx tests/competition-achievements.test.ts && tsx tests/competition-leaderboard.test.ts && tsx tests/competition-exam-practice.test.ts && tsx tests/competition-question-set-review.test.ts",
     "test:platform-settings": "tsx tests/platform-settings.test.ts",
+    "test:staff-backfill": "tsx tests/staff-legacy-backfill.test.ts && tsx tests/staff-number.test.ts",
+    "test:staff-attendance": "tsx tests/staff-attendance.test.ts && tsx tests/admin-route-access.test.ts",
+    "test:staff-attendance:station-token": "tsx tests/staff-attendance-station-token.test.ts",
+    "test:staff-attendance:db": "tsx tests/staff-attendance-db.integration.test.ts",
+    "test:staff-attendance:isolated": "tsx scripts/test-staff-attendance-isolated.ts",
+    "backfill:staff-profiles": "tsx scripts/backfill-staff-profiles.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev"
