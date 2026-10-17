@@ -64,7 +64,7 @@ router.get('/pricing', async (_req: Request, res: Response) => {
   try {
     const plans = await getConfiguredPaymentPlans(prisma);
     if (!plans) return res.status(503).json({ error: 'Pricing is temporarily unavailable.' });
-    res.json({ plans: getPublicPaymentPlans(plans) });
+    res.json({ currency: 'NGN', plans: getPublicPaymentPlans(plans) });
   } catch (error) {
     res.status(500).json({ error: 'Unable to load pricing.' });
   }
