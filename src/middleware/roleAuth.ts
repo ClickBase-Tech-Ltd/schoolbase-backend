@@ -19,7 +19,7 @@ export interface AuthenticatedRequest extends Request {
 }
 
 // Verify JWT token and extract user data
-export function createVerifyAuth(database: Pick<PrismaClient, 'user' | 'guardian'>, secret: Uint8Array = SECRET) {
+export function createVerifyAuth(database: Pick<PrismaClient, 'user' | 'guardian' | 'school'>, secret: Uint8Array = SECRET) {
   return async function verifyAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
     try {
       const token = req.cookies?.schoolbase_session || req.cookies?.schoolbase_staff || req.cookies?.staff_session;
@@ -50,7 +50,13 @@ export function createVerifyAuth(database: Pick<PrismaClient, 'user' | 'guardian
         where: { id: userId },
         select: { id: true, schoolId: true, role: true, isActive: true },
       });
-      if (!user || !user.isActive || user.role !== payload.role || (user.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)) {
+      const isSchoolImpersonation = payload.sessionPurpose === 'SCHOOL_IMPERSONATION'
+        && payload.role === 'SCHOOL_ADMIN'
+        && user?.role === 'PLATFORM_ADMIN'
+        && user.isActive
+        && typeof payload.schoolId === 'string'
+        && await database.school.findUnique({ where: { id: payload.schoolId }, select: { id: true } });
+      if (!user || !user.isActive || (!isSchoolImpersonation && (user.role !== payload.role || (user.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
         return res.status(401).json({ error: 'Session is no longer active' });
       }
 

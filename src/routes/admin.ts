@@ -1528,11 +1528,11 @@ router.post('/impersonate', async (req: Request, res: Response) => {
       email: 'impersonation@schoolbase.local',
       name: 'Platform Admin Impersonator',
       schoolId,
-      impersonation: true,
+      sessionPurpose: 'SCHOOL_IMPERSONATION',
     })
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
-      .setExpirationTime('7d')
+      .setExpirationTime('1h')
       .sign(secret());
 
     res.json({

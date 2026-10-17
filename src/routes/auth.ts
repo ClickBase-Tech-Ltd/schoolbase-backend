@@ -284,7 +284,13 @@ async function verifySessionRoute(req: Request, res: Response) {
       where: { id: userId },
       select: { id: true, schoolId: true, role: true, isActive: true },
     });
-    if (!activeUser || !activeUser.isActive || activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)) {
+    const isSchoolImpersonation = payload.sessionPurpose === 'SCHOOL_IMPERSONATION'
+      && payload.role === 'SCHOOL_ADMIN'
+      && activeUser?.role === 'PLATFORM_ADMIN'
+      && activeUser.isActive
+      && typeof payload.schoolId === 'string'
+      && await prisma.school.findUnique({ where: { id: payload.schoolId }, select: { id: true } });
+    if (!activeUser || !activeUser.isActive || (!isSchoolImpersonation && (activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
       return res.status(401).json({ authenticated: false, error: 'Session is no longer active' });
     }
 
