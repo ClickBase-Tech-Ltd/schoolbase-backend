@@ -5960,6 +5960,14 @@ router.get('/staff', async (req: Request, res: Response) => {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) return res.status(401).json({ error: 'School session required' });
 
+    if (req.query.mode === 'registration-options') {
+      const [classes, subjects] = await Promise.all([
+        prisma.class.findMany({ where: { schoolId }, orderBy: { name: 'asc' }, select: { id: true, name: true, arm: true } }),
+        prisma.subject.findMany({ where: { schoolId }, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      ]);
+      return res.json({ classes, subjects });
+    }
+
     if (req.query.mode === 'linkable-users') {
       const accountSearch = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
       const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
@@ -6023,7 +6031,14 @@ router.get('/staff', async (req: Request, res: Response) => {
           employmentStatus: true,
           startDate: true,
           endDate: true,
-          user: { select: { id: true, email: true, role: true, isActive: true } },
+          user: { select: {
+            id: true,
+            email: true,
+            role: true,
+            isActive: true,
+            teacherClasses: { where: { schoolId }, select: { classId: true } },
+            teacherSubjects: { where: { schoolId }, select: { subjectId: true } },
+          } },
         },
       }),
       prisma.employeeProfile.count({ where }),
@@ -6070,6 +6085,16 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
   const emergencyContactPhone = typeof req.body?.emergencyContactPhone === 'string' ? req.body.emergencyContactPhone.trim() : '';
   const accountMode = req.body?.accountMode === 'link' ? 'link' : 'create';
   const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+  const requestedRole = typeof req.body?.role === 'string' ? req.body.role.toUpperCase() : 'STAFF';
+  const parseIds = (value: unknown): string[] => {
+    let parsed = value;
+    if (typeof parsed === 'string') {
+      try { parsed = JSON.parse(parsed); } catch { return []; }
+    }
+    return Array.isArray(parsed) ? [...new Set(parsed.filter((id: unknown): id is string => typeof id === 'string'))] : [];
+  };
+  const classIds = parseIds(req.body?.classIds);
+  const subjectIds = parseIds(req.body?.subjectIds);
 
   const dateMatch = /^\d{4}-\d{2}-\d{2}$/.test(startDateValue);
   const startDate = dateMatch ? new Date(`${startDateValue}T00:00:00.000Z`) : new Date(Number.NaN);
@@ -6093,7 +6118,10 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
     discardStaffPhoto(req);
     return res.status(400).json({ error: 'Choose a valid employment type.' });
   }
-
+  if (!['STAFF', 'TEACHER', 'BURSAR'].includes(requestedRole)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Choose a supported school account role.' });
+  }
   const accountName = [firstName, middleName, lastName].filter(Boolean).join(' ');
   try {
     const employee = await prisma.$transaction(async (tx) => {
@@ -6104,13 +6132,15 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
       const staffNumber = await reserveNextStaffNumber({ transaction: tx, schoolId, schoolName: school.name, schoolInitials: school.initials });
 
       let employeeUserId = userId;
+      let accountRole = requestedRole;
       if (accountMode === 'link') {
         if (!employeeUserId) throw Object.assign(new Error('Choose an existing school account to link.'), { statusCode: 400 });
         const existingUser = await tx.user.findFirst({
           where: { id: employeeUserId, schoolId, isActive: true, role: { in: ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF'] }, employeeProfile: { is: null } },
-          select: { id: true },
+          select: { id: true, role: true },
         });
         if (!existingUser) throw Object.assign(new Error('That account cannot be linked. Refresh the directory and choose an unlinked account from this school.'), { statusCode: 409 });
+        accountRole = existingUser.role;
       } else {
         const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
         const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -6122,10 +6152,13 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
         }
         const passwordHash = await bcrypt.hash(password, 10);
         const createdUser = await tx.user.create({
-          data: { schoolId, email, name: accountName, role: 'STAFF', passwordHash, isActive: true },
+          data: { schoolId, email, name: accountName, role: requestedRole, passwordHash, isActive: true },
           select: { id: true },
         });
         employeeUserId = createdUser.id;
+      }
+      if ((classIds.length || subjectIds.length) && accountRole !== 'TEACHER') {
+        throw Object.assign(new Error('Class and subject assignments are available only for teacher accounts.'), { statusCode: 400 });
       }
 
       const createdEmployee = await tx.employeeProfile.create({
@@ -6161,7 +6194,19 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
           nextDepartment: department || null,
         },
       });
-      return createdEmployee;
+      if (accountRole === 'TEACHER') {
+        if (classIds.length) {
+          const ownedClasses = await tx.class.count({ where: { id: { in: classIds }, schoolId } });
+          if (ownedClasses !== classIds.length) throw Object.assign(new Error('One or more selected classes do not belong to this school.'), { statusCode: 400 });
+          await tx.teacherClass.createMany({ data: classIds.map((classId: string) => ({ teacherId: employeeUserId, classId, schoolId })), skipDuplicates: true });
+        }
+        if (subjectIds.length) {
+          const ownedSubjects = await tx.subject.count({ where: { id: { in: subjectIds }, schoolId } });
+          if (ownedSubjects !== subjectIds.length) throw Object.assign(new Error('One or more selected subjects do not belong to this school.'), { statusCode: 400 });
+          await tx.teacherSubject.createMany({ data: subjectIds.map((subjectId: string) => ({ teacherId: employeeUserId, subjectId, schoolId })), skipDuplicates: true });
+        }
+      }
+      return { ...createdEmployee, role: accountRole };
     });
     return res.status(201).json({ employee });
   } catch (error) {
@@ -6251,7 +6296,14 @@ router.get('/staff/:employeeId', async (req: Request, res: Response) => {
         endDate: true,
         emergencyContactName: true,
         emergencyContactPhone: true,
-        user: { select: { id: true, email: true, role: true, isActive: true } },
+        user: { select: {
+          id: true,
+          email: true,
+          role: true,
+          isActive: true,
+          teacherClasses: { where: { schoolId }, select: { classId: true } },
+          teacherSubjects: { where: { schoolId }, select: { subjectId: true } },
+        } },
         employmentEvents: {
           orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }],
           take: 100,
@@ -6296,6 +6348,16 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
   const emergencyContactName = typeof req.body?.emergencyContactName === 'string' ? req.body.emergencyContactName.trim() : '';
   const emergencyContactPhone = typeof req.body?.emergencyContactPhone === 'string' ? req.body.emergencyContactPhone.trim() : '';
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const parseAssignmentIds = (value: unknown): string[] | null => {
+    if (value === undefined) return null;
+    let parsed = value;
+    if (typeof parsed === 'string') {
+      try { parsed = JSON.parse(parsed); } catch { return []; }
+    }
+    return Array.isArray(parsed) ? [...new Set(parsed.filter((id: unknown): id is string => typeof id === 'string'))] : [];
+  };
+  const classIds = parseAssignmentIds(req.body?.classIds);
+  const subjectIds = parseAssignmentIds(req.body?.subjectIds);
   const dateMatch = /^\d{4}-\d{2}-\d{2}$/.test(startDateValue);
   const startDate = dateMatch ? new Date(`${startDateValue}T00:00:00.000Z`) : new Date(Number.NaN);
 
@@ -6316,6 +6378,16 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
     const { employee, previousPhotoUrl } = await prisma.$transaction(async (tx) => {
       const current = await tx.employeeProfile.findFirst({ where: { id: req.params.employeeId, schoolId } });
       if (!current) throw Object.assign(new Error('Staff profile not found.'), { statusCode: 404 });
+      const linkedUser = await tx.user.findFirst({ where: { id: current.userId, schoolId }, select: { role: true } });
+      if ((classIds || subjectIds) && linkedUser?.role !== 'TEACHER') throw Object.assign(new Error('Class and subject assignments can only be updated for teachers.'), { statusCode: 400 });
+      if (classIds) {
+        const ownedClasses = await tx.class.count({ where: { id: { in: classIds }, schoolId } });
+        if (ownedClasses !== classIds.length) throw Object.assign(new Error('One or more selected classes do not belong to this school.'), { statusCode: 400 });
+      }
+      if (subjectIds) {
+        const ownedSubjects = await tx.subject.count({ where: { id: { in: subjectIds }, schoolId } });
+        if (ownedSubjects !== subjectIds.length) throw Object.assign(new Error('One or more selected subjects do not belong to this school.'), { statusCode: 400 });
+      }
       const updated = await tx.employeeProfile.update({
         where: { id: current.id },
         data: {
@@ -6349,6 +6421,14 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
           nextDepartment: department || null,
         },
       });
+      if (classIds) {
+        await tx.teacherClass.deleteMany({ where: { teacherId: current.userId, schoolId } });
+        if (classIds.length) await tx.teacherClass.createMany({ data: classIds.map((classId: string) => ({ teacherId: current.userId, classId, schoolId })), skipDuplicates: true });
+      }
+      if (subjectIds) {
+        await tx.teacherSubject.deleteMany({ where: { teacherId: current.userId, schoolId } });
+        if (subjectIds.length) await tx.teacherSubject.createMany({ data: subjectIds.map((subjectId: string) => ({ teacherId: current.userId, subjectId, schoolId })), skipDuplicates: true });
+      }
       return { employee: updated, previousPhotoUrl: current.photoUrl };
     });
     if (req.file && previousPhotoUrl && previousPhotoUrl !== employee.photoUrl && previousPhotoUrl.startsWith('/uploads/photos/')) {

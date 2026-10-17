@@ -21,6 +21,7 @@ let createVerifyAuth: typeof import('../src/middleware/roleAuth.js').createVerif
 let createAdminRouteAuthorization: typeof import('../src/middleware/adminRouteAuthorization.js').createAdminRouteAuthorization;
 let createStaffAttendanceRouter: typeof import('../src/routes/staff-attendance.js').createStaffAttendanceRouter;
 let createStaffAttendanceScanRouter: typeof import('../src/routes/staff-attendance-scan.js').createStaffAttendanceScanRouter;
+let createStaffRouter: typeof import('../src/routes/staff.js').createStaffRouter;
 
 async function createFixture() {
   const suffix = randomUUID();
@@ -56,7 +57,7 @@ async function createFixture() {
     checkInGraceMinutes: 15,
     checkOutCutoffMinutes: 540,
     requireCheckout: true,
-    workDays: '1,2,3,4,5',
+    workDays: '1,2,3,4,5,6,7',
     effectiveFrom: new Date('2026-01-01T00:00:00.000Z'),
   } });
   return { schoolA, schoolB, admin, employee, foreignEmployee, policy };
@@ -68,10 +69,12 @@ before(async () => {
   const authorizationModule = await import('../src/middleware/adminRouteAuthorization.js');
   const attendanceModule = await import('../src/routes/staff-attendance.js');
   const scanModule = await import('../src/routes/staff-attendance-scan.js');
+  const staffModule = await import('../src/routes/staff.js');
   createVerifyAuth = authModule.createVerifyAuth;
   createAdminRouteAuthorization = authorizationModule.createAdminRouteAuthorization;
   createStaffAttendanceRouter = attendanceModule.createStaffAttendanceRouter;
   createStaffAttendanceScanRouter = scanModule.createStaffAttendanceScanRouter;
+  createStaffRouter = staffModule.createStaffRouter;
 });
 
 after(async () => {
@@ -79,6 +82,64 @@ after(async () => {
 });
 
 describe('staff attendance MySQL integration', () => {
+  it('lets existing employee accounts complete and update only their own profile', async () => {
+    const fixture = await createFixture();
+    const legacyTeacher = await prisma.user.create({ data: {
+      schoolId: fixture.schoolA.id,
+      email: `legacy-teacher-${randomUUID()}@example.test`,
+      name: 'Legacy Teacher',
+      role: 'TEACHER',
+    } });
+    const app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    app.use('/api/staff', createStaffRouter(prisma, createVerifyAuth(prisma, getSessionSecret())));
+    const server: Server = createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const endpoint = `http://127.0.0.1:${address.port}/api/staff/me`;
+    const teacherToken = await new SignJWT({ userId: legacyTeacher.id, email: legacyTeacher.email, name: legacyTeacher.name, role: 'TEACHER', schoolId: fixture.schoolA.id })
+      .setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('1h').sign(getSessionSecret());
+    const parentToken = await new SignJWT({ userId: fixture.admin.id, email: fixture.admin.email, name: fixture.admin.name, role: 'SCHOOL_ADMIN', schoolId: fixture.schoolA.id })
+      .setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('1h').sign(getSessionSecret());
+
+    try {
+      const completed = await fetch(endpoint, {
+        method: 'PUT',
+        headers: { Cookie: `schoolbase_session=${teacherToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ firstName: 'Amara', middleName: 'N.', lastName: 'Okafor', phone: '+2348000000000', role: 'SCHOOL_ADMIN', isActive: false }),
+      });
+      assert.equal(completed.status, 200);
+      const completedData = await completed.json() as { employee: { staffNumber: string; firstName: string } };
+      assert.match(completedData.employee.staffNumber, /\/ST\/\d{4}\/\d{5,}$/);
+      assert.equal(completedData.employee.firstName, 'Amara');
+
+      const updated = await fetch(endpoint, {
+        method: 'PUT',
+        headers: { Cookie: `schoolbase_session=${teacherToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ firstName: 'Amara', middleName: '', lastName: 'Bello', phone: '+2348111111111' }),
+      });
+      assert.equal(updated.status, 200);
+      const updatedData = await updated.json() as { employee: { lastName: string; phone: string } };
+      assert.equal(updatedData.employee.lastName, 'Bello');
+      assert.equal(updatedData.employee.phone, '+2348111111111');
+
+      const persistedUser = await prisma.user.findUniqueOrThrow({ where: { id: legacyTeacher.id }, select: { role: true, isActive: true } });
+      assert.deepEqual(persistedUser, { role: 'TEACHER', isActive: true });
+      assert.equal(await prisma.staffEmploymentEvent.count({ where: { schoolId: fixture.schoolA.id, employee: { userId: legacyTeacher.id } } }), 2);
+
+      const denied = await fetch(endpoint, {
+        method: 'PUT',
+        headers: { Cookie: `schoolbase_session=${parentToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ firstName: 'Should', lastName: 'Fail' }),
+      });
+      assert.equal(denied.status, 403);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it('enforces signed active school sessions and the School Admin role over HTTP', async () => {
     const fixture = await createFixture();
     const teacher = await prisma.user.create({
@@ -411,6 +472,44 @@ describe('staff attendance MySQL integration', () => {
       assert.equal(printedScanRetry.response.status, 200);
       assert.equal(printedScanRetry.body.duplicate, true);
 
+      const concurrentUser = await prisma.user.create({ data: { schoolId: fixture.schoolA.id, email: `concurrent-staff-${randomUUID()}@example.test`, name: 'Concurrent Scan Employee', role: 'STAFF' } });
+      const concurrentEmployee = await prisma.employeeProfile.create({ data: {
+        schoolId: fixture.schoolA.id,
+        userId: concurrentUser.id,
+        staffNumber: `CON/ST/2026/${randomUUID().slice(0, 8)}`,
+        firstName: 'Concurrent',
+        lastName: 'Employee',
+        jobTitle: 'Test staff',
+        classification: 'NON_ACADEMIC',
+        startDate: new Date('2026-01-01T00:00:00.000Z'),
+      } });
+      const concurrentCookie = await cookie(concurrentUser, fixture.schoolA.id);
+      const concurrentToken = await issueAttendanceStationToken({ schoolId: fixture.schoolA.id, stationId, tokenVersion: station.tokenVersion, secret: getSessionSecret() });
+      const concurrentResponses = await Promise.all([
+        call('/api/staff/attendance/scan', concurrentCookie, 'POST', { stationToken: concurrentToken.token }),
+        call('/api/staff/attendance/scan', concurrentCookie, 'POST', { stationToken: concurrentToken.token }),
+      ]);
+      assert.equal(concurrentResponses.filter(({ response }) => response.status === 201).length, 1);
+      assert.equal(concurrentResponses.filter(({ response }) => response.status === 409).length, 1);
+      assert.equal(await prisma.staffAttendanceRecord.count({ where: { schoolId: fixture.schoolA.id, employeeId: concurrentEmployee.id, date: new Date(`${localDate}T00:00:00.000Z`) } }), 1);
+      assert.equal(await prisma.staffAttendanceEvent.count({ where: { schoolId: fixture.schoolA.id, employeeId: concurrentEmployee.id, stationId } }), 1);
+
+      const revokedUser = await prisma.user.create({ data: { schoolId: fixture.schoolA.id, email: `revoked-staff-${randomUUID()}@example.test`, name: 'Revoked Scan Employee', role: 'STAFF' } });
+      await prisma.employeeProfile.create({ data: {
+        schoolId: fixture.schoolA.id,
+        userId: revokedUser.id,
+        staffNumber: `REV/ST/2026/${randomUUID().slice(0, 8)}`,
+        firstName: 'Revoked',
+        lastName: 'Employee',
+        jobTitle: 'Test staff',
+        classification: 'NON_ACADEMIC',
+        startDate: new Date('2026-01-01T00:00:00.000Z'),
+      } });
+      const revokedUserCookie = await cookie(revokedUser, fixture.schoolA.id);
+      await prisma.user.update({ where: { id: revokedUser.id }, data: { isActive: false } });
+      const revokedAccountScan = await call('/api/staff/attendance/scan', revokedUserCookie, 'POST', { stationToken: concurrentToken.token });
+      assert.equal(revokedAccountScan.response.status, 401);
+
       await prisma.attendanceStation.update({ where: { id: stationId }, data: { lastCodeIssuedAt: new Date(Date.now() - 9_000) } });
       const nextCode = await call(`/api/admin/staff-attendance/stations/${stationId}/code`, adminCookie);
       assert.equal(nextCode.response.status, 200);
@@ -437,9 +536,10 @@ describe('staff attendance MySQL integration', () => {
       const teacherRecord = await prisma.staffAttendanceRecord.findFirst({ where: { schoolId: fixture.schoolA.id, employeeId: teacherEmployee.id, date: new Date(`${localDate}T00:00:00.000Z`) } });
       assert.ok(teacherRecord?.checkInAt);
       const events = await prisma.staffAttendanceEvent.findMany({ where: { schoolId: fixture.schoolA.id, stationId }, orderBy: { createdAt: 'asc' } });
-      assert.equal(events.filter((event) => event.eventType === 'STATION_CHECK_IN').length, 2);
+      assert.equal(events.filter((event) => event.eventType === 'STATION_CHECK_IN').length, 4);
       assert.equal(events.filter((event) => event.eventType === 'STATION_CHECK_OUT').length, 1);
       assert.equal(events.filter((event) => event.employeeId === printEmployee.id).length, 1);
+      assert.equal(events.filter((event) => event.employeeId === concurrentEmployee.id).length, 1);
       const stationEvents = await prisma.attendanceStationEvent.findMany({ where: { schoolId: fixture.schoolA.id, stationId }, orderBy: { createdAt: 'asc' } });
       assert.deepEqual(stationEvents.map((event) => event.eventType), ['STATION_CREATED', 'CODE_ISSUED', 'CODE_ISSUED', 'STATION_REVOKED']);
     } finally {
