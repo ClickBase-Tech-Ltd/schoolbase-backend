@@ -299,6 +299,18 @@ describe('staff attendance MySQL integration', () => {
     const fixture = await createFixture();
     const staffUser = await prisma.user.findUniqueOrThrow({ where: { id: fixture.employee.userId } });
     const foreignUser = await prisma.user.findUniqueOrThrow({ where: { id: fixture.foreignEmployee.userId } });
+    const teacherUser = await prisma.user.create({ data: { schoolId: fixture.schoolA.id, email: `attendance-teacher-linked-${randomUUID()}@example.test`, name: 'Teacher Employee', role: 'TEACHER' } });
+    const teacherEmployee = await prisma.employeeProfile.create({ data: {
+      schoolId: fixture.schoolA.id,
+      userId: teacherUser.id,
+      staffNumber: `TST/TE/2026/${randomUUID().slice(0, 8)}`,
+      firstName: 'Teacher',
+      lastName: 'Employee',
+      jobTitle: 'Teacher',
+      classification: 'ACADEMIC',
+      startDate: new Date('2026-01-01T00:00:00.000Z'),
+    } });
+    const unlinkedTeacher = await prisma.user.create({ data: { schoolId: fixture.schoolA.id, email: `attendance-teacher-unlinked-${randomUUID()}@example.test`, name: 'Unlinked Teacher', role: 'TEACHER' } });
     const localDate = getSchoolLocalDate(new Date(), 'Africa/Lagos');
     await prisma.staffAttendancePolicy.update({
       where: { id: fixture.policy.id },
@@ -334,6 +346,8 @@ describe('staff attendance MySQL integration', () => {
       const adminCookie = await cookie(fixture.admin, fixture.schoolA.id);
       const staffCookie = await cookie(staffUser, fixture.schoolA.id);
       const foreignCookie = await cookie(foreignUser, fixture.schoolB.id);
+      const teacherCookie = await cookie(teacherUser, fixture.schoolA.id);
+      const unlinkedTeacherCookie = await cookie(unlinkedTeacher, fixture.schoolA.id);
       const denied = await call('/api/admin/staff-attendance/stations', staffCookie);
       assert.equal(denied.response.status, 403);
 
@@ -358,6 +372,13 @@ describe('staff attendance MySQL integration', () => {
       assert.equal(firstScan.body.accepted, true);
       assert.equal(firstScan.body.action, 'CHECK_IN');
       assert.ok(firstScan.body.checkInAt);
+
+      const linkedTeacherScan = await call('/api/staff/attendance/scan', teacherCookie, 'POST', { stationToken: signedCode.token });
+      assert.equal(linkedTeacherScan.response.status, 201);
+      assert.equal(linkedTeacherScan.body.accepted, true);
+      assert.equal(linkedTeacherScan.body.action, 'CHECK_IN');
+      const unlinkedTeacherScan = await call('/api/staff/attendance/scan', unlinkedTeacherCookie, 'POST', { stationToken: signedCode.token });
+      assert.equal(unlinkedTeacherScan.response.status, 403);
 
       const repeatedScan = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: signedCode.token });
       assert.equal(repeatedScan.response.status, 200);
@@ -413,6 +434,8 @@ describe('staff attendance MySQL integration', () => {
 
       const record = await prisma.staffAttendanceRecord.findFirst({ where: { schoolId: fixture.schoolA.id, employeeId: fixture.employee.id, date: new Date(`${localDate}T00:00:00.000Z`) } });
       assert.ok(record?.checkInAt && record.checkOutAt);
+      const teacherRecord = await prisma.staffAttendanceRecord.findFirst({ where: { schoolId: fixture.schoolA.id, employeeId: teacherEmployee.id, date: new Date(`${localDate}T00:00:00.000Z`) } });
+      assert.ok(teacherRecord?.checkInAt);
       const events = await prisma.staffAttendanceEvent.findMany({ where: { schoolId: fixture.schoolA.id, stationId }, orderBy: { createdAt: 'asc' } });
       assert.equal(events.filter((event) => event.eventType === 'STATION_CHECK_IN').length, 2);
       assert.equal(events.filter((event) => event.eventType === 'STATION_CHECK_OUT').length, 1);

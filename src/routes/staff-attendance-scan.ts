@@ -15,7 +15,7 @@ export function createStaffAttendanceScanRouter(database: PrismaClient, stationS
 
   router.post('/scan', async (req: AuthenticatedRequest, res: Response) => {
     const user = req.user;
-    if (!user?.userId || user.role !== 'STAFF' || !user.schoolId) return res.status(403).json({ error: 'Active staff account required.' });
+    if (!user?.userId || !['STAFF', 'TEACHER'].includes(user.role) || !user.schoolId) return res.status(403).json({ error: 'Active employee account required.' });
     const stationToken = typeof req.body?.stationToken === 'string' ? req.body.stationToken.trim() : '';
     const stationCode = typeof req.body?.stationCode === 'string' ? req.body.stationCode.trim() : '';
     const scanRequestId = typeof req.body?.scanRequestId === 'string' ? req.body.scanRequestId.trim() : '';
