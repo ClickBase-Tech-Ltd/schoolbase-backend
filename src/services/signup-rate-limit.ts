@@ -1,4 +1,5 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import { PrismaClient } from '@prisma/client';
 import { getSessionSecret } from './security-config.js';
 
@@ -6,10 +7,33 @@ const prisma = new PrismaClient();
 const WINDOW_MS = 15 * 60 * 1000;
 const EMAIL_COOLDOWN_MS = 60 * 1000;
 const EMAIL_LIMIT = 5;
-let cleanupCounter = 0;
+const IP_LIMIT = 20;
 
-function bucketKey(kind: 'email' | 'email-cooldown', value: string): string {
+function bucketKey(kind: 'email' | 'email-cooldown' | 'ip', value: string): string {
   return createHmac('sha256', getSessionSecret()).update(`${kind}:${value}`).digest('hex');
+}
+
+export function verifyClientIpAssertion(assertion?: string, now = Date.now()): string | null {
+  if (!assertion || assertion.length > 512) return null;
+  const [encodedPayload, signature, extra] = assertion.split('.');
+  if (!encodedPayload || !signature || extra) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as { ip?: unknown; timestamp?: unknown };
+    if (typeof payload.ip !== 'string' || !isValidIp(payload.ip) || typeof payload.timestamp !== 'number') return null;
+    if (Math.abs(now - payload.timestamp) > 2 * 60 * 1000) return null;
+
+    const expected = createHmac('sha256', getSessionSecret()).update(encodedPayload).digest();
+    const actual = Buffer.from(signature, 'base64url');
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+    return payload.ip;
+  } catch {
+    return null;
+  }
+}
+
+function isValidIp(value: string): boolean {
+  return value.length <= 64 && !value.includes(',') && isIP(value) !== 0;
 }
 
 async function acquire(bucket: string, limit: number, windowMs = WINDOW_MS): Promise<boolean> {
@@ -37,27 +61,17 @@ async function acquire(bucket: string, limit: number, windowMs = WINDOW_MS): Pro
   });
 }
 
-export async function allowSignupOtpRequest(email: string): Promise<boolean> {
-  cleanupCounter += 1;
-  if (cleanupCounter % 100 === 0) {
-    await Promise.all([
-      prisma.signupRateLimit.deleteMany({
-        where: { updatedAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-      }),
-      prisma.signupOtp.deleteMany({
-        where: { verifiedAt: null, expiresAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-      }),
-    ]).catch((error) => console.warn('Signup retention cleanup failed:', error));
-  }
-
+export async function allowSignupOtpRequest(email: string, clientIp?: string): Promise<boolean> {
   const normalizedEmail = email.trim().toLowerCase();
   const allowedByCooldown = await acquire(bucketKey('email-cooldown', normalizedEmail), 1, EMAIL_COOLDOWN_MS);
   const allowedByEmail = await acquire(bucketKey('email', normalizedEmail), EMAIL_LIMIT);
-  return allowedByCooldown && allowedByEmail;
+  const allowedByIp = clientIp ? await acquire(bucketKey('ip', clientIp), IP_LIMIT) : true;
+  return allowedByCooldown && allowedByEmail && allowedByIp;
 }
 
 export const signupRateLimitPolicy = {
   emailCooldownMs: EMAIL_COOLDOWN_MS,
   emailWindowMs: WINDOW_MS,
   emailWindowLimit: EMAIL_LIMIT,
+  ipWindowLimit: IP_LIMIT,
 };

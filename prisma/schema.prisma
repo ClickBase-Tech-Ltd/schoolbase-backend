@@ -1326,6 +1326,8 @@ model SignupOtp {
   attempts     Int       @default(0)
   expiresAt    DateTime
   verifiedAt   DateTime?
+  recoveryKeyHash String?  @db.Char(64)
+  recoveryExpiresAt DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 }

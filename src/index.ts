@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { initializeSubscriptionExpiryJob, stopSubscriptionExpiryJob } from './jobs/checkSubscriptionExpiry.js';
 import { initializeSubscriptionEmailJob, stopSubscriptionEmailJob } from './jobs/subscriptionEmails.js';
+import { initializeSignupRetentionJob } from './jobs/signupRetention.js';
 import { ensurePlatformPaymentPlans } from './services/platform-settings.js';
 import { activityAuditMiddleware } from './middleware/activityAudit.js';
 import baileysSessionManager from './communications/whatsapp-baileys.js';
@@ -26,6 +27,7 @@ const app = express();
 const PORT = process.env.API_PORT || 3006;
 let subscriptionExpiryTask: any = null;
 let subscriptionEmailTask: any = null;
+let signupRetentionTask: any = null;
 
 async function ensureDefaultAdPlacements() {
   const placements = [
@@ -262,6 +264,12 @@ async function start() {
       // Don't fail startup if job initialization fails - system can still operate
     }
 
+    try {
+      signupRetentionTask = initializeSignupRetentionJob();
+    } catch (error) {
+      console.error('Warning: Failed to initialize signup retention job:', error);
+    }
+
     const whatsappDeliveryWorker = new WhatsAppDeliveryWorker(
       prisma,
       new SchoolWhatsAppRateLimiter({
@@ -325,6 +333,7 @@ process.on('SIGTERM', async () => {
   if (subscriptionEmailTask) {
     stopSubscriptionEmailJob(subscriptionEmailTask);
   }
+  signupRetentionTask?.stop();
   await prisma.$disconnect();
   process.exit(0);
 });

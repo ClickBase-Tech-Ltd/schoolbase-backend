@@ -32,7 +32,7 @@ function getEventName(method: string, path: string) {
 
 function getSafeBodyFields(body: unknown) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return '';
-  const excluded = /password|token|otp|secret|authorization|cookie|pin|answer|credential|private.?key/i;
+  const excluded = /password|token|otp|secret|authorization|cookie|pin|answer|credential|private.?key|recovery.?key/i;
   return Object.keys(body as Record<string, unknown>)
     .filter((key) => !excluded.test(key))
     .slice(0, 30)

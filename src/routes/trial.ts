@@ -1,13 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { SignJWT } from 'jose';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { generateOtp, getSignupOtp, saveSignupOtp, verifySignupOtp, replaceSignupOtpAfterDelivery } from '../services/otp.js';
 import { sendSignupOtpEmail, sendWelcomeEmail } from '../services/email.js';
 import { sendInternalSignupNotification } from '../services/email.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { getPlatformSettingValue } from '../services/platform-settings.js';
 import { getSessionSecret } from '../services/security-config.js';
-import { allowSignupOtpRequest } from '../services/signup-rate-limit.js';
+import { allowSignupOtpRequest, verifyClientIpAssertion } from '../services/signup-rate-limit.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -73,9 +74,12 @@ router.post('/request-otp', async (req: Request, res: Response) => {
     const password = String(req.body.password ?? '');
 
     if (!schoolName || !slug || !country || !adminName || !adminEmail || !password) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required fields'
       });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
     }
 
     // Check if school slug already exists
@@ -105,7 +109,7 @@ router.post('/request-otp', async (req: Request, res: Response) => {
       console.log('Refreshing OTP for an existing pending signup.');
     }
 
-    if (!(await allowSignupOtpRequest(adminEmail))) {
+    if (!(await allowSignupOtpRequest(adminEmail, verifyClientIpAssertion(req.get('x-schoolbase-client-ip-assertion')) || undefined))) {
       return res.status(429).json({ error: 'Too many verification requests. Please wait before trying again.' });
     }
 
@@ -172,6 +176,77 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     const allowSignup = await getPlatformSettingValue(prisma, 'allowSignup', true);
     const allowTrial = await getPlatformSettingValue(prisma, 'allowTrial', true);
 
+    const adminEmail = String(req.body.adminEmail ?? '').trim().toLowerCase();
+    const otp = String(req.body.otp ?? '').trim();
+    const recoveryKey = String(req.body.recoveryKey ?? '').trim();
+
+    if (!adminEmail || (!otp && !recoveryKey)) {
+      return res.status(400).json({
+        error: 'Email and verification code are required'
+      });
+    }
+
+    const recoveryHash = recoveryKey ? createHash('sha256').update(recoveryKey).digest('hex') : null;
+    let signupOtp = await getSignupOtp(adminEmail);
+
+    if (signupOtp?.verifiedAt) {
+      const recovery = await prisma.signupOtp.findUnique({
+        where: { email: adminEmail },
+        select: { recoveryKeyHash: true, recoveryExpiresAt: true },
+      });
+      const expected = recovery?.recoveryKeyHash;
+      const suppliedBuffer = recoveryHash ? Buffer.from(recoveryHash, 'hex') : Buffer.alloc(0);
+      const expectedBuffer = expected ? Buffer.from(expected, 'hex') : Buffer.alloc(0);
+      const recoveryMatches = expectedBuffer.length === 32
+        && suppliedBuffer.length === 32
+        && timingSafeEqual(suppliedBuffer, expectedBuffer)
+        && Boolean(recovery?.recoveryExpiresAt && recovery.recoveryExpiresAt > new Date());
+      if (!recoveryMatches) {
+        return res.status(401).json({ error: 'Invalid or expired verification code' });
+      }
+
+      const adminUser = await prisma.user.findUnique({
+        where: { email: adminEmail },
+        select: { id: true, email: true, name: true, role: true, schoolId: true, isActive: true },
+      });
+      if (!adminUser?.isActive || !adminUser.schoolId) {
+        return res.status(409).json({ error: 'The signup account is not available for recovery. Contact support.' });
+      }
+      const school = await prisma.school.findUnique({
+        where: { id: adminUser.schoolId },
+        select: { id: true, name: true, slug: true, archivedAt: true },
+      });
+      if (!school || school.archivedAt) {
+        return res.status(409).json({ error: 'The signup account is not available for recovery. Contact support.' });
+      }
+      await recordActivity({
+        event: 'SCHOOL_SIGNUP_SESSION_RECOVERED',
+        details: `Signup session recovered for school ${school.id}`,
+        userId: adminUser.id,
+        schoolId: school.id,
+      }).catch((error) => console.warn('Failed to record signup recovery activity:', error));
+      const token = await new SignJWT({
+        userId: adminUser.id,
+        schoolId: school.id,
+        email: adminUser.email,
+        name: adminUser.name,
+        role: adminUser.role,
+      })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .setExpirationTime('7d')
+        .sign(secret());
+
+      return res.status(200).json({
+        success: true,
+        recovered: true,
+        message: 'School registered successfully',
+        school: { id: school.id, name: school.name, slug: school.slug },
+        user: { id: adminUser.id, email: adminUser.email, name: adminUser.name, role: adminUser.role },
+        token,
+      });
+    }
+
     if (maintenanceMode) {
       return res.status(503).json({ error: 'Platform is in maintenance mode. Signup is temporarily disabled.' });
     }
@@ -184,21 +259,9 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Trial signup is currently disabled.' });
     }
 
-    const adminEmail = String(req.body.adminEmail ?? '').trim().toLowerCase();
-    const otp = String(req.body.otp ?? '').trim();
-
-    if (!adminEmail || !otp) {
-      return res.status(400).json({ 
-        error: 'Missing required fields'
-      });
-    }
-
-    // Verify OTP
-    const signupOtp = await verifySignupOtp(adminEmail, otp);
-    if (!signupOtp) {
-      return res.status(401).json({ 
-        error: 'Invalid or expired verification code'
-      });
+    signupOtp = otp ? await verifySignupOtp(adminEmail, otp) : null;
+    if (!signupOtp || !recoveryHash) {
+      return res.status(401).json({ error: 'Invalid or expired verification code' });
     }
 
     // Create school
@@ -233,7 +296,11 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
           attempts: { lt: 5 },
           expiresAt: { gt: new Date() },
         },
-        data: { verifiedAt: new Date() },
+        data: {
+          verifiedAt: new Date(),
+          recoveryKeyHash: recoveryHash,
+          recoveryExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        },
       });
       if (consumed.count !== 1) throw Object.assign(new Error('Verification code expired or was already used. Please request a new code.'), { statusCode: 409 });
       return { school, adminUser };
@@ -312,7 +379,7 @@ router.post('/resend-otp', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Pending signup not found or already verified' });
     }
 
-    if (!(await allowSignupOtpRequest(adminEmail))) {
+    if (!(await allowSignupOtpRequest(adminEmail, verifyClientIpAssertion(req.get('x-schoolbase-client-ip-assertion')) || undefined))) {
       return res.status(429).json({ error: 'Too many verification requests. Please wait before trying again.' });
     }
 

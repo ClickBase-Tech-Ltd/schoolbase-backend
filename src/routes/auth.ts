@@ -4,7 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { hasPendingOtp, generateOtp, getSignupOtp, replaceSignupOtpAfterDelivery } from '../services/otp.js';
 import { sendSignupOtpEmail } from '../services/email.js';
-import { allowSignupOtpRequest } from '../services/signup-rate-limit.js';
+import { allowSignupOtpRequest, verifyClientIpAssertion } from '../services/signup-rate-limit.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { getSessionSecret } from '../services/security-config.js';
 
@@ -159,7 +159,7 @@ async function handleSchoolLogin(req: Request, res: Response) {
       // Check if this email has a pending OTP waiting to be verified
       if (await hasPendingOtp(normalizedEmail)) {
         const pendingSignup = await getSignupOtp(normalizedEmail);
-        const allowed = await allowSignupOtpRequest(normalizedEmail);
+        const allowed = await allowSignupOtpRequest(normalizedEmail, verifyClientIpAssertion(req.get('x-schoolbase-client-ip-assertion')) || undefined);
         if (allowed && pendingSignup) {
           const otp = generateOtp();
           try {
