@@ -19,9 +19,11 @@ export function createStaffAttendanceScanRouter(database: PrismaClient, stationS
     const stationToken = typeof req.body?.stationToken === 'string' ? req.body.stationToken.trim() : '';
     const stationCode = typeof req.body?.stationCode === 'string' ? req.body.stationCode.trim() : '';
     const scanRequestId = typeof req.body?.scanRequestId === 'string' ? req.body.scanRequestId.trim() : '';
+    const requestedAction = typeof req.body?.requestedAction === 'string' ? req.body.requestedAction.trim().toUpperCase() : '';
     if ((!stationToken && !stationCode) || (stationToken && stationCode) || stationToken.length > 4096 || stationCode.length > 191) {
       return res.status(400).json({ error: 'Provide either the current station token or printed station locator.' });
     }
+    if (!['CHECK_IN', 'CHECK_OUT'].includes(requestedAction)) return res.status(400).json({ error: 'Choose whether this scan is for check-in or checkout.' });
     if (stationCode && !/^[a-zA-Z0-9_-]{12,191}$/.test(stationCode)) return res.status(400).json({ error: 'Printed station locator is invalid.' });
     if (stationCode && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(scanRequestId)) {
       return res.status(400).json({ error: 'Provide a unique scan request ID for this printed station scan.' });
@@ -48,16 +50,39 @@ export function createStaffAttendanceScanRouter(database: PrismaClient, stationS
           select: { id: true, scanWindowStartedAt: true, scanWindowCount: true },
         });
         if (!station) throw Object.assign(new Error('Attendance station is inactive or has been rotated.'), { statusCode: 410 });
+        const now = new Date();
+        const localDate = getSchoolLocalDate(now, school.timezone);
+        const attendanceDate = new Date(`${localDate}T00:00:00.000Z`);
 
         const idempotencyKey = `${printedLocator ? 'placard' : 'station'}:${token.jti}:${employee.id}`;
         const previousEvent = await tx.staffAttendanceEvent.findFirst({ where: { schoolId: user.schoolId, idempotencyKey } });
         if (previousEvent) {
           const previousRecord = await tx.staffAttendanceRecord.findFirst({ where: { id: previousEvent.attendanceId, schoolId: user.schoolId } });
           if (!previousRecord) throw new Error('Attendance event has no current record');
-          return { record: previousRecord, action: String((previousEvent.details as { action?: string } | null)?.action ?? 'CHECK_IN'), duplicate: true };
+          const previousAction = String((previousEvent.details as { action?: string } | null)?.action ?? 'CHECK_IN');
+          if (previousAction !== requestedAction) throw Object.assign(new Error('This QR was already used for a different attendance step. Start a fresh scan for the current step.'), { statusCode: 409 });
+          return { record: previousRecord, action: previousAction, duplicate: true };
         }
 
-        const now = new Date();
+        const existing = await tx.staffAttendanceRecord.findFirst({
+          where: { schoolId: user.schoolId, employeeId: employee.id, date: attendanceDate, shiftKey: 'DEFAULT' },
+        });
+        if (existing?.status === 'ABSENT') throw Object.assign(new Error('An absence has already been recorded; contact the school administrator.'), { statusCode: 409 });
+        const action = existing?.checkInAt
+          ? existing.checkOutAt ? 'COMPLETE' : 'CHECK_OUT'
+          : 'CHECK_IN';
+        const assertRequestedActionMatchesRecord = (currentAction: string) => {
+          if (currentAction !== requestedAction) {
+            const message = currentAction === 'CHECK_OUT'
+              ? 'You are already checked in. Start checkout scan when you are leaving.'
+              : currentAction === 'COMPLETE'
+                ? 'Attendance is already complete for today.'
+                : 'There is no open check-in to check out. Start check-in scan first.';
+            throw Object.assign(new Error(message), { statusCode: 409, nextAction: currentAction });
+          }
+        };
+        assertRequestedActionMatchesRecord(action);
+
         const currentWindow = station.scanWindowStartedAt && now.getTime() - station.scanWindowStartedAt.getTime() < SCAN_WINDOW_MS;
         if (currentWindow && station.scanWindowCount >= MAX_STATION_SCANS_PER_WINDOW) {
           throw Object.assign(new Error('This station has reached its scan limit. Please use the supervised manual register.'), { statusCode: 429 });
@@ -76,8 +101,13 @@ export function createStaffAttendanceScanRouter(database: PrismaClient, stationS
         });
         if (updatedCounter.count !== 1) throw Object.assign(new Error('Station is busy; scan the current code again.'), { statusCode: 409 });
 
-        const localDate = getSchoolLocalDate(now, school.timezone);
-        const attendanceDate = new Date(`${localDate}T00:00:00.000Z`);
+        const currentRecord = await tx.staffAttendanceRecord.findFirst({ where: { schoolId: user.schoolId, employeeId: employee.id, date: attendanceDate, shiftKey: 'DEFAULT' } });
+        if (currentRecord?.status === 'ABSENT') throw Object.assign(new Error('An absence has already been recorded; contact the school administrator.'), { statusCode: 409 });
+        const currentAction = currentRecord?.checkInAt
+          ? currentRecord.checkOutAt ? 'COMPLETE' : 'CHECK_OUT'
+          : 'CHECK_IN';
+        assertRequestedActionMatchesRecord(currentAction);
+
         if (employee.startDate > attendanceDate || (employee.endDate && employee.endDate < attendanceDate)) {
           throw Object.assign(new Error('Employee is not eligible for attendance on this date.'), { statusCode: 403 });
         }
@@ -99,26 +129,20 @@ export function createStaffAttendanceScanRouter(database: PrismaClient, stationS
         };
         if (!isStaffAttendanceWorkday(localDate, policy)) throw Object.assign(new Error('Attendance is not scheduled for this school-local date.'), { statusCode: 400 });
 
-        const existing = await tx.staffAttendanceRecord.findFirst({
-          where: { schoolId: user.schoolId, employeeId: employee.id, date: attendanceDate, shiftKey: 'DEFAULT' },
-        });
-        if (existing?.status === 'ABSENT') throw Object.assign(new Error('An absence has already been recorded; contact the school administrator.'), { statusCode: 409 });
-        const action = existing?.checkInAt && !existing.checkOutAt ? 'CHECK_OUT' : 'CHECK_IN';
-        if (action === 'CHECK_IN' && existing?.checkInAt) throw Object.assign(new Error('Attendance is already complete for this shift.'), { statusCode: 409 });
-        const checkInAt = action === 'CHECK_IN' ? now : existing?.checkInAt ?? null;
-        const checkOutAt = action === 'CHECK_OUT' ? now : existing?.checkOutAt ?? null;
+        const checkInAt = action === 'CHECK_IN' ? now : currentRecord?.checkInAt ?? null;
+        const checkOutAt = action === 'CHECK_OUT' ? now : currentRecord?.checkOutAt ?? null;
         const status = computeStaffAttendanceStatus({ policy, timeZone: school.timezone, localDate, checkInAt, checkOutAt, now });
         if (status === 'PENDING' || status === 'NOT_CHECKED_IN' || status === 'NON_WORKDAY') throw Object.assign(new Error('Unable to determine an attendance status for this scan.'), { statusCode: 400 });
-        const beforeSnapshot = existing ? {
+        const beforeSnapshot = currentRecord ? {
           date: localDate,
-          shiftKey: existing.shiftKey,
-          checkInAt: existing.checkInAt?.toISOString() ?? null,
-          checkOutAt: existing.checkOutAt?.toISOString() ?? null,
-          status: existing.status,
-          reason: existing.reason,
+          shiftKey: currentRecord.shiftKey,
+          checkInAt: currentRecord.checkInAt?.toISOString() ?? null,
+          checkOutAt: currentRecord.checkOutAt?.toISOString() ?? null,
+          status: currentRecord.status,
+          reason: currentRecord.reason,
         } : null;
-        const record = existing
-          ? await tx.staffAttendanceRecord.update({ where: { id: existing.id }, data: { policyId: policy.id, checkInAt, checkOutAt, status, reason: 'Authenticated attendance station scan' } })
+        const record = currentRecord
+          ? await tx.staffAttendanceRecord.update({ where: { id: currentRecord.id }, data: { policyId: policy.id, checkInAt, checkOutAt, status, reason: 'Authenticated attendance station scan' } })
           : await tx.staffAttendanceRecord.create({ data: { schoolId: user.schoolId, employeeId: employee.id, policyId: policy.id, date: attendanceDate, shiftKey: 'DEFAULT', checkInAt, checkOutAt, status, reason: 'Authenticated attendance station scan' } });
         await tx.staffAttendanceEvent.create({
           data: {
@@ -149,7 +173,10 @@ export function createStaffAttendanceScanRouter(database: PrismaClient, stationS
       });
     } catch (error) {
       const statusCode = Number((error as { statusCode?: number })?.statusCode);
-      if (statusCode) return res.status(statusCode).json({ error: (error as Error).message });
+      if (statusCode) {
+        const nextAction = (error as { nextAction?: unknown }).nextAction;
+        return res.status(statusCode).json({ error: (error as Error).message, ...(nextAction ? { nextAction } : {}) });
+      }
       if ((error as { code?: string })?.code === 'P2002') return res.status(409).json({ error: 'Attendance was already recorded for this shift.' });
       console.error('Error processing staff attendance scan:', error);
       return res.status(500).json({ error: 'Failed to process attendance scan' });

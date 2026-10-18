@@ -6122,6 +6122,11 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
     discardStaffPhoto(req);
     return res.status(400).json({ error: 'Choose a supported school account role.' });
   }
+  if (requestedRole !== 'TEACHER' && (classIds.length || subjectIds.length)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Class and subject assignments are available only for teachers.' });
+  }
+
   const accountName = [firstName, middleName, lastName].filter(Boolean).join(' ');
   try {
     const employee = await prisma.$transaction(async (tx) => {
@@ -6156,9 +6161,6 @@ router.post('/staff', staffPhotoUpload.single('photo'), async (req: Request, res
           select: { id: true },
         });
         employeeUserId = createdUser.id;
-      }
-      if ((classIds.length || subjectIds.length) && accountRole !== 'TEACHER') {
-        throw Object.assign(new Error('Class and subject assignments are available only for teacher accounts.'), { statusCode: 400 });
       }
 
       const createdEmployee = await tx.employeeProfile.create({

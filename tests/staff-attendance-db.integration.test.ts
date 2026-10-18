@@ -425,23 +425,27 @@ describe('staff attendance MySQL integration', () => {
       const station = await prisma.attendanceStation.findUniqueOrThrow({ where: { id: stationId } });
       const signedCode = await issueAttendanceStationToken({ schoolId: fixture.schoolA.id, stationId, tokenVersion: station.tokenVersion, secret: getSessionSecret() });
 
-      const foreignScan = await call('/api/staff/attendance/scan', foreignCookie, 'POST', { stationToken: signedCode.token });
+      const foreignScan = await call('/api/staff/attendance/scan', foreignCookie, 'POST', { stationToken: signedCode.token, requestedAction: 'CHECK_IN' });
       assert.equal(foreignScan.response.status, 404);
 
-      const firstScan = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: signedCode.token });
+      const firstScan = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: signedCode.token, requestedAction: 'CHECK_IN' });
       assert.equal(firstScan.response.status, 201);
       assert.equal(firstScan.body.accepted, true);
       assert.equal(firstScan.body.action, 'CHECK_IN');
       assert.ok(firstScan.body.checkInAt);
+      const accidentalCheckoutAttempt = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: signedCode.token, requestedAction: 'CHECK_IN' });
+      assert.equal(accidentalCheckoutAttempt.response.status, 409);
+      assert.equal(accidentalCheckoutAttempt.body.nextAction, 'CHECK_OUT');
+      assert.equal((await prisma.staffAttendanceRecord.findFirstOrThrow({ where: { schoolId: fixture.schoolA.id, employeeId: fixture.employee.id, date: new Date(`${localDate}T00:00:00.000Z`) } })).checkOutAt, null);
 
-      const linkedTeacherScan = await call('/api/staff/attendance/scan', teacherCookie, 'POST', { stationToken: signedCode.token });
+      const linkedTeacherScan = await call('/api/staff/attendance/scan', teacherCookie, 'POST', { stationToken: signedCode.token, requestedAction: 'CHECK_IN' });
       assert.equal(linkedTeacherScan.response.status, 201);
       assert.equal(linkedTeacherScan.body.accepted, true);
       assert.equal(linkedTeacherScan.body.action, 'CHECK_IN');
-      const unlinkedTeacherScan = await call('/api/staff/attendance/scan', unlinkedTeacherCookie, 'POST', { stationToken: signedCode.token });
+      const unlinkedTeacherScan = await call('/api/staff/attendance/scan', unlinkedTeacherCookie, 'POST', { stationToken: signedCode.token, requestedAction: 'CHECK_IN' });
       assert.equal(unlinkedTeacherScan.response.status, 403);
 
-      const repeatedScan = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: signedCode.token });
+      const repeatedScan = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: signedCode.token, requestedAction: 'CHECK_IN' });
       assert.equal(repeatedScan.response.status, 200);
       assert.equal(repeatedScan.body.duplicate, true);
 
@@ -461,6 +465,7 @@ describe('staff attendance MySQL integration', () => {
       const printedScan = await call('/api/staff/attendance/scan', printStaffCookie, 'POST', {
         stationCode: station.publicCode,
         scanRequestId: printRequestId,
+        requestedAction: 'CHECK_IN',
       });
       assert.equal(printedScan.response.status, 201);
       assert.equal(printedScan.body.action, 'CHECK_IN');
@@ -468,6 +473,7 @@ describe('staff attendance MySQL integration', () => {
       const printedScanRetry = await call('/api/staff/attendance/scan', printStaffCookie, 'POST', {
         stationCode: station.publicCode,
         scanRequestId: printRequestId,
+        requestedAction: 'CHECK_IN',
       });
       assert.equal(printedScanRetry.response.status, 200);
       assert.equal(printedScanRetry.body.duplicate, true);
@@ -486,8 +492,8 @@ describe('staff attendance MySQL integration', () => {
       const concurrentCookie = await cookie(concurrentUser, fixture.schoolA.id);
       const concurrentToken = await issueAttendanceStationToken({ schoolId: fixture.schoolA.id, stationId, tokenVersion: station.tokenVersion, secret: getSessionSecret() });
       const concurrentResponses = await Promise.all([
-        call('/api/staff/attendance/scan', concurrentCookie, 'POST', { stationToken: concurrentToken.token }),
-        call('/api/staff/attendance/scan', concurrentCookie, 'POST', { stationToken: concurrentToken.token }),
+        call('/api/staff/attendance/scan', concurrentCookie, 'POST', { stationToken: concurrentToken.token, requestedAction: 'CHECK_IN' }),
+        call('/api/staff/attendance/scan', concurrentCookie, 'POST', { stationToken: concurrentToken.token, requestedAction: 'CHECK_IN' }),
       ]);
       assert.equal(concurrentResponses.filter(({ response }) => response.status === 201).length, 1);
       assert.equal(concurrentResponses.filter(({ response }) => response.status === 409).length, 1);
@@ -507,7 +513,7 @@ describe('staff attendance MySQL integration', () => {
       } });
       const revokedUserCookie = await cookie(revokedUser, fixture.schoolA.id);
       await prisma.user.update({ where: { id: revokedUser.id }, data: { isActive: false } });
-      const revokedAccountScan = await call('/api/staff/attendance/scan', revokedUserCookie, 'POST', { stationToken: concurrentToken.token });
+      const revokedAccountScan = await call('/api/staff/attendance/scan', revokedUserCookie, 'POST', { stationToken: concurrentToken.token, requestedAction: 'CHECK_IN' });
       assert.equal(revokedAccountScan.response.status, 401);
 
       await prisma.attendanceStation.update({ where: { id: stationId }, data: { lastCodeIssuedAt: new Date(Date.now() - 9_000) } });
@@ -515,19 +521,27 @@ describe('staff attendance MySQL integration', () => {
       assert.equal(nextCode.response.status, 200);
       const refreshedStation = await prisma.attendanceStation.findUniqueOrThrow({ where: { id: stationId } });
       const secondSignedCode = await issueAttendanceStationToken({ schoolId: fixture.schoolA.id, stationId, tokenVersion: refreshedStation.tokenVersion, secret: getSessionSecret() });
-      const checkout = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: secondSignedCode.token });
+      const wrongStepCheckout = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: secondSignedCode.token, requestedAction: 'CHECK_IN' });
+      assert.equal(wrongStepCheckout.response.status, 409);
+      const checkout = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: secondSignedCode.token, requestedAction: 'CHECK_OUT' });
       assert.equal(checkout.response.status, 201);
       assert.equal(checkout.body.action, 'CHECK_OUT');
       assert.ok(checkout.body.checkOutAt);
+      const afterCheckoutStation = await prisma.attendanceStation.findUniqueOrThrow({ where: { id: stationId } });
+      const afterCheckoutCode = await issueAttendanceStationToken({ schoolId: fixture.schoolA.id, stationId, tokenVersion: afterCheckoutStation.tokenVersion, secret: getSessionSecret() });
+      const postCheckoutScan = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: afterCheckoutCode.token, requestedAction: 'CHECK_IN' });
+      assert.equal(postCheckoutScan.response.status, 409);
+      assert.equal(postCheckoutScan.body.nextAction, 'COMPLETE');
 
       const revoked = await call(`/api/admin/staff-attendance/stations/${stationId}/revoke`, adminCookie, 'PATCH', { reason: 'Station replaced after security review' });
       assert.equal(revoked.response.status, 200);
       assert.equal(revoked.body.station.isActive, false);
-      const afterRevoke = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: secondSignedCode.token });
+      const afterRevoke = await call('/api/staff/attendance/scan', staffCookie, 'POST', { stationToken: secondSignedCode.token, requestedAction: 'CHECK_OUT' });
       assert.equal(afterRevoke.response.status, 410);
       const printedCodeAfterRevoke = await call('/api/staff/attendance/scan', printStaffCookie, 'POST', {
         stationCode: station.publicCode,
         scanRequestId: randomUUID(),
+        requestedAction: 'CHECK_IN',
       });
       assert.equal(printedCodeAfterRevoke.response.status, 410);
 
