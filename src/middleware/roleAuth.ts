@@ -39,7 +39,10 @@ export function createVerifyAuth(database: Pick<PrismaClient, 'user' | 'guardian
         const guardianId = typeof payload.guardianId === 'string' ? payload.guardianId : null;
         if (payload.role !== 'PARENT' || !guardianId) return res.status(401).json({ error: 'Invalid token' });
         const guardian = await database.guardian.findUnique({ where: { id: guardianId }, select: { id: true, schoolId: true } });
-        if (!guardian || (typeof payload.schoolId === 'string' && payload.schoolId !== guardian.schoolId)) {
+        const schoolArchived = guardian
+          ? Boolean(await database.school.findUnique({ where: { id: guardian.schoolId }, select: { archivedAt: true } }).then((school) => school?.archivedAt))
+          : false;
+        if (!guardian || schoolArchived || (typeof payload.schoolId === 'string' && payload.schoolId !== guardian.schoolId)) {
           return res.status(401).json({ error: 'Session is no longer active' });
         }
         req.user = payload as any;
@@ -50,13 +53,19 @@ export function createVerifyAuth(database: Pick<PrismaClient, 'user' | 'guardian
         where: { id: userId },
         select: { id: true, schoolId: true, role: true, isActive: true },
       });
+      const effectiveSchoolId = payload.sessionPurpose === 'SCHOOL_IMPERSONATION' && typeof payload.schoolId === 'string'
+        ? payload.schoolId
+        : user?.schoolId;
+      const schoolArchived = effectiveSchoolId
+        ? Boolean(await database.school.findUnique({ where: { id: effectiveSchoolId }, select: { archivedAt: true } }).then((school) => school?.archivedAt))
+        : false;
       const isSchoolImpersonation = payload.sessionPurpose === 'SCHOOL_IMPERSONATION'
         && payload.role === 'SCHOOL_ADMIN'
         && user?.role === 'PLATFORM_ADMIN'
         && user.isActive
         && typeof payload.schoolId === 'string'
         && await database.school.findUnique({ where: { id: payload.schoolId }, select: { id: true } });
-      if (!user || !user.isActive || (!isSchoolImpersonation && (user.role !== payload.role || (user.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
+      if (!user || !user.isActive || schoolArchived || (!isSchoolImpersonation && (user.role !== payload.role || (user.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
         return res.status(401).json({ error: 'Session is no longer active' });
       }
 

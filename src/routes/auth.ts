@@ -2,8 +2,9 @@ import { Router, Request, Response } from 'express';
 import { jwtVerify, SignJWT } from 'jose';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { hasPendingOtp, resendSignupOtp, generateOtp, getSignupOtp } from '../services/otp.js';
+import { hasPendingOtp, generateOtp, getSignupOtp, replaceSignupOtpAfterDelivery } from '../services/otp.js';
 import { sendSignupOtpEmail } from '../services/email.js';
+import { allowSignupOtpRequest } from '../services/signup-rate-limit.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { getSessionSecret } from '../services/security-config.js';
 
@@ -59,6 +60,11 @@ router.post('/platform-login', async (req: Request, res: Response) => {
     if (!user.isActive) {
       await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
       return res.status(403).json({ error: 'This account is inactive. Contact your school administrator.' });
+    }
+
+    if (user.schoolId) {
+      const school = await prisma.school.findUnique({ where: { id: user.schoolId }, select: { archivedAt: true } });
+      if (school?.archivedAt) return res.status(403).json({ error: 'This school account is archived. Contact SchoolBase support.' });
     }
 
     // Password invalid
@@ -153,22 +159,17 @@ async function handleSchoolLogin(req: Request, res: Response) {
       // Check if this email has a pending OTP waiting to be verified
       if (await hasPendingOtp(normalizedEmail)) {
         const pendingSignup = await getSignupOtp(normalizedEmail);
-
-        // Resend OTP for this pending signup
-        console.log(`[AUTH] Resending OTP for pending signup: ${normalizedEmail}`);
-
-        // Generate new OTP and store it
-        const otp = generateOtp();
-        await resendSignupOtp(normalizedEmail, otp);
-
-        // Send email asynchronously
-        sendSignupOtpEmail(normalizedEmail, otp, pendingSignup?.schoolName || 'Your School')
-          .then(() => {
-            console.log('[AUTH] OTP resent successfully to:', normalizedEmail);
-          })
-          .catch((error) => {
-            console.error('[AUTH] OTP resend failed (non-blocking):', error);
-          });
+        const allowed = await allowSignupOtpRequest(normalizedEmail);
+        if (allowed && pendingSignup) {
+          const otp = generateOtp();
+          try {
+            await sendSignupOtpEmail(normalizedEmail, otp, pendingSignup.schoolName);
+            const replaced = await replaceSignupOtpAfterDelivery(normalizedEmail, otp, pendingSignup.otpHash);
+            if (!replaced) console.warn('[AUTH] Pending signup was completed while OTP resend was in flight.');
+          } catch (error) {
+            console.error('[AUTH] OTP resend failed:', error);
+          }
+        }
 
         // Return special response indicating verification needed
         return res.status(401).json({
@@ -274,7 +275,10 @@ async function verifySessionRoute(req: Request, res: Response) {
       const guardianId = payload && typeof payload.guardianId === 'string' ? payload.guardianId : null;
       if (!guardianId) return res.status(401).json({ authenticated: false, error: 'Invalid session' });
       const guardian = await prisma.guardian.findUnique({ where: { id: guardianId }, select: { id: true, schoolId: true } });
-      if (!guardian || (typeof payload.schoolId === 'string' && payload.schoolId !== guardian.schoolId)) {
+      const schoolArchived = guardian
+        ? Boolean(await prisma.school.findUnique({ where: { id: guardian.schoolId }, select: { archivedAt: true } }).then((school) => school?.archivedAt))
+        : false;
+      if (!guardian || schoolArchived || (typeof payload.schoolId === 'string' && payload.schoolId !== guardian.schoolId)) {
         return res.status(401).json({ authenticated: false, error: 'Session is no longer active' });
       }
       return res.json({ authenticated: true, user: payload, session: payload, school: null });
@@ -284,13 +288,19 @@ async function verifySessionRoute(req: Request, res: Response) {
       where: { id: userId },
       select: { id: true, schoolId: true, role: true, isActive: true },
     });
+    const effectiveSchoolId = payload.sessionPurpose === 'SCHOOL_IMPERSONATION' && typeof payload.schoolId === 'string'
+      ? payload.schoolId
+      : activeUser?.schoolId;
+    const schoolArchived = effectiveSchoolId
+      ? Boolean(await prisma.school.findUnique({ where: { id: effectiveSchoolId }, select: { archivedAt: true } }).then((school) => school?.archivedAt))
+      : false;
     const isSchoolImpersonation = payload.sessionPurpose === 'SCHOOL_IMPERSONATION'
       && payload.role === 'SCHOOL_ADMIN'
       && activeUser?.role === 'PLATFORM_ADMIN'
       && activeUser.isActive
       && typeof payload.schoolId === 'string'
       && await prisma.school.findUnique({ where: { id: payload.schoolId }, select: { id: true } });
-    if (!activeUser || !activeUser.isActive || (!isSchoolImpersonation && (activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
+    if (!activeUser || !activeUser.isActive || schoolArchived || (!isSchoolImpersonation && (activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
       return res.status(401).json({ authenticated: false, error: 'Session is no longer active' });
     }
 

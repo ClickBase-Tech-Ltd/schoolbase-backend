@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAdmissionApplicantEmailContent, buildEmailAssetUrlCandidates, buildTransportConfig, buildSetupReminderTaskSections, fetchInlineLogo } from '../email.js';
+import { assertSmtpAcceptedRecipients, buildAdmissionApplicantEmailContent, buildEmailAssetUrlCandidates, buildTransportConfig, buildSetupReminderTaskSections, escapeEmailHtml, fetchInlineLogo } from '../email.js';
 
 test('buildTransportConfig respects SMTP_SECURE=false in production', () => {
   process.env.NODE_ENV = 'production';
@@ -9,16 +9,51 @@ test('buildTransportConfig respects SMTP_SECURE=false in production', () => {
   const config = buildTransportConfig();
 
   assert.equal(config.secure, false);
+  assert.equal(config.requireTLS, true);
   assert.equal(config.port, 587);
 });
 
-test('buildTransportConfig defaults to secure=true when SMTP_SECURE is unset in production', () => {
+test('buildTransportConfig defaults to STARTTLS on Brevo submission port 587 in production', () => {
   process.env.NODE_ENV = 'production';
+  delete process.env.SMTP_SECURE;
+  process.env.SMTP_PORT = '587';
+
+  const config = buildTransportConfig();
+
+  assert.equal(config.secure, false);
+  assert.equal(config.port, 587);
+});
+
+test('buildTransportConfig defaults to implicit TLS on port 465', () => {
+  process.env.NODE_ENV = 'production';
+  process.env.SMTP_PORT = '465';
   delete process.env.SMTP_SECURE;
 
   const config = buildTransportConfig();
 
   assert.equal(config.secure, true);
+  assert.equal(config.requireTLS, false);
+  assert.equal(config.port, 465);
+});
+
+test('buildTransportConfig honours an explicit SMTP_SECURE override', () => {
+  process.env.NODE_ENV = 'production';
+  process.env.SMTP_PORT = '587';
+  process.env.SMTP_SECURE = 'true';
+
+  const config = buildTransportConfig();
+
+  assert.equal(config.secure, true);
+});
+
+test('escapeEmailHtml encodes untrusted school names for OTP email markup', () => {
+  assert.equal(escapeEmailHtml('<School & "Friends">'), '&lt;School &amp; &quot;Friends&quot;&gt;');
+});
+
+test('SMTP recipient acceptance rejects missing and explicitly rejected recipients', () => {
+  assert.doesNotThrow(() => assertSmtpAcceptedRecipients({ accepted: [{ address: 'admin@example.com' }], rejected: [] }, ['admin@example.com']));
+  assert.throws(() => assertSmtpAcceptedRecipients({ accepted: [], rejected: [] }, ['admin@example.com']), /did not accept all intended recipients/);
+  assert.throws(() => assertSmtpAcceptedRecipients({ accepted: ['admin@example.com'], rejected: ['admin@example.com'] }, ['admin@example.com']), /did not accept all intended recipients/);
 });
 
 test('buildSetupReminderTaskSections includes completed and missing setup items', () => {

@@ -1457,6 +1457,11 @@ router.get('/schools', async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
 
     const where: any = {};
+    if (status === 'ARCHIVED') {
+      where.archivedAt = { not: null };
+    } else {
+      where.archivedAt = null;
+    }
     if (status && ['ACTIVE', 'SUSPENDED', 'TRIAL', 'CANCELLED'].includes(status)) {
       where.status = status;
     }
@@ -1481,6 +1486,10 @@ router.get('/schools', async (req: Request, res: Response) => {
           email: true,
           phone: true,
           status: true,
+          archivedAt: true,
+          archivedBy: true,
+          archiveReason: true,
+          archivedPreviousStatus: true,
           plan: true,
           country: true,
           createdAt: true,
@@ -1534,6 +1543,10 @@ router.get('/schools', async (req: Request, res: Response) => {
         email: school.email,
         phone: school.phone,
         status: school.status,
+        archivedAt: school.archivedAt,
+        archivedBy: school.archivedBy,
+        archiveReason: school.archiveReason,
+        archivedPreviousStatus: school.archivedPreviousStatus,
         plan: school.plan,
         country: school.country,
         createdAt: school.createdAt,
@@ -1582,6 +1595,10 @@ router.get('/schools/:schoolId', async (req: Request, res: Response) => {
         address: true,
         plan: true,
         status: true,
+        archivedAt: true,
+        archivedBy: true,
+        archiveReason: true,
+        archivedPreviousStatus: true,
         trialEndsAt: true,
         createdAt: true,
         principalName: true,
@@ -1988,23 +2005,99 @@ router.patch('/schools', async (req: Request, res: Response) => {
   if (!session) return;
 
   try {
-    const { schoolId, action, plan, days } = req.body as {
+    const { schoolId, action, plan, days, confirmationSlug, reason } = req.body as {
       schoolId: string;
       action: string;
       plan?: string;
       days?: number;
       expiresAt?: string;
+      confirmationSlug?: string;
+      reason?: string;
     };
 
     const school = await prisma.school.findUnique({ where: { id: schoolId } });
     if (!school) {
       return res.status(404).json({ message: 'School not found.' });
     }
+    if (school.archivedAt && action !== 'restore') {
+      return res.status(409).json({ message: 'Archived schools must be restored before other actions can be performed.' });
+    }
 
     let updateData: Record<string, unknown> = {};
     let auditDetails = '';
 
     switch (action) {
+      case 'archive': {
+        if (!confirmationSlug || confirmationSlug.trim() !== school.slug) {
+          return res.status(400).json({ message: 'Type the exact school slug to confirm archival.' });
+        }
+        const archiveReason = String(reason || '').trim();
+        if (archiveReason.length < 10 || archiveReason.length > 500) {
+          return res.status(400).json({ message: 'Provide an archival reason between 10 and 500 characters.' });
+        }
+        const archivedAt = new Date();
+        const result = await prisma.$transaction(async (tx) => {
+          const archived = await tx.school.updateMany({
+            where: { id: schoolId, archivedAt: null },
+            data: {
+              archivedAt,
+              archivedBy: session,
+              archiveReason,
+              archivedPreviousStatus: school.status,
+              status: 'SUSPENDED',
+            },
+          });
+          if (archived.count !== 1) throw new Error('School was archived by another request. Refresh and try again.');
+          await tx.platformAuditLog.create({
+            data: {
+              event: 'SCHOOL_ARCHIVED',
+              category: 'SCHOOL',
+              action: 'ARCHIVE',
+              outcome: 'SUCCESS',
+              resourceType: 'SCHOOL',
+              resourceId: schoolId,
+              summary: `Archived school ${school.name}`,
+              actorRole: 'PLATFORM_ADMIN',
+              details: archiveReason,
+              schoolId,
+              userId: session,
+            },
+          });
+          return tx.school.findUniqueOrThrow({ where: { id: schoolId } });
+        });
+        return res.json({ message: 'School archived. Its records are retained and can be restored.', school: result });
+      }
+      case 'restore': {
+        const updated = await prisma.$transaction(async (tx) => {
+          const restored = await tx.school.updateMany({
+            where: { id: schoolId, archivedAt: { not: null } },
+            data: {
+              archivedAt: null,
+              archivedBy: null,
+              archiveReason: null,
+              status: 'SUSPENDED',
+            },
+          });
+          if (restored.count !== 1) throw new Error('School is not archived or was restored by another request.');
+          await tx.platformAuditLog.create({
+            data: {
+              event: 'SCHOOL_RESTORED',
+              category: 'SCHOOL',
+              action: 'RESTORE',
+              outcome: 'SUCCESS',
+              resourceType: 'SCHOOL',
+              resourceId: schoolId,
+              summary: `Restored school ${school.name}`,
+              actorRole: 'PLATFORM_ADMIN',
+              details: 'School access restored by platform administrator.',
+              schoolId,
+              userId: session,
+            },
+          });
+          return tx.school.findUniqueOrThrow({ where: { id: schoolId } });
+        });
+        return res.json({ message: 'School restored.', school: updated });
+      }
       case 'suspend':
         updateData.status = 'SUSPENDED';
         auditDetails = `Suspended school ${school.name}`;
@@ -2108,6 +2201,9 @@ router.post('/impersonate', async (req: Request, res: Response) => {
     const school = await prisma.school.findUnique({ where: { id: schoolId } });
     if (!school) {
       return res.status(404).json({ message: 'School not found.' });
+    }
+    if (school.archivedAt) {
+      return res.status(409).json({ message: 'Archived schools cannot be impersonated. Restore the school first.' });
     }
 
     // Create impersonation token (valid for 1 hour)

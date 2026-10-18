@@ -1,11 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import { randomInt } from 'node:crypto';
 
 const prisma = new PrismaClient();
 
 export function generateOtp(): string {
-  // Generate 6-digit OTP
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return randomInt(100000, 1_000_000).toString();
 }
 
 export interface SignupOtpPayload {
@@ -43,7 +43,7 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-export async function saveSignupOtp(payload: SignupOtpPayload): Promise<void> {
+export async function saveSignupOtp(payload: SignupOtpPayload): Promise<string> {
   const normalizedEmail = normalizeEmail(payload.email);
   const expirationMinutes = payload.expirationMinutes ?? 10;
 
@@ -90,6 +90,7 @@ export async function saveSignupOtp(payload: SignupOtpPayload): Promise<void> {
       verifiedAt: null,
     },
   });
+  return otpHash;
 }
 
 export async function resendSignupOtp(
@@ -118,40 +119,83 @@ export async function resendSignupOtp(
   return true;
 }
 
-export async function verifySignupOtp(email: string, code: string): Promise<boolean> {
+export async function replaceSignupOtpAfterDelivery(
+  email: string,
+  otp: string,
+  expectedOtpHash: string,
+  expirationMinutes = 10,
+): Promise<boolean> {
+  const normalizedEmail = normalizeEmail(email);
+  const updated = await prisma.signupOtp.updateMany({
+    where: { email: normalizedEmail, otpHash: expectedOtpHash, verifiedAt: null },
+    data: {
+      otpHash: await bcrypt.hash(otp, 10),
+      attempts: 0,
+      expiresAt: new Date(Date.now() + expirationMinutes * 60 * 1000),
+    },
+  });
+  return updated.count === 1;
+}
+
+export async function restoreSignupOtp(record: SignupOtpRecord, expectedOtpHash: string): Promise<boolean> {
+  const restored = await prisma.signupOtp.updateMany({
+    where: {
+      email: normalizeEmail(record.email),
+      otpHash: expectedOtpHash,
+      verifiedAt: null,
+    },
+    data: {
+      schoolName: record.schoolName,
+      slug: record.slug,
+      country: record.country,
+      adminName: record.adminName,
+      tagline: record.tagline,
+      address: record.address,
+      phone: record.phone,
+      passwordHash: record.passwordHash,
+      otpHash: record.otpHash,
+      attempts: record.attempts,
+      expiresAt: record.expiresAt,
+      verifiedAt: record.verifiedAt,
+    },
+  });
+  return restored.count === 1;
+}
+
+export async function verifySignupOtp(email: string, code: string): Promise<SignupOtpRecord | null> {
   const normalizedEmail = normalizeEmail(email);
   const entry = await prisma.signupOtp.findUnique({
     where: { email: normalizedEmail },
   });
 
   if (!entry || entry.verifiedAt) {
-    return false;
+    return null;
   }
 
   if (entry.expiresAt.getTime() < Date.now()) {
-    return false;
+    return null;
   }
 
   if (entry.attempts >= 5) {
-    await prisma.signupOtp.delete({ where: { email: normalizedEmail } }).catch(() => {});
-    return false;
+    return null;
   }
 
   const valid = await bcrypt.compare(code, entry.otpHash);
   if (!valid) {
-    await prisma.signupOtp.update({
-      where: { email: normalizedEmail },
-      data: { attempts: entry.attempts + 1 },
+    await prisma.signupOtp.updateMany({
+      where: {
+        email: normalizedEmail,
+        otpHash: entry.otpHash,
+        verifiedAt: null,
+        attempts: { lt: 5 },
+        expiresAt: { gt: new Date() },
+      },
+      data: { attempts: { increment: 1 } },
     });
-    return false;
+    return null;
   }
 
-  await prisma.signupOtp.update({
-    where: { email: normalizedEmail },
-    data: { verifiedAt: new Date() },
-  });
-
-  return true;
+  return entry;
 }
 
 export async function getSignupOtp(email: string): Promise<SignupOtpRecord | null> {

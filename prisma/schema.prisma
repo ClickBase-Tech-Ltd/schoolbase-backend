@@ -151,6 +151,10 @@ model School {
   competitionAnalyticsSnapshots   CompetitionAnalyticsSnapshot[]
 
   status                        SchoolStatus      @default(TRIAL)
+  archivedAt                    DateTime?
+  archivedBy                    String?
+  archiveReason                 String?           @db.VarChar(500)
+  archivedPreviousStatus        SchoolStatus?
   plan                          SchoolPlan        @default(FREE)
   trialEndsAt                   DateTime?
   subscriptionExpiresAt         DateTime?
@@ -1324,6 +1328,13 @@ model SignupOtp {
   verifiedAt   DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
+}
+
+model SignupRateLimit {
+  bucketKey       String   @id @db.VarChar(64)
+  windowStartedAt DateTime
+  requestCount    Int      @default(0)
+  updatedAt       DateTime @updatedAt
 }
 
 model PasswordReset {

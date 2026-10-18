@@ -20,13 +20,14 @@ export function buildTransportConfig() {
   const port = parseInt(process.env.SMTP_PORT || '587', 10);
   const explicitSecure = process.env.SMTP_SECURE;
   const secure = explicitSecure === undefined
-    ? process.env.NODE_ENV === 'production'
+    ? port === 465
     : explicitSecure.toLowerCase() === 'true';
 
   return {
     host: process.env.SMTP_HOST,
     port,
     secure,
+    requireTLS: !secure && port === 587,
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
@@ -34,6 +35,15 @@ export function buildTransportConfig() {
     connectionTimeout: 5000,
     socketTimeout: 10000,
   };
+}
+
+export function assertSmtpAcceptedRecipients(result: { accepted?: Array<string | { address?: string }>; rejected?: Array<string | { address?: string }>; response?: string }, expectedRecipients: string[]) {
+  const accepted = new Set((result.accepted ?? []).map((recipient) => typeof recipient === 'string' ? recipient.toLowerCase() : String(recipient.address ?? '').toLowerCase()));
+  const rejected = new Set((result.rejected ?? []).map((recipient) => typeof recipient === 'string' ? recipient.toLowerCase() : String(recipient.address ?? '').toLowerCase()));
+  const missing = expectedRecipients.map((email) => email.trim().toLowerCase()).filter((email) => !accepted.has(email) || rejected.has(email));
+  if (missing.length > 0) {
+    throw new Error(`SMTP did not accept all intended recipients (${missing.length} rejected or unconfirmed).`);
+  }
 }
 
 const transporter = nodemailer.createTransport(buildTransportConfig() as any);
@@ -340,10 +350,11 @@ export async function sendSignupOtpEmail(email: string, otp: string, schoolName:
       throw new Error(`Invalid email address: ${email}`);
     }
 
+    const safeSchoolName = escapeEmailHtml(schoolName);
     const textBody = `SchoolBase Email Verification Code\n\nHello,\n\nWelcome to SchoolBase! You're creating a school account for ${schoolName}.\n\nTo complete your registration, enter the verification code: ${otp}\n\nThis code expires in 10 minutes. Never share this code with anyone. SchoolBase staff will never ask for your verification code.\n\nIf you didn't request this code, ignore this email. Your email won't be registered unless verified.\n\nContact support at support@schoolbase.live if you need help.`;
 
     const message = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+      from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
       to: email,
       subject: 'SchoolBase Email Verification Code',
       text: textBody,
@@ -363,7 +374,7 @@ export async function sendSignupOtpEmail(email: string, otp: string, schoolName:
               </div>
               <div class="content">
                 <p>Hello,</p>
-                <p>Welcome to SchoolBase! You're creating a school account for <strong>${schoolName}</strong>.</p>
+                <p>Welcome to SchoolBase! You're creating a school account for <strong>${safeSchoolName}</strong>.</p>
                 <p>To complete your registration, please enter this verification code:</p>
                 
                 <div style="text-align: center;">
@@ -394,7 +405,9 @@ export async function sendSignupOtpEmail(email: string, otp: string, schoolName:
       `,
     });
 
-    console.log('OTP email sent to:', email, 'Message ID:', message.messageId);
+    assertSmtpAcceptedRecipients(message, [email]);
+
+    console.log('OTP email accepted by SMTP provider. Message ID:', message.messageId);
     return true;
   } catch (error) {
     console.error('Failed to send OTP email:', error);
@@ -592,7 +605,7 @@ function getAdsNotificationRecipients(): string[] {
     .filter(Boolean);
 }
 
-function escapeEmailHtml(value: string): string {
+export function escapeEmailHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character] || character));
 }
 

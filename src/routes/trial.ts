@@ -1,12 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { SignJWT } from 'jose';
-import { generateOtp, getSignupOtp, saveSignupOtp, verifySignupOtp, resendSignupOtp } from '../services/otp.js';
+import { generateOtp, getSignupOtp, saveSignupOtp, verifySignupOtp, replaceSignupOtpAfterDelivery } from '../services/otp.js';
 import { sendSignupOtpEmail, sendWelcomeEmail } from '../services/email.js';
 import { sendInternalSignupNotification } from '../services/email.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { getPlatformSettingValue } from '../services/platform-settings.js';
 import { getSessionSecret } from '../services/security-config.js';
+import { allowSignupOtpRequest } from '../services/signup-rate-limit.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -23,7 +24,7 @@ router.get('/status', async (_req: Request, res: Response) => {
       getPlatformSettingValue(prisma, 'allowSignup', true),
       getPlatformSettingValue(prisma, 'allowTrial', true),
     ]);
-    const emailConfigured = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASSWORD);
+    const emailConfigured = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
     const enabled = !maintenanceMode && allowSignup && allowTrial;
     const status = enabled && emailConfigured ? 'ready' : 'degraded';
     res.json({
@@ -55,6 +56,10 @@ router.post('/request-otp', async (req: Request, res: Response) => {
 
     if (!allowTrial) {
       return res.status(403).json({ error: 'Trial signup is currently disabled.' });
+    }
+
+    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      return res.status(503).json({ error: 'Signup verification email is temporarily unavailable. Please try again later or contact SchoolBase support.' });
     }
 
     const schoolName = String(req.body.schoolName ?? '').trim();
@@ -97,36 +102,55 @@ router.post('/request-otp', async (req: Request, res: Response) => {
     });
 
     if (existingSignup && !existingSignup.verifiedAt) {
-      console.log('Resending OTP to email already in signup process:', adminEmail);
+      console.log('Refreshing OTP for an existing pending signup.');
     }
 
-    // Generate and store OTP in the database
+    if (!(await allowSignupOtpRequest(adminEmail))) {
+      return res.status(429).json({ error: 'Too many verification requests. Please wait before trying again.' });
+    }
+
     const otp = generateOtp();
-    await saveSignupOtp({
-      email: adminEmail,
-      schoolName,
-      slug,
-      country,
-      adminName,
-      tagline,
-      address,
-      phone,
-      password,
-      otp,
-    });
+    const priorSignup = existingSignup && !existingSignup.verifiedAt
+      ? {
+          email: existingSignup.email,
+          schoolName: existingSignup.schoolName,
+          slug: existingSignup.slug,
+          country: existingSignup.country,
+          adminName: existingSignup.adminName,
+          tagline: existingSignup.tagline,
+          address: existingSignup.address,
+          phone: existingSignup.phone,
+          passwordHash: existingSignup.passwordHash,
+          otpHash: existingSignup.otpHash,
+          attempts: existingSignup.attempts,
+          expiresAt: existingSignup.expiresAt,
+          verifiedAt: existingSignup.verifiedAt,
+        }
+      : null;
+    try {
+      if (priorSignup) {
+        try {
+          await sendSignupOtpEmail(adminEmail, otp, priorSignup.schoolName);
+        } catch (error) {
+          console.error('OTP resend delivery failed:', error);
+          return res.status(503).json({ error: 'We could not send the verification email. Please try again later.' });
+        }
+        const replaced = await replaceSignupOtpAfterDelivery(adminEmail, otp, priorSignup.otpHash);
+        if (!replaced) return res.status(409).json({ error: 'This signup has already been verified. Please sign in.' });
+      } else {
+        const requestedOtpHash = await saveSignupOtp({ email: adminEmail, schoolName, slug, country, adminName, tagline, address, phone, password, otp });
+        try {
+          await sendSignupOtpEmail(adminEmail, otp, schoolName);
+        } catch (error) {
+          await prisma.signupOtp.deleteMany({ where: { email: adminEmail, otpHash: requestedOtpHash, verifiedAt: null } }).catch(() => {});
+          throw error;
+        }
+      }
+    } catch (error) {
+      console.error('OTP email delivery failed:', error);
+      return res.status(503).json({ error: 'We could not send the verification email. Check the address or try again later.' });
+    }
 
-    // Send email asynchronously (don't await - return immediately)
-    // This prevents the endpoint from hanging on SMTP timeouts
-    sendSignupOtpEmail(adminEmail, otp, schoolName)
-      .then(() => {
-        console.log('OTP email sent successfully to:', adminEmail);
-      })
-      .catch((error) => {
-        console.error('OTP email failed (non-blocking):', error);
-        // Still allow signup flow even if email fails - user can retry
-      });
-
-    // Return success immediately without waiting for email
     return res.json({
       success: true,
       message: 'Verification code sent to your email',
@@ -170,44 +194,49 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     }
 
     // Verify OTP
-    if (!(await verifySignupOtp(adminEmail, otp))) {
+    const signupOtp = await verifySignupOtp(adminEmail, otp);
+    if (!signupOtp) {
       return res.status(401).json({ 
         error: 'Invalid or expired verification code'
       });
     }
 
-    const signupOtp = await getSignupOtp(adminEmail);
-
-    if (!signupOtp) {
-      return res.status(400).json({
-        error: 'Signup verification data was not found. Please request a new code and try again.',
-      });
-    }
-
     // Create school
-    const school = await prisma.school.create({
-      data: {
-        name: signupOtp.schoolName,
-        slug: signupOtp.slug,
-        tagline: signupOtp.tagline || null,
-        address: signupOtp.address || null,
-        phone: signupOtp.phone || null,
-        country: signupOtp.country,
-        email: adminEmail,
-        status: 'TRIAL',
-        trialEndsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-      },
-    });
-
-    // Create admin user
-    const adminUser = await prisma.user.create({
-      data: {
-        email: adminEmail,
-        name: signupOtp.adminName,
-        role: 'SCHOOL_ADMIN',
-        passwordHash: signupOtp.passwordHash,
-        schoolId: school.id,
-      },
+    const { school, adminUser } = await prisma.$transaction(async (tx) => {
+      const school = await tx.school.create({
+        data: {
+          name: signupOtp.schoolName,
+          slug: signupOtp.slug,
+          tagline: signupOtp.tagline || null,
+          address: signupOtp.address || null,
+          phone: signupOtp.phone || null,
+          country: signupOtp.country,
+          email: adminEmail,
+          status: 'TRIAL',
+          trialEndsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
+      const adminUser = await tx.user.create({
+        data: {
+          email: adminEmail,
+          name: signupOtp.adminName,
+          role: 'SCHOOL_ADMIN',
+          passwordHash: signupOtp.passwordHash,
+          schoolId: school.id,
+        },
+      });
+      const consumed = await tx.signupOtp.updateMany({
+        where: {
+          email: adminEmail,
+          otpHash: signupOtp.otpHash,
+          verifiedAt: null,
+          attempts: { lt: 5 },
+          expiresAt: { gt: new Date() },
+        },
+        data: { verifiedAt: new Date() },
+      });
+      if (consumed.count !== 1) throw Object.assign(new Error('Verification code expired or was already used. Please request a new code.'), { statusCode: 409 });
+      return { school, adminUser };
     });
 
     await recordActivity({
@@ -216,15 +245,6 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       userId: adminUser.id,
       schoolId: school.id,
     }).catch((error) => console.warn('Failed to record school signup activity:', error));
-
-    // Mark OTP as verified in the database
-    await prisma.signupOtp.update({
-      where: { email: adminEmail },
-      data: { verifiedAt: new Date() },
-    }).catch((err) => {
-      console.warn('Failed to update SignupOtp verification timestamp:', err);
-      // Non-blocking - don't fail the signup if this update fails
-    });
 
     // Generate JWT token
     const token = await new SignJWT({
@@ -269,45 +289,19 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Verify OTP error:', error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       error: 'Failed to create account',
       details: error.message,
     });
   }
 });
 
-// GET /api/trial/get-pending - Return pending signup metadata for an email
-router.get('/get-pending', async (req: Request, res: Response) => {
-  try {
-    const email = String(req.query.email ?? '').trim().toLowerCase();
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
-    }
-
-    const signupOtp = await getSignupOtp(email);
-    if (!signupOtp || signupOtp.verifiedAt) {
-      return res.status(404).json({ error: 'Pending signup not found' });
-    }
-
-    return res.json({
-      email: signupOtp.email,
-      schoolName: signupOtp.schoolName,
-      slug: signupOtp.slug,
-      tagline: signupOtp.tagline,
-      address: signupOtp.address,
-      phone: signupOtp.phone,
-      country: signupOtp.country,
-      adminName: signupOtp.adminName,
-    });
-  } catch (error: any) {
-    console.error('Get pending signup error:', error);
-    return res.status(500).json({ error: 'Failed to retrieve pending signup' });
-  }
-});
-
 // POST /api/trial/resend-otp - Resend OTP for pending signup
 router.post('/resend-otp', async (req: Request, res: Response) => {
   try {
+    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      return res.status(503).json({ error: 'Signup verification email is temporarily unavailable. Please try again later or contact SchoolBase support.' });
+    }
     const adminEmail = String(req.body.adminEmail ?? '').trim().toLowerCase();
     if (!adminEmail) {
       return res.status(400).json({ error: 'Email is required' });
@@ -318,15 +312,20 @@ router.post('/resend-otp', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Pending signup not found or already verified' });
     }
 
-    const otp = generateOtp();
-    const ok = await resendSignupOtp(adminEmail, otp);
-    if (!ok) {
-      return res.status(500).json({ error: 'Failed to resend OTP' });
+    if (!(await allowSignupOtpRequest(adminEmail))) {
+      return res.status(429).json({ error: 'Too many verification requests. Please wait before trying again.' });
     }
 
-    sendSignupOtpEmail(adminEmail, otp, signupOtp.schoolName)
-      .then(() => console.log('Resent pending signup OTP to:', adminEmail))
-      .catch((error) => console.error('Resend OTP email failed:', error));
+    const otp = generateOtp();
+    try {
+      await sendSignupOtpEmail(adminEmail, otp, signupOtp.schoolName);
+    } catch (error) {
+      console.error('Resend OTP email failed:', error);
+      return res.status(503).json({ error: 'We could not send the verification email. Please try again later.' });
+    }
+
+    const replaced = await replaceSignupOtpAfterDelivery(adminEmail, otp, signupOtp.otpHash);
+    if (!replaced) return res.status(409).json({ error: 'This signup has already been verified. Please sign in.' });
 
     return res.json({ success: true, message: 'Verification code resent' });
   } catch (error: any) {
