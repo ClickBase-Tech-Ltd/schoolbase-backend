@@ -106,3 +106,146 @@ test('signup verification retry recovers the same account only with its recovery
     await prisma.$disconnect();
   }
 });
+
+test('signup transaction rolls back account creation when the school slug conflicts', {
+  skip: !canRunAgainstLocalDatabase,
+}, async () => {
+  const prisma = new PrismaClient();
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 14);
+  const email = `signup-rollback-${suffix}@example.invalid`;
+  const slug = `signup-rollback-${suffix}`;
+  const otp = '123456';
+  const recoveryKey = randomUUID() + randomUUID();
+  let existingSchoolId: string | undefined;
+
+  try {
+    const existingSchool = await prisma.school.create({
+      data: { name: `Existing ${suffix}`, slug, country: 'NG', status: 'TRIAL' },
+      select: { id: true },
+    });
+    existingSchoolId = existingSchool.id;
+
+    const { default: bcrypt } = await import('bcryptjs');
+    const { default: trialRouter } = await import('../trial.js');
+    const otpHash = await bcrypt.hash(otp, 10);
+    await prisma.signupOtp.create({
+      data: {
+        email,
+        schoolName: `Signup Rollback ${suffix}`,
+        slug,
+        country: 'NG',
+        adminName: 'Signup Rollback Test',
+        passwordHash: 'integration-test-only',
+        otpHash,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/trial', trialRouter);
+    const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+      const listeningServer = app.listen(0, '127.0.0.1', () => resolve(listeningServer));
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/trial/verify-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminEmail: email, otp, recoveryKey }),
+      });
+      assert.equal(response.status, 409);
+      assert.equal(await prisma.user.count({ where: { email } }), 0);
+
+      const signup = await prisma.signupOtp.findUnique({ where: { email } });
+      assert.ok(signup);
+      assert.equal(signup.verifiedAt, null);
+      assert.equal(signup.recoveryKeyHash, null);
+      assert.equal(await prisma.school.count({ where: { id: existingSchool.id } }), 1);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  } finally {
+    await prisma.signupOtp.deleteMany({ where: { email } });
+    if (existingSchoolId) await prisma.school.delete({ where: { id: existingSchoolId } }).catch(() => {});
+    await prisma.$disconnect();
+  }
+});
+
+test('concurrent initial verification creates one account and both retries can recover it', {
+  skip: !canRunAgainstLocalDatabase,
+}, async () => {
+  const prisma = new PrismaClient();
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 14);
+  const email = `signup-concurrent-${suffix}@example.invalid`;
+  const slug = `signup-concurrent-${suffix}`;
+  const otp = '654321';
+  const recoveryKey = randomUUID() + randomUUID();
+  let createdSchoolId: string | undefined;
+
+  try {
+    const { default: bcrypt } = await import('bcryptjs');
+    const otpHash = await bcrypt.hash(otp, 10);
+    await prisma.signupOtp.create({
+      data: {
+        email,
+        schoolName: `Signup Concurrent ${suffix}`,
+        slug,
+        country: 'NG',
+        adminName: 'Signup Concurrent Test',
+        passwordHash: 'integration-test-only',
+        otpHash,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    const app = express();
+    app.use(express.json());
+    const { default: trialRouter } = await import('../trial.js');
+    app.use('/api/trial', trialRouter);
+    const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+      const listeningServer = app.listen(0, '127.0.0.1', () => resolve(listeningServer));
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const endpoint = `http://127.0.0.1:${address.port}/api/trial/verify-otp`;
+    const submit = () => fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminEmail: email, otp, recoveryKey }),
+    });
+
+    try {
+      const responses = await Promise.all([submit(), submit()]);
+      const bodies = await Promise.all(responses.map((response) => response.json() as Promise<{
+        success?: boolean;
+        recovered?: boolean;
+        token?: string;
+        school?: { id: string };
+      }>));
+
+      assert.ok(responses.every((response) => response.status === 200 || response.status === 201));
+      assert.ok(bodies.every((body) => body.success === true && body.token && body.school?.id));
+      createdSchoolId = bodies[0].school?.id;
+      assert.ok(createdSchoolId);
+      assert.ok(bodies.every((body) => body.school?.id === createdSchoolId));
+      assert.equal(await prisma.school.count({ where: { slug } }), 1);
+      assert.equal(await prisma.user.count({ where: { email } }), 1);
+
+      const retry = await submit();
+      const retryBody = await retry.json() as { success?: boolean; recovered?: boolean; school?: { id: string } };
+      assert.equal(retry.status, 200);
+      assert.equal(retryBody.success, true);
+      assert.equal(retryBody.recovered, true);
+      assert.equal(retryBody.school?.id, createdSchoolId);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  } finally {
+    await prisma.signupOtp.deleteMany({ where: { email } });
+    if (createdSchoolId) await prisma.school.delete({ where: { id: createdSchoolId } }).catch(() => {});
+    await prisma.$disconnect();
+  }
+});

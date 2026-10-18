@@ -356,6 +356,79 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Verify OTP error:', error);
+    if (error?.code === 'P2002') {
+      const completedSignup = await prisma.signupOtp.findUnique({
+        where: { email: String(req.body.adminEmail ?? '').trim().toLowerCase() },
+        select: { verifiedAt: true, recoveryKeyHash: true, recoveryExpiresAt: true },
+      }).catch(() => null);
+      const suppliedRecoveryHash = req.body.recoveryKey
+        ? createHash('sha256').update(String(req.body.recoveryKey)).digest('hex')
+        : null;
+      const storedRecoveryBuffer = completedSignup?.recoveryKeyHash
+        ? Buffer.from(completedSignup.recoveryKeyHash, 'hex')
+        : Buffer.alloc(0);
+      const suppliedRecoveryBuffer = suppliedRecoveryHash
+        ? Buffer.from(suppliedRecoveryHash, 'hex')
+        : Buffer.alloc(0);
+      const canRecoverRace = Boolean(
+        completedSignup?.verifiedAt
+        && completedSignup.recoveryExpiresAt
+        && completedSignup.recoveryExpiresAt > new Date()
+        && storedRecoveryBuffer.length === 32
+        && suppliedRecoveryBuffer.length === 32
+        && timingSafeEqual(storedRecoveryBuffer, suppliedRecoveryBuffer),
+      );
+      if (canRecoverRace) {
+        const adminUser = await prisma.user.findUnique({
+          where: { email: String(req.body.adminEmail).trim().toLowerCase() },
+          select: { id: true, email: true, name: true, role: true, schoolId: true, isActive: true },
+        });
+        const school = adminUser?.schoolId
+          ? await prisma.school.findUnique({
+              where: { id: adminUser.schoolId },
+              select: { id: true, name: true, slug: true, archivedAt: true },
+            })
+          : null;
+        if (adminUser?.isActive && school && !school.archivedAt) {
+          const token = await new SignJWT({
+            userId: adminUser.id,
+            schoolId: school.id,
+            email: adminUser.email,
+            name: adminUser.name,
+            role: adminUser.role,
+          })
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuedAt()
+            .setExpirationTime('7d')
+            .sign(secret());
+          await recordActivity({
+            event: 'SCHOOL_SIGNUP_SESSION_RECOVERED',
+            details: `Signup session recovered after a concurrent verification for school ${school.id}`,
+            userId: adminUser.id,
+            schoolId: school.id,
+          }).catch((activityError) => console.warn('Failed to record signup recovery activity:', activityError));
+          return res.status(200).json({
+            success: true,
+            recovered: true,
+            message: 'School registered successfully',
+            school: { id: school.id, name: school.name, slug: school.slug },
+            user: { id: adminUser.id, email: adminUser.email, name: adminUser.name, role: adminUser.role },
+            token,
+          });
+        }
+      }
+
+      const target = Array.isArray(error.meta?.target)
+        ? error.meta.target.join(',')
+        : String(error.meta?.target ?? '');
+      if (target.includes('slug')) {
+        return res.status(409).json({ error: 'School slug already exists' });
+      }
+      if (target.includes('email')) {
+        return res.status(409).json({ error: 'Email already registered' });
+      }
+      return res.status(409).json({ error: 'Signup details conflict with an existing record. Please review them and try again.' });
+    }
     return res.status(error.statusCode || 500).json({
       error: 'Failed to create account',
       details: error.message,
