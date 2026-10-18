@@ -9,12 +9,20 @@ const EMAIL_COOLDOWN_MS = 60 * 1000;
 const EMAIL_LIMIT = 5;
 const IP_LIMIT = 20;
 
+function getClientIpAssertionSecret(): string | null {
+  return process.env.SIGNUP_IP_ASSERTION_SECRET?.trim()
+    || process.env.SESSION_SECRET?.trim()
+    || null;
+}
+
 function bucketKey(kind: 'email' | 'email-cooldown' | 'ip', value: string): string {
   return createHmac('sha256', getSessionSecret()).update(`${kind}:${value}`).digest('hex');
 }
 
 export function verifyClientIpAssertion(assertion?: string, now = Date.now()): string | null {
   if (!assertion || assertion.length > 512) return null;
+  const secret = getClientIpAssertionSecret();
+  if (!secret) return null;
   const [encodedPayload, signature, extra] = assertion.split('.');
   if (!encodedPayload || !signature || extra) return null;
 
@@ -23,7 +31,7 @@ export function verifyClientIpAssertion(assertion?: string, now = Date.now()): s
     if (typeof payload.ip !== 'string' || !isValidIp(payload.ip) || typeof payload.timestamp !== 'number') return null;
     if (Math.abs(now - payload.timestamp) > 2 * 60 * 1000) return null;
 
-    const expected = createHmac('sha256', getSessionSecret()).update(encodedPayload).digest();
+    const expected = createHmac('sha256', secret).update(encodedPayload).digest();
     const actual = Buffer.from(signature, 'base64url');
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
     return payload.ip;
