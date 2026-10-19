@@ -7,6 +7,7 @@ import { resolveSupportedCurrency } from '../services/currency.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { verifyAuth, requireParent, type AuthenticatedRequest } from '../middleware/roleAuth.js';
 import { resolveCompetitionFeature } from '../services/competition-feature-gate.js';
+import { sumOutstandingInvoiceBalance } from '../services/invoice-balance.js';
 
 const router = Router();
 const prisma = new PrismaClient() as PrismaClient & {
@@ -365,13 +366,12 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     const invoices = await prisma.invoice.findMany({
       where: {
         pupilId: { in: children.map((c: any) => c.id) },
+        status: { not: 'VOIDED' },
       },
       include: { pupil: true },
     });
 
-    const outstandingFees = invoices
-      .filter(inv => ['SENT', 'PART_PAID', 'OVERDUE'].includes(inv.status))
-      .reduce((sum, inv) => sum + inv.amountDue, 0);
+    const outstandingFees = sumOutstandingInvoiceBalance(invoices);
 
     // Get announcements
     const announcements = await prisma.announcement.findMany({
@@ -591,7 +591,7 @@ router.get('/children/:id/timetable', verifyAuth, async (req: Request, res: Resp
         if (!pupil) return res.status(404).json({ error: 'Student not found' });
 
         // Compute fees balance for this child
-        const invoices = await prisma.invoice.findMany({ where: { pupilId: childId } });
+        const invoices = await prisma.invoice.findMany({ where: { pupilId: childId, status: { not: 'VOIDED' } } });
         const totalDue = invoices.reduce((sum, inv) => sum + inv.amountDue, 0);
         const totalPaid = invoices.reduce((sum, inv) => sum + inv.amountPaid, 0);
         const feesBalance = totalDue - totalPaid;
@@ -971,6 +971,7 @@ router.get('/invoices', async (req: Request, res: Response) => {
     const invoices = await prisma.invoice.findMany({
       where: {
         pupilId: { in: family.pupilIds },
+        status: { not: 'VOIDED' },
       },
       include: {
         pupil: true,

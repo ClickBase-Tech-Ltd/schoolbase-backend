@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { jwtVerify, SignJWT } from 'jose';
 import axios from 'axios';
@@ -8,10 +9,12 @@ import fs from 'fs';
 import { sendSetupReminderEmail } from '../services/email.js';
 import { getPlatformSettings, serializePlatformSettingValue, normalizeEmailList, parsePlatformSettingValue, platformSettingDefaults, competitionFeatureKeys } from '../services/platform-settings.js';
 import { normalizeCompetitionFeatures } from '../services/competition-feature-gate.js';
-import { sendPendingSignupReminderEmail, sendWelcomeEmail, sendInternalSignupNotification } from '../services/email.js';
+import { sendWelcomeEmail, sendInternalSignupNotification } from '../services/email.js';
 import { sendAdvertiserStatusEmail } from '../services/email.js';
 import { normalizePlacementIds } from './ads-utils.js';
-import { generateOtp, resendSignupOtp } from '../services/otp.js';
+import { generateOtp, sendPendingSignupReminder } from '../services/otp.js';
+import { allowPendingSignupReminder } from '../services/signup-rate-limit.js';
+import { attemptAndAuditSignupReminder } from '../services/signup-operations-audit.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { spawn } from 'node:child_process';
@@ -3213,14 +3216,35 @@ router.get('/signups/pending', async (req: Request, res: Response) => {
   if (!session) return;
 
   try {
-    const limit = parseInt(req.query.limit as string) || 50;
-    const page = parseInt(req.query.page as string) || 1;
+    const parsedLimit = Number.parseInt(String(req.query.limit ?? '50'), 10);
+    const parsedPage = Number.parseInt(String(req.query.page ?? '1'), 10);
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 50;
+    const page = Number.isFinite(parsedPage) ? Math.max(parsedPage, 1) : 1;
     const skip = (page - 1) * limit;
+    const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 120) : '';
+    const status = req.query.status === 'active' || req.query.status === 'expired' ? req.query.status : 'all';
 
     const now = new Date();
-    const [items, total] = await Promise.all([
+    const searchWhere = {
+      verifiedAt: null,
+      ...(query ? {
+        OR: [
+          { schoolName: { contains: query } },
+          { adminName: { contains: query } },
+          { email: { contains: query } },
+          { phone: { contains: query } },
+          { country: { contains: query } },
+        ],
+      } : {}),
+    };
+    const where = {
+      ...searchWhere,
+      ...(status === 'active' ? { expiresAt: { gt: now } } : {}),
+      ...(status === 'expired' ? { expiresAt: { lte: now } } : {}),
+    };
+    const [items, total, pendingCount, activeCount, expiredCount, attemptAggregate] = await Promise.all([
       prisma.signupOtp.findMany({
-        where: { verifiedAt: null },
+        where,
         select: {
           id: true,
           email: true,
@@ -3237,7 +3261,11 @@ router.get('/signups/pending', async (req: Request, res: Response) => {
         skip,
         take: limit,
       }),
-      prisma.signupOtp.count({ where: { verifiedAt: null } }),
+      prisma.signupOtp.count({ where }),
+      prisma.signupOtp.count({ where: searchWhere }),
+      prisma.signupOtp.count({ where: { ...searchWhere, expiresAt: { gt: now } } }),
+      prisma.signupOtp.count({ where: { ...searchWhere, expiresAt: { lte: now } } }),
+      prisma.signupOtp.aggregate({ where: searchWhere, _sum: { attempts: true } }),
     ]);
 
     const signups = items.map((item) => ({
@@ -3245,7 +3273,13 @@ router.get('/signups/pending', async (req: Request, res: Response) => {
       isExpired: item.expiresAt.getTime() <= now.getTime(),
     }));
 
-    res.json({ success: true, signups, pagination: { page, limit, total } });
+    res.json({
+      success: true,
+      signups,
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      summary: { pendingCount, activeCount, expiredCount, failedOtpAttempts: attemptAggregate._sum.attempts ?? 0 },
+      refreshedAt: now.toISOString(),
+    });
   } catch (err) {
     console.error('Error listing pending signups:', err);
     res.status(500).json({ message: 'Failed to list pending signups', details: String(err) });
@@ -3268,37 +3302,53 @@ router.post('/signups/remind', async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Pending signup not found or already verified' });
     }
 
-    let sentCount = 0;
-    let skippedCount = 0;
+    const results: Array<{ email: string; status: 'sent' | 'not-found' | 'conflict' | 'delivery-failed' | 'cooldown' }> = [];
+    const reminderRequestId = typeof req.headers['x-request-id'] === 'string'
+      ? req.headers['x-request-id'].slice(0, 191)
+      : randomUUID();
     for (const signup of pendingSignups) {
-      try {
-        const otp = generateOtp();
-        if (!(await resendSignupOtp(signup.email, otp))) {
-          skippedCount += 1;
-          continue;
-        }
-        await sendPendingSignupReminderEmail(signup.email, signup.adminName, signup.schoolName, otp);
-        sentCount += 1;
-      } catch (error) {
-        skippedCount += 1;
-        console.error(`Failed to send pending signup reminder to ${signup.email}:`, error);
+      const result = await attemptAndAuditSignupReminder({
+        actorUserId: session,
+        email: signup.email,
+        requestId: reminderRequestId,
+        auditSecret: Buffer.from(getSessionSecret()).toString('base64url'),
+        isCoolingDown: () => allowPendingSignupReminder(signup.email).then((allowed) => !allowed),
+        sendReminder: () => sendPendingSignupReminder(signup.email),
+        writeAudit: (event) => prisma.platformAuditLog.create({ data: event }).then(() => undefined),
+      });
+      if (!result.auditRecorded) {
+        console.error(`Failed to persist pending signup reminder audit for request ${reminderRequestId}`);
       }
+      results.push({ email: signup.email, status: result.outcome });
     }
 
-    return res.json({ success: true, sentCount, skippedCount, total: pendingSignups.length });
+    if (requestedEmail && results[0]?.status === 'cooldown') {
+      return res.status(429).json({ message: 'A reminder was already attempted recently. Please wait 10 minutes before trying again.' });
+    }
+
+    const sentCount = results.filter((result) => result.status === 'sent').length;
+    const failedCount = results.length - sentCount;
+    return res.json({
+      success: failedCount === 0,
+      sentCount,
+      failedCount,
+      total: pendingSignups.length,
+      results,
+    });
   } catch (error: any) {
     console.error('Error sending pending signup reminders:', error);
     return res.status(500).json({ message: error.message || 'Failed to send pending signup reminders' });
   }
 });
 
-// POST /schoolbase-admin/api/signups/approve - Approve a pending signup manually (create school + admin)
+// POST /schoolbase-admin/api/signups/approve - Manual signup approval is disabled by policy.
+// The approved default is that a pending signup cannot become a real school until email ownership is verified.
 router.post('/signups/approve', async (req: Request, res: Response) => {
   const session = await requirePlatformAdminSession(req, res);
   if (!session) return;
 
   try {
-    const { email, forceSlug } = req.body as { email?: string; forceSlug?: string };
+    const { email } = req.body as { email?: string };
     if (!email) return res.status(400).json({ message: 'email is required' });
 
     const normalizedEmail = String(email).trim().toLowerCase();
@@ -3306,66 +3356,39 @@ router.post('/signups/approve', async (req: Request, res: Response) => {
     if (!otpEntry) return res.status(404).json({ message: 'Pending signup not found' });
     if (otpEntry.verifiedAt) return res.status(400).json({ message: 'Signup already verified' });
 
-    // Ensure slug uniqueness - allow admin to provide forceSlug to override collisions
-    let slug = (forceSlug || otpEntry.slug).trim().toLowerCase();
-    const existing = await prisma.school.findUnique({ where: { slug } });
-    if (existing) {
-      // append timestamp to make unique
-      slug = `${slug}-${Date.now().toString().slice(-5)}`;
-    }
+    const blockedMessage = 'Manual signup approval is disabled until product and security approve the email-ownership policy. Please resend the verification email or contact support.';
 
-    // Ensure email not already taken by a user
-    const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-    if (existingUser) return res.status(409).json({ message: 'Email already registered as a user' });
-
-    // Create school
-    const school = await prisma.school.create({
-      data: {
-        name: otpEntry.schoolName,
-        slug,
-        tagline: otpEntry.tagline,
-        address: otpEntry.address,
-        phone: otpEntry.phone,
-        country: otpEntry.country,
-        email: normalizedEmail,
-        status: 'TRIAL',
-        trialEndsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
-
-    // Create admin user
-    const adminUser = await prisma.user.create({
-      data: {
-        email: normalizedEmail,
-        name: otpEntry.adminName,
-        role: 'SCHOOL_ADMIN',
-        passwordHash: otpEntry.passwordHash,
-        schoolId: school.id,
-      },
-    });
-
-    // Mark OTP as verified and set verifiedAt
-    await prisma.signupOtp.update({ where: { email: normalizedEmail }, data: { verifiedAt: new Date() } }).catch(() => {});
-
-    // Audit log
     try {
+      const actorExists = await prisma.user.findUnique({
+        where: { id: session },
+        select: { id: true },
+      });
+
       await (prisma as any).platformAuditLog.create({
         data: {
-          event: 'MANUAL_SIGNUP_APPROVED',
-          details: `Platform admin ${session || 'admin'} approved signup for ${otpEntry.schoolName} <${normalizedEmail}> and created school ${school.id}`,
+          event: 'MANUAL_SIGNUP_APPROVAL_BLOCKED',
+          category: 'SCHOOL',
+          action: 'MANUAL_APPROVAL_BLOCKED',
+          outcome: 'BLOCKED',
+          resourceType: 'SIGNUP_OTP',
+          resourceId: otpEntry.id,
+          summary: `Blocked manual approval for signup ${normalizedEmail} until policy is approved`,
+          actorRole: 'PLATFORM_ADMIN',
+          details: blockedMessage,
+          ...(actorExists ? { userId: session } : {}),
         },
       });
-    } catch (e) {
-      console.warn('Failed to write audit log for manual signup approval', e);
+    } catch (auditError) {
+      console.warn('Failed to write blocked manual approval audit log:', auditError);
     }
 
-    // Send welcome and internal notification async
-    sendWelcomeEmail(normalizedEmail, otpEntry.schoolName, otpEntry.adminName).catch(() => {});
-    sendInternalSignupNotification(otpEntry.schoolName, normalizedEmail, otpEntry.adminName).catch(() => {});
-
-    res.status(201).json({ success: true, school: { id: school.id, name: school.name, slug: school.slug }, user: { id: adminUser.id, email: adminUser.email } });
+    return res.status(409).json({
+      success: false,
+      message: blockedMessage,
+      code: 'MANUAL_APPROVAL_DISABLED',
+    });
   } catch (err) {
-    console.error('Error approving signup manually:', err);
-    res.status(500).json({ message: 'Failed to approve signup', details: String(err) });
+    console.error('Error blocking manual signup approval:', err);
+    res.status(500).json({ message: 'Failed to process signup approval request', details: String(err) });
   }
 });

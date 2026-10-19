@@ -415,7 +415,7 @@ export async function sendSignupOtpEmail(email: string, otp: string, schoolName:
   }
 }
 
-export async function sendPendingSignupReminderEmail(
+export function buildPendingSignupReminderEmailContent(
   email: string,
   adminName: string,
   schoolName: string,
@@ -426,10 +426,10 @@ export async function sendPendingSignupReminderEmail(
   }
 
   const verificationUrl = `https://schoolbase.live/signup/verify?email=${encodeURIComponent(email)}`;
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
-    to: email,
-    subject: `Complete your SchoolBase signup - ${schoolName}`,
+  const safeAdminName = escapeEmailHtml(adminName);
+  const safeSchoolName = escapeEmailHtml(schoolName);
+  return {
+    verificationUrl,
     text: `Hi ${adminName},\n\nYou started creating a SchoolBase account for ${schoolName}, but your signup is still waiting for email verification.\n\nUse this verification code to complete your signup: ${otp}\n\nThis code expires in 10 minutes. Continue here: ${verificationUrl}\n\nIf you need help, contact support@schoolbase.live.`,
     html: `
       <!DOCTYPE html>
@@ -443,8 +443,8 @@ export async function sendPendingSignupReminderEmail(
               <p class="header-subtitle">Complete Your Signup</p>
             </div>
             <div class="content">
-              <p>Hi ${adminName},</p>
-              <p>You started creating a SchoolBase account for <strong>${schoolName}</strong>, but your signup is still waiting for email verification.</p>
+              <p>Hi ${safeAdminName},</p>
+              <p>You started creating a SchoolBase account for <strong>${safeSchoolName}</strong>, but your signup is still waiting for email verification.</p>
               <p>Use this verification code to complete your signup:</p>
               <div style="text-align: center;"><div class="otp-code">${otp}</div></div>
               <p style="text-align: center; font-size: 13px; color: ${BRAND.textMuted};">This code expires in 10 minutes.</p>
@@ -457,7 +457,25 @@ export async function sendPendingSignupReminderEmail(
         </body>
       </html>
     `,
+  };
+}
+
+export async function sendPendingSignupReminderEmail(
+  email: string,
+  adminName: string,
+  schoolName: string,
+  otp: string,
+) {
+  const content = buildPendingSignupReminderEmailContent(email, adminName, schoolName, otp);
+  const message = await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+    to: email,
+    subject: `Complete your SchoolBase signup - ${schoolName}`,
+    text: content.text,
+    html: content.html,
   });
+  assertSmtpAcceptedRecipients(message, [email]);
+  return { messageId: message.messageId };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

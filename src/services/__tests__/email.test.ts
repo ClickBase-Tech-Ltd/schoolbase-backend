@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSmtpAcceptedRecipients, buildAdmissionApplicantEmailContent, buildEmailAssetUrlCandidates, buildTransportConfig, buildSetupReminderTaskSections, escapeEmailHtml, fetchInlineLogo } from '../email.js';
+import { assertSmtpAcceptedRecipients, buildAdmissionApplicantEmailContent, buildEmailAssetUrlCandidates, buildPendingSignupReminderEmailContent, buildTransportConfig, buildSetupReminderTaskSections, escapeEmailHtml, fetchInlineLogo } from '../email.js';
 
 test('buildTransportConfig respects SMTP_SECURE=false in production', () => {
   process.env.NODE_ENV = 'production';
@@ -48,6 +48,21 @@ test('buildTransportConfig honours an explicit SMTP_SECURE override', () => {
 
 test('escapeEmailHtml encodes untrusted school names for OTP email markup', () => {
   assert.equal(escapeEmailHtml('<School & "Friends">'), '&lt;School &amp; &quot;Friends&quot;&gt;');
+});
+
+test('pending signup reminder escapes untrusted admin and school names in HTML', () => {
+  const content = buildPendingSignupReminderEmailContent(
+    'admin@example.test',
+    '<img src=x onerror=alert(1)>',
+    '<script>alert(1)</script> & Friends',
+    '123456',
+  );
+
+  assert.match(content.html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(content.html, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; Friends/);
+  assert.doesNotMatch(content.html, /<img src=x onerror=alert\(1\)>/);
+  assert.doesNotMatch(content.html, /<script>alert\(1\)<\/script>/);
+  assert.match(content.text, /<script>alert\(1\)<\/script> & Friends/);
 });
 
 test('SMTP recipient acceptance rejects missing and explicitly rejected recipients', () => {

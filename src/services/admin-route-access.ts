@@ -26,6 +26,8 @@ export function adminRouteAccess(path: string, method: string): AdminRouteAccess
   }
   if (normalizedPath === '/platform' || normalizedPath.startsWith('/platform/')) return 'PLATFORM_ADMIN';
   if (normalizedPath === '/school' || /^\/school\/[^/]+$/.test(normalizedPath)) return 'ACCOUNTING';
+  if (normalizedPath === '/academic-years' && normalizedMethod === 'GET') return 'ACCOUNTING';
+  if (normalizedPath === '/whatsapp/status' && normalizedMethod === 'GET') return 'ACCOUNTING';
   if (normalizedPath === '/fees' || normalizedPath.startsWith('/fees/')
     || normalizedPath === '/invoices' || normalizedPath.startsWith('/invoices/')) return 'ACCOUNTING';
 

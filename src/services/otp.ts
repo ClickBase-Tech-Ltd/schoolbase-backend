@@ -1,6 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { randomInt } from 'node:crypto';
+import { sendPendingSignupReminderEmail } from './email.js';
+import { deliverPendingSignupReminder, type SignupReminderResult } from './signup-reminder.js';
 
 const prisma = new PrismaClient();
 
@@ -160,6 +162,20 @@ export async function restoreSignupOtp(record: SignupOtpRecord, expectedOtpHash:
     },
   });
   return restored.count === 1;
+}
+
+export async function sendPendingSignupReminder(email: string): Promise<SignupReminderResult> {
+  const normalizedEmail = normalizeEmail(email);
+  const entry = await prisma.signupOtp.findUnique({ where: { email: normalizedEmail } });
+  if (!entry || entry.verifiedAt) return 'not-found';
+
+  return deliverPendingSignupReminder({
+    generateCode: generateOtp,
+    send: async (otp) => {
+      await sendPendingSignupReminderEmail(normalizedEmail, entry.adminName, entry.schoolName, otp);
+    },
+    replace: (otp) => replaceSignupOtpAfterDelivery(normalizedEmail, otp, entry.otpHash),
+  });
 }
 
 export async function verifySignupOtp(email: string, code: string): Promise<SignupOtpRecord | null> {

@@ -394,7 +394,7 @@ router.get('/students/:studentId', async (req: AuthenticatedRequest, res) => {
       prisma.attendanceRecord.findMany({ where: { pupilId: studentId, schoolId }, orderBy: { date: 'desc' }, take: 30 }),
       prisma.studentTermSummary.findMany({ where: { pupilId: studentId, schoolId }, orderBy: { updatedAt: 'desc' }, take: 8 }),
       prisma.promotionRecord.findMany({ where: { pupilId: studentId, schoolId }, orderBy: { decidedAt: 'desc' }, take: 8 }),
-      prisma.invoice.aggregate({ where: { pupilId: studentId, schoolId }, _sum: { amountDue: true, amountPaid: true }, _count: { _all: true } }),
+      prisma.invoice.aggregate({ where: { pupilId: studentId, schoolId, status: { not: 'VOIDED' } }, _sum: { amountDue: true, amountPaid: true }, _count: { _all: true } }),
     ]);
 
     const totalDue = invoiceTotals._sum.amountDue || 0;

@@ -8,6 +8,7 @@ const WINDOW_MS = 15 * 60 * 1000;
 const EMAIL_COOLDOWN_MS = 60 * 1000;
 const EMAIL_LIMIT = 5;
 const IP_LIMIT = 20;
+const SIGNUP_REMINDER_COOLDOWN_MS = 10 * 60 * 1000;
 
 function getClientIpAssertionSecret(): string | null {
   return process.env.SIGNUP_IP_ASSERTION_SECRET?.trim()
@@ -15,7 +16,7 @@ function getClientIpAssertionSecret(): string | null {
     || null;
 }
 
-function bucketKey(kind: 'email' | 'email-cooldown' | 'ip', value: string): string {
+function bucketKey(kind: 'email' | 'email-cooldown' | 'ip' | 'signup-reminder', value: string): string {
   return createHmac('sha256', getSessionSecret()).update(`${kind}:${value}`).digest('hex');
 }
 
@@ -77,9 +78,15 @@ export async function allowSignupOtpRequest(email: string, clientIp?: string): P
   return allowedByCooldown && allowedByEmail && allowedByIp;
 }
 
+export async function allowPendingSignupReminder(email: string): Promise<boolean> {
+  const normalizedEmail = email.trim().toLowerCase();
+  return acquire(bucketKey('signup-reminder', normalizedEmail), 1, SIGNUP_REMINDER_COOLDOWN_MS);
+}
+
 export const signupRateLimitPolicy = {
   emailCooldownMs: EMAIL_COOLDOWN_MS,
   emailWindowMs: WINDOW_MS,
   emailWindowLimit: EMAIL_LIMIT,
   ipWindowLimit: IP_LIMIT,
+  reminderCooldownMs: SIGNUP_REMINDER_COOLDOWN_MS,
 };

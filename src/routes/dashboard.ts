@@ -41,7 +41,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
           include: { partner: true, enabledPhases: true },
         }),
         prisma.invoice.findMany({
-          where: { schoolId },
+          where: { schoolId, status: { not: 'VOIDED' } },
           select: { amountDue: true, amountPaid: true, status: true },
         }),
         prisma.pupil.count({

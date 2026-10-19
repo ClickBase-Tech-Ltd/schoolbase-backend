@@ -378,7 +378,12 @@ function asCents(value: number | string | null | undefined): number {
   return Math.max(0, Math.round(parsed));
 }
 
+function invoiceIssuanceKey(pupilId: string, feeScheduleId: string): string {
+  return crypto.createHash('sha256').update(`${pupilId}:${feeScheduleId}`).digest('hex');
+}
+
 async function buildItemizedInvoiceBreakdown({
+  client = prisma,
   schoolId,
   scheduleId,
   pupilId,
@@ -386,6 +391,7 @@ async function buildItemizedInvoiceBreakdown({
   fallbackName,
   fallbackAmount,
 }: {
+  client?: any;
   schoolId: string;
   scheduleId: string;
   pupilId: string;
@@ -393,17 +399,17 @@ async function buildItemizedInvoiceBreakdown({
   fallbackName?: string | null;
   fallbackAmount?: number;
 }) {
-  const schedule = await prisma.feeSchedule.findUnique({
+  const schedule = await client.feeSchedule.findUnique({
     where: { id: scheduleId },
     select: { id: true, name: true, amount: true },
   });
 
-  const scheduleItems = await prisma.feeScheduleItem.findMany({
+  const scheduleItems = await client.feeScheduleItem.findMany({
     where: { feeScheduleId: scheduleId, schoolId },
     orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
   });
 
-  const adjustments = await prisma.studentFeeAdjustment.findMany({
+  const adjustments = await client.studentFeeAdjustment.findMany({
     where: {
       schoolId,
       studentId: pupilId,
@@ -2364,7 +2370,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     const [invoices, pupilCount, classCount, readyAssessment, recentPayments, recentPupils, recentTeachers, recentAnnouncements] =
       await Promise.all([
         prisma.invoice.findMany({
-          where: { schoolId },
+          where: { schoolId, status: { not: 'VOIDED' } },
           select: { amountDue: true, amountPaid: true, status: true },
         }),
         prisma.pupil.count({ where: { schoolId, isActive: true } }),
@@ -2471,7 +2477,7 @@ router.get('/fees/data', async (req: Request, res: Response) => {
     });
 
     const outstanding = invoices.reduce(
-      (s, i) => s + Math.max(0, i.amountDue - i.amountPaid),
+      (s, i) => s + (i.status === 'VOIDED' ? 0 : Math.max(0, i.amountDue - i.amountPaid)),
       0,
     );
 
@@ -2496,6 +2502,113 @@ router.get('/fees/data', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching fees data:', error);
     res.status(500).json({ error: 'Failed to fetch fees data' });
+  }
+});
+
+router.get('/fees/invoices/students', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    const rawSearch = req.query.search;
+    const search = typeof rawSearch === 'string'
+      ? rawSearch.trim()
+      : new URL(req.originalUrl, 'http://localhost').searchParams.get('search')?.trim() || '';
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+    if (search.length < 2) return res.status(400).json({ error: 'Enter at least two characters to search.' });
+
+    const [students, academicYears] = await Promise.all([
+      prisma.pupil.findMany({
+        where: {
+          AND: [
+            buildActiveStudentWhere(schoolId),
+            { OR: [
+              { firstName: { contains: search } },
+              { lastName: { contains: search } },
+              { admissionNo: { contains: search } },
+            ] },
+          ],
+        },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          admissionNo: true,
+          class: { select: { id: true, name: true, arm: true } },
+        },
+        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        take: 25,
+      }),
+      prisma.academicYear.findMany({
+        where: { schoolId },
+        select: {
+          id: true,
+          name: true,
+          isCurrent: true,
+          terms: { select: { id: true, name: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } },
+        },
+        orderBy: [{ isCurrent: 'desc' }, { createdAt: 'desc' }],
+      }),
+    ]);
+
+    return res.json({ students, academicYears });
+  } catch (error) {
+    console.error('Error searching finance students:', error);
+    return res.status(500).json({ error: 'Failed to search students' });
+  }
+});
+
+router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    const termId = typeof req.query.termId === 'string' ? req.query.termId : '';
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+    if (!termId) return res.status(400).json({ error: 'Term ID required' });
+
+    const pupil = await prisma.pupil.findFirst({
+      where: { ...buildActiveStudentWhere(schoolId), id: req.params.id },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        admissionNo: true,
+        class: { select: { id: true, name: true, arm: true } },
+      },
+    });
+    if (!pupil) return res.status(404).json({ error: 'Active student not found' });
+
+    const schedules = await prisma.feeSchedule.findMany({
+      where: { schoolId, termId, OR: [{ classId: null }, { classId: pupil.class?.id ?? null }] },
+      select: {
+        id: true,
+        name: true,
+        amount: true,
+        items: { select: { id: true, name: true, amount: true, isRequired: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
+      },
+      orderBy: [{ classId: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const invoices = schedules.length
+      ? await prisma.invoice.findMany({
+          where: {
+            schoolId,
+            pupilId: pupil.id,
+            feeScheduleId: { in: schedules.map((schedule) => schedule.id) },
+            status: { not: 'VOIDED' },
+          },
+          select: { id: true, feeScheduleId: true, invoiceNo: true, amountDue: true, amountPaid: true, status: true },
+        })
+      : [];
+
+    return res.json({
+      student: pupil,
+      termId,
+      schedules: schedules.map((schedule) => ({
+        ...schedule,
+        invoice: invoices.find((invoice) => invoice.feeScheduleId === schedule.id) ?? null,
+      })),
+    });
+  } catch (error) {
+    console.error('Error loading finance student fee preview:', error);
+    return res.status(500).json({ error: 'Failed to load student fee context' });
   }
 });
 
@@ -3045,10 +3158,13 @@ router.post('/fees/students/:studentId/adjustments', async (req: Request, res: R
     if (invoiceId) {
       const invoice = await prisma.invoice.findFirst({
         where: { id: invoiceId, schoolId },
-        select: { id: true },
+        select: { id: true, status: true },
       });
       if (!invoice) {
         return res.status(404).json({ error: 'Invoice not found' });
+      }
+      if (invoice.status === 'VOIDED') {
+        return res.status(409).json({ error: 'A voided invoice cannot be adjusted.' });
       }
     }
 
@@ -3193,14 +3309,30 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
     }
 
     const { termId } = req.body;
+    const targetPupilId = typeof req.body?.pupilId === 'string' ? req.body.pupilId.trim() : '';
     const approvedForBulkWhatsApp = req.body?.bulkApproval === true;
     if (!termId) {
       return res.status(400).json({ error: 'Term ID required' });
     }
 
-    // Get all fee schedules for this term
+    let targetedPupil: any = null;
+    if (targetPupilId) {
+      targetedPupil = await prisma.pupil.findFirst({
+        where: { ...buildActiveStudentWhere(schoolId), id: targetPupilId },
+        include: { guardians: { include: { guardian: true } }, class: true },
+      });
+      if (!targetedPupil) {
+        return res.status(404).json({ error: 'Active student not found in this school.' });
+      }
+    }
+
+    // Get schedules for this term, limited to the requested student's class when targeted.
     const feeSchedules = await prisma.feeSchedule.findMany({
-      where: { termId, schoolId },
+      where: {
+        termId,
+        schoolId,
+        ...(targetedPupil ? { OR: [{ classId: null }, { classId: targetedPupil.classId }] } : {}),
+      },
       include: { 
         class: true,
         term: true,
@@ -3216,12 +3348,14 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
     let whatsappRecipientCount = 0;
 
     for (const schedule of feeSchedules) {
-      const eligiblePupils = await prisma.pupil.findMany({
-        where: schedule.classId
-          ? { ...activePupilWhere, classId: schedule.classId }
-          : activePupilWhere,
-        include: { guardians: { include: { guardian: true } }, class: true },
-      });
+      const eligiblePupils = targetedPupil
+        ? [targetedPupil]
+        : await prisma.pupil.findMany({
+            where: schedule.classId
+              ? { ...activePupilWhere, classId: schedule.classId }
+              : activePupilWhere,
+            include: { guardians: { include: { guardian: true } }, class: true },
+          });
       eligiblePupilsBySchedule.set(schedule.id, eligiblePupils);
       whatsappRecipientCount += eligiblePupils.reduce(
         (count, pupil) => count + pupil.guardians.filter((link: any) => Boolean(link.guardian.whatsapp || link.guardian.phone)).length,
@@ -3229,6 +3363,8 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
       );
     }
 
+    let whatsappAllowed = true;
+    let whatsappBlockedReason: string | null = null;
     if (whatsappRecipientCount > 0) {
       const policy = await readSchoolWhatsAppPolicy(prisma, schoolId);
       const evaluation = evaluateSchoolWhatsAppSend(policy, {
@@ -3236,7 +3372,8 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
         approvedForBulk: approvedForBulkWhatsApp,
       });
       if (!evaluation.allowed) {
-        return res.status(429).json({ error: evaluation.reason || 'WhatsApp sending is currently unavailable' });
+        whatsappAllowed = false;
+        whatsappBlockedReason = evaluation.reason || 'WhatsApp sending is currently unavailable';
       }
     }
 
@@ -3250,8 +3387,12 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
     let notificationsCount = 0;
     let whatsappSent = 0;
     let whatsappFailed = 0;
+    let whatsappSkipped = 0;
     let queued = 0;
     const errors: string[] = [];
+    const invoiceFailures: Array<{ pupilId: string; feeScheduleId: string; reason: string }> = [];
+    let eligibleCount = 0;
+    let alreadyIssuedCount = 0;
 
     // For each fee schedule, create invoices for eligible pupils
     for (const schedule of feeSchedules) {
@@ -3259,16 +3400,20 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
 
       // Create invoices for each pupil (skip if already exists)
       for (const pupil of eligiblePupils) {
+        eligibleCount++;
         try {
           // Check if invoice already exists
           const existingInvoice = await prisma.invoice.findFirst({
             where: {
+              schoolId,
               pupilId: pupil.id,
               feeScheduleId: schedule.id,
+              status: { not: 'VOIDED' },
             },
           });
 
           if (existingInvoice) {
+            alreadyIssuedCount++;
             continue; // Skip if already exists
           }
 
@@ -3277,39 +3422,56 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
 
           const initialInvoiceTotal = schedule.amount;
 
-          // Create invoice
-          const invoice = await prisma.invoice.create({
-            data: {
-              schoolId,
-              pupilId: pupil.id,
-              feeScheduleId: schedule.id,
-              invoiceNo,
-              amountDue: initialInvoiceTotal,
-              status: 'SENT', // Mark as sent when created
-              dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
-            },
-          });
+          let invoice;
+          try {
+            invoice = await prisma.$transaction(async (transaction) => {
+              const createdInvoice = await transaction.invoice.create({
+                data: {
+                  schoolId,
+                  pupilId: pupil.id,
+                  feeScheduleId: schedule.id,
+                  issuanceKey: invoiceIssuanceKey(pupil.id, schedule.id),
+                  invoiceNo,
+                  amountDue: initialInvoiceTotal,
+                  status: 'SENT',
+                  dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                },
+              });
 
-          const breakdown = await buildItemizedInvoiceBreakdown({
-            schoolId,
-            scheduleId: schedule.id,
-            pupilId: pupil.id,
-            invoiceId: invoice.id,
-            fallbackName: schedule.name,
-            fallbackAmount: initialInvoiceTotal,
-          });
+              const breakdown = await buildItemizedInvoiceBreakdown({
+                client: transaction,
+                schoolId,
+                scheduleId: schedule.id,
+                pupilId: pupil.id,
+                invoiceId: createdInvoice.id,
+                fallbackName: schedule.name,
+                fallbackAmount: initialInvoiceTotal,
+              });
 
-          if (breakdown.items.length > 0) {
-            await prisma.invoiceItem.createMany({
-              data: breakdown.items,
+              if (breakdown.items.length > 0) {
+                await transaction.invoiceItem.createMany({ data: breakdown.items });
+              }
+              if (breakdown.amountDue !== initialInvoiceTotal) {
+                await transaction.invoice.update({
+                  where: { id: createdInvoice.id },
+                  data: { amountDue: breakdown.amountDue },
+                });
+              }
+
+              return { ...createdInvoice, amountDue: breakdown.amountDue, breakdown };
             });
-          }
-
-          if (breakdown.amountDue !== initialInvoiceTotal) {
-            await prisma.invoice.update({
-              where: { id: invoice.id },
-              data: { amountDue: breakdown.amountDue },
-            });
+          } catch (createError) {
+            if (typeof createError === 'object' && createError !== null && 'code' in createError && createError.code === 'P2002') {
+              const concurrentInvoice = await prisma.invoice.findUnique({
+                where: { issuanceKey: invoiceIssuanceKey(pupil.id, schedule.id) },
+                select: { id: true },
+              });
+              if (concurrentInvoice) {
+                alreadyIssuedCount++;
+                continue;
+              }
+            }
+            throw createError;
           }
 
           createdCount++;
@@ -3318,9 +3480,9 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
           const pupilName = `${pupil.firstName} ${pupil.lastName}`;
           const className = pupil.class?.name || 'Unknown Class';
           const notificationCurrency = school?.currency || 'NGN';
-          const amount = (breakdown.amountDue / 100).toFixed(2);
+          const amount = (invoice.amountDue / 100).toFixed(2);
           const itemSummary = formatFeeItemsForMessage(
-            breakdown.items.map((item) => ({ name: item.name, amount: item.amount })),
+            invoice.breakdown.items.map((item: any) => ({ name: item.name, amount: item.amount })),
             notificationCurrency,
           );
 
@@ -3333,13 +3495,19 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
               ...(whatsappAddress ? [{ channel: 'WHATSAPP' as const, address: whatsappAddress, name: guardian.firstName }] : []),
               ...(guardian.email ? [{ channel: 'EMAIL' as const, address: guardian.email, name: guardian.firstName }] : []),
             ];
+            const dispatchRecipients = whatsappAllowed
+              ? recipients
+              : recipients.filter((recipient) => recipient.channel !== 'WHATSAPP');
+            if (!whatsappAllowed) {
+              whatsappSkipped += recipients.length - dispatchRecipients.length;
+            }
 
-            if (recipients.length > 0) {
+            if (dispatchRecipients.length > 0) {
               try {
                 const dispatchResult = await communicationService.dispatch({
                   event: 'FeeInvoiceCreated',
                   schoolId,
-                  recipients,
+                  recipients: dispatchRecipients,
                   template: 'Invoice',
                   body: message,
                   subject: 'Fee Invoice Issued',
@@ -3416,20 +3584,33 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
             }
           }
         } catch (err) {
+          console.error('Failed to issue invoice for pupil/schedule:', { pupilId: pupil.id, feeScheduleId: schedule.id, error: err });
           errors.push(`Failed to create invoice for pupil ${pupil.id}: ${err}`);
+          invoiceFailures.push({
+            pupilId: pupil.id,
+            feeScheduleId: schedule.id,
+            reason: (err instanceof Error ? err.message : 'Unexpected invoice creation error').slice(0, 300),
+          });
         }
       }
     }
 
     res.json({
       success: true,
-      message: `Created ${createdCount} invoices for term`,
+      message: targetPupilId
+        ? `Processed fee invoices for one student: ${createdCount} created, ${alreadyIssuedCount} already issued, ${errors.length} failed`
+        : `Created ${createdCount} invoices for term`,
       created: createdCount,
+      eligible: eligibleCount,
+      alreadyIssued: alreadyIssuedCount,
+      failed: errors.length,
+      failures: invoiceFailures.slice(0, 100),
       notificationsSent: notificationsCount,
       whatsappSent,
       whatsappFailed,
+      whatsappSkipped,
+      whatsappBlockedReason: whatsappSkipped > 0 ? whatsappBlockedReason : undefined,
       queued,
-      errors: errors.length > 0 ? errors : undefined,
     });
   } catch (error) {
     console.error('Error issuing bills:', error);
@@ -3631,6 +3812,95 @@ router.post('/fees/invoices/send-reminders', requireSubscription, async (req: Re
   }
 });
 
+// POST /api/admin/invoices/:id/void - Void an unpaid invoice while retaining its audit history
+router.post('/invoices/:id/void', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+
+    const { id } = req.params;
+    const reason = String(req.body?.reason ?? '').trim();
+    if (reason.length < 5 || reason.length > 500) {
+      return res.status(400).json({ error: 'Provide a void reason between 5 and 500 characters.' });
+    }
+    const actorId = (req as AuthenticatedRequest).user?.userId;
+    const result = await prisma.$transaction(async (transaction) => {
+      const invoice = await transaction.invoice.findFirst({
+        where: { id, schoolId },
+        include: {
+          pupil: {
+            include: { guardians: { include: { guardian: true } }, class: true },
+          },
+          payments: { select: { id: true } },
+          accountingTransactions: { select: { id: true } },
+          items: {
+            select: {
+              accountingTransactions: { select: { id: true } },
+            },
+          },
+        },
+      });
+
+      if (!invoice) return { kind: 'not_found' as const };
+      if (invoice.status === 'VOIDED') return { kind: 'already_voided' as const };
+      const hasItemAccountingHistory = invoice.items.some((item) => item.accountingTransactions.length > 0);
+      if (invoice.amountPaid !== 0 || invoice.payments.length > 0 || invoice.accountingTransactions.length > 0 || hasItemAccountingHistory) {
+        return { kind: 'has_history' as const };
+      }
+
+      const voided = await transaction.invoice.updateMany({
+        where: {
+          id: invoice.id,
+          schoolId,
+          status: invoice.status,
+          amountPaid: 0,
+        },
+        data: {
+          status: 'VOIDED',
+          voidedAt: new Date(),
+          voidedBy: actorId ?? null,
+          voidReason: reason,
+          issuanceKey: null,
+        },
+      });
+      if (voided.count !== 1) return { kind: 'conflict' as const };
+
+      const remainingActive = await transaction.invoice.findFirst({
+        where: { schoolId, pupilId: invoice.pupilId, feeScheduleId: invoice.feeScheduleId, status: { not: 'VOIDED' } },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (remainingActive) {
+        await transaction.invoice.updateMany({
+          where: { id: remainingActive.id, issuanceKey: null },
+          data: { issuanceKey: invoiceIssuanceKey(invoice.pupilId, invoice.feeScheduleId) },
+        });
+      }
+
+      return { kind: 'voided' as const, invoiceNo: invoice.invoiceNo };
+    });
+
+    if (result.kind === 'not_found') return res.status(404).json({ error: 'Invoice not found' });
+    if (result.kind === 'already_voided') return res.status(409).json({ error: 'This invoice is already voided.' });
+    if (result.kind === 'conflict') return res.status(409).json({ error: 'The invoice changed while this request was being processed. Refresh and try again.' });
+    if (result.kind === 'has_history') {
+      return res.status(409).json({ error: 'This invoice has payment or accounting history and cannot be voided here. Contact support to correct it safely.' });
+    }
+
+    await recordActivity({
+      event: 'INVOICE_VOIDED',
+      details: `Invoice ${result.invoiceNo} voided. Reason: ${reason}`,
+      userId: actorId,
+      schoolId,
+    }).catch((error) => console.warn('Failed to record invoice deletion activity:', error));
+
+    return res.json({ success: true, message: `Invoice ${result.invoiceNo} voided` });
+  } catch (error) {
+    console.error('Error voiding invoice:', error);
+    return res.status(500).json({ error: 'Failed to void invoice' });
+  }
+});
+
 // GET /api/admin/invoices/:id - Get invoice details with all related data
 router.get('/invoices/:id', async (req: Request, res: Response) => {
   try {
@@ -3787,6 +4057,7 @@ router.post('/invoices/:id/additional-charges', async (req: Request, res: Respon
         select: { id: true, amountDue: true, amountPaid: true, status: true, dueDate: true },
       });
       if (!current) throw Object.assign(new Error('Invoice not found.'), { statusCode: 404 });
+      if (current.status === 'VOIDED') throw Object.assign(new Error('A voided invoice cannot be changed.'), { statusCode: 409 });
       if (current.amountDue + amountMinor > 2_147_483_647) throw Object.assign(new Error('The updated invoice total exceeds the supported range.'), { statusCode: 400 });
 
       await tx.invoiceItem.create({
@@ -4116,6 +4387,9 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
     if (!invoice || !invoice.pupil) {
       return res.status(404).json({ error: 'Invoice not found' });
     }
+    if (invoice.status === 'VOIDED') {
+      return res.status(409).json({ error: 'A voided invoice cannot receive payments.' });
+    }
 
     const amountInCents = parsePositiveAmountMinor(amount);
     if (amountInCents === null) {
@@ -4238,6 +4512,7 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
         },
       });
       if (!currentInvoice) throw new Error('INVOICE_NOT_FOUND');
+      if (currentInvoice.status === 'VOIDED') throw new Error('INVOICE_VOIDED');
 
       const currentOutstanding = currentInvoice.amountDue - currentInvoice.amountPaid;
       if (amountInCents > currentOutstanding) throw new Error('PAYMENT_EXCEEDS_BALANCE');
@@ -4643,6 +4918,9 @@ router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requir
     }
     if (error instanceof Error && error.message === 'INVOICE_NOT_FOUND') {
       return res.status(404).json({ error: 'Invoice not found' });
+    }
+    if (error instanceof Error && error.message === 'INVOICE_VOIDED') {
+      return res.status(409).json({ error: 'A voided invoice cannot receive payments.' });
     }
     if (error instanceof Error && error.message === 'PAYMENT_EXCEEDS_BALANCE') {
       return res.status(409).json({ error: 'The invoice balance changed. Refresh it and retry with the current outstanding amount.' });
@@ -5365,7 +5643,7 @@ router.get('/students/:id', async (req: Request, res: Response) => {
         take: 100,
       }),
       prisma.invoice.aggregate({
-        where: { pupilId: id, schoolId },
+        where: { pupilId: id, schoolId, status: { not: 'VOIDED' } },
         _sum: { amountDue: true, amountPaid: true },
         _count: { _all: true },
       }),
@@ -7528,6 +7806,17 @@ router.put('/communications/rules', requireSubscription, async (req: Request, re
 });
 
 // GET /api/admin/whatsapp/data - Get WhatsApp delivery status
+router.get('/whatsapp/status', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+    return res.json({ session: baileysSessionManager.getStatus(schoolId) });
+  } catch (error) {
+    console.error('Error fetching WhatsApp status:', error);
+    return res.status(500).json({ error: 'Failed to fetch WhatsApp status' });
+  }
+});
+
 router.get('/whatsapp/data', async (req: Request, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);

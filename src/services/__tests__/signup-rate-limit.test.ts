@@ -7,6 +7,7 @@ test('signup OTP limits enforce a one-minute cooldown and rolling email cap', ()
   assert.equal(signupRateLimitPolicy.emailCooldownMs, 60_000);
   assert.equal(signupRateLimitPolicy.emailWindowMs, 15 * 60_000);
   assert.equal(signupRateLimitPolicy.emailWindowLimit, 5);
+  assert.equal(signupRateLimitPolicy.reminderCooldownMs, 10 * 60_000);
 });
 
 test('client IP assertions require a valid, fresh HMAC signature', () => {

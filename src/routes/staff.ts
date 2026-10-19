@@ -38,6 +38,7 @@ router.get('/me', async (req: AuthenticatedRequest, res: Response) => {
       firstName: true,
       middleName: true,
       lastName: true,
+      phone: true,
       jobTitle: true,
       department: true,
       classification: true,
@@ -45,6 +46,8 @@ router.get('/me', async (req: AuthenticatedRequest, res: Response) => {
       employmentStatus: true,
       startDate: true,
       photoUrl: true,
+      updatedAt: true,
+      user: { select: { email: true } },
       school: { select: { name: true, logoUrl: true, primaryColor: true } },
     },
   });
@@ -83,7 +86,7 @@ router.put('/me', selfProfilePhotoUpload.single('photo'), async (req: Authentica
         const updated = await tx.employeeProfile.update({
           where: { id: existing.id },
           data: { firstName, middleName: middleName || null, lastName, phone: phone || null, ...(req.file ? { photoUrl: `/uploads/photos/${req.file.filename}` } : {}) },
-          select: { id: true, staffNumber: true, firstName: true, middleName: true, lastName: true, phone: true, photoUrl: true, jobTitle: true, department: true, employmentStatus: true, startDate: true, school: { select: { name: true } } },
+          select: { id: true, staffNumber: true, firstName: true, middleName: true, lastName: true, phone: true, photoUrl: true, jobTitle: true, department: true, employmentStatus: true, startDate: true, updatedAt: true, user: { select: { email: true } }, school: { select: { name: true } } },
         });
         if (existing.firstName !== firstName || existing.middleName !== (middleName || null) || existing.lastName !== lastName || existing.phone !== (phone || null)) {
           await tx.staffEmploymentEvent.create({
@@ -129,7 +132,7 @@ router.put('/me', selfProfilePhotoUpload.single('photo'), async (req: Authentica
           employmentStatus: 'ACTIVE',
           startDate,
         },
-        select: { id: true, staffNumber: true, firstName: true, middleName: true, lastName: true, phone: true, photoUrl: true, jobTitle: true, department: true, employmentStatus: true, startDate: true, school: { select: { name: true } } },
+        select: { id: true, staffNumber: true, firstName: true, middleName: true, lastName: true, phone: true, photoUrl: true, jobTitle: true, department: true, employmentStatus: true, startDate: true, updatedAt: true, user: { select: { email: true } }, school: { select: { name: true } } },
       });
       await tx.staffEmploymentEvent.create({
         data: {

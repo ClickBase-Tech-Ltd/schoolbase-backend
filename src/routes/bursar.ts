@@ -147,7 +147,7 @@ async function resolveFeeInvoicesForAcademicContext(schoolId: string, academicYe
   }
 
   const invoices = await prisma.invoice.findMany({
-    where,
+    where: { ...where, status: { not: 'VOIDED' } },
     select: { id: true, invoiceNo: true },
   });
 

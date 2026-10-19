@@ -7,11 +7,11 @@ import { PrismaClient } from '@prisma/client';
 
 const databaseUrl = process.env.DATABASE_URL;
 const canRunAgainstLocalDatabase = (() => {
-  if (!databaseUrl) return false;
+  if (!databaseUrl || process.env.SIGNUP_INTEGRATION_TESTS !== '1') return false;
   try {
     const url = new URL(databaseUrl);
     return ['localhost', '127.0.0.1', '::1'].includes(url.hostname)
-      && url.pathname.replace(/^\//, '') === 'schoolbase';
+      && url.pathname.replace(/^\//, '') === 'schoolbase_signup_test';
   } catch {
     return false;
   }
@@ -246,6 +246,112 @@ test('concurrent initial verification creates one account and both retries can r
   } finally {
     await prisma.signupOtp.deleteMany({ where: { email } });
     if (createdSchoolId) await prisma.school.delete({ where: { id: createdSchoolId } }).catch(() => {});
+    await prisma.$disconnect();
+  }
+});
+
+test('resend compare-and-swap cannot reactivate an OTP consumed during delivery', {
+  skip: !canRunAgainstLocalDatabase,
+}, async () => {
+  const prisma = new PrismaClient();
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 14);
+  const email = `signup-resend-race-${suffix}@example.invalid`;
+  const oldOtp = '246810';
+  const newOtp = '135790';
+
+  try {
+    const { default: bcrypt } = await import('bcryptjs');
+    const oldOtpHash = await bcrypt.hash(oldOtp, 10);
+    await prisma.signupOtp.create({
+      data: {
+        email,
+        schoolName: `Signup Resend Race ${suffix}`,
+        slug: `signup-resend-race-${suffix}`,
+        country: 'NG',
+        adminName: 'Signup Resend Race Test',
+        passwordHash: 'integration-test-only',
+        otpHash: oldOtpHash,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    const otpModule = await import('../../services/otp.js');
+    const reminderModule = await import('../../services/signup-reminder.js');
+    let releaseDelivery!: () => void;
+    let deliveryStarted!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const deliveryStartedGate = new Promise<void>((resolve) => { deliveryStarted = resolve; });
+
+    const reminderPromise = reminderModule.deliverPendingSignupReminder({
+      generateCode: () => newOtp,
+      send: async () => {
+        deliveryStarted();
+        await deliveryGate;
+      },
+      replace: (code) => otpModule.replaceSignupOtpAfterDelivery(email, code, oldOtpHash),
+    });
+
+    await deliveryStartedGate;
+    const consumed = await prisma.signupOtp.updateMany({
+      where: { email, otpHash: oldOtpHash, verifiedAt: null },
+      data: { verifiedAt: new Date(), recoveryKeyHash: 'f'.repeat(64), recoveryExpiresAt: new Date(Date.now() + 10 * 60 * 1000) },
+    });
+    assert.equal(consumed.count, 1);
+    releaseDelivery();
+
+    const reminderResult = await reminderPromise;
+    const stored = await prisma.signupOtp.findUnique({ where: { email } });
+    assert.equal(reminderResult, 'conflict');
+    assert.ok(stored);
+    assert.equal(stored.otpHash, oldOtpHash);
+    assert.ok(stored.verifiedAt);
+    assert.equal(await bcrypt.compare(newOtp, stored.otpHash), false);
+  } finally {
+    await prisma.signupOtp.deleteMany({ where: { email } });
+    await prisma.$disconnect();
+  }
+});
+
+test('verification using the old OTP loses compare-and-swap after a delivered resend replaces it', {
+  skip: !canRunAgainstLocalDatabase,
+}, async () => {
+  const prisma = new PrismaClient();
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 14);
+  const email = `signup-resend-first-${suffix}@example.invalid`;
+  const oldOtp = '246810';
+  const newOtp = '135790';
+
+  try {
+    const { default: bcrypt } = await import('bcryptjs');
+    const oldOtpHash = await bcrypt.hash(oldOtp, 10);
+    await prisma.signupOtp.create({
+      data: {
+        email,
+        schoolName: `Signup Resend First ${suffix}`,
+        slug: `signup-resend-first-${suffix}`,
+        country: 'NG',
+        adminName: 'Signup Resend First Test',
+        passwordHash: 'integration-test-only',
+        otpHash: oldOtpHash,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    const { replaceSignupOtpAfterDelivery } = await import('../../services/otp.js');
+    assert.equal(await replaceSignupOtpAfterDelivery(email, newOtp, oldOtpHash), true);
+    const oldCodeConsume = await prisma.signupOtp.updateMany({
+      where: { email, otpHash: oldOtpHash, verifiedAt: null, attempts: { lt: 5 }, expiresAt: { gt: new Date() } },
+      data: { verifiedAt: new Date() },
+    });
+    const stored = await prisma.signupOtp.findUnique({ where: { email } });
+
+    assert.equal(oldCodeConsume.count, 0);
+    assert.ok(stored);
+    assert.equal(stored.verifiedAt, null);
+    assert.equal(await bcrypt.compare(oldOtp, stored.otpHash), false);
+    assert.equal(await bcrypt.compare(newOtp, stored.otpHash), true);
+  } finally {
+    await prisma.signupOtp.deleteMany({ where: { email } });
     await prisma.$disconnect();
   }
 });

@@ -2,8 +2,14 @@ import assert from 'node:assert/strict';
 import { adminRouteAccess, isAdminRouteAllowed } from '../src/services/admin-route-access.js';
 
 assert.equal(adminRouteAccess('/fees/data', 'GET'), 'ACCOUNTING');
+assert.equal(adminRouteAccess('/fees/invoices/students', 'GET'), 'ACCOUNTING');
+assert.equal(adminRouteAccess('/fees/invoices/students/pupil-1/preview', 'GET'), 'ACCOUNTING');
 assert.equal(adminRouteAccess('/invoices/invoice-1', 'GET'), 'ACCOUNTING');
 assert.equal(adminRouteAccess('/school/school-1', 'GET'), 'ACCOUNTING');
+assert.equal(adminRouteAccess('/academic-years', 'GET'), 'ACCOUNTING');
+assert.equal(adminRouteAccess('/academic-years', 'POST'), 'SCHOOL_ADMIN');
+assert.equal(adminRouteAccess('/whatsapp/status', 'GET'), 'ACCOUNTING');
+assert.equal(adminRouteAccess('/whatsapp/status', 'POST'), 'SCHOOL_ADMIN');
 assert.equal(adminRouteAccess('/students/data', 'GET'), 'SCHOOL_ADMIN');
 assert.equal(adminRouteAccess('/staff-attendance', 'GET'), 'SCHOOL_ADMIN');
 assert.equal(adminRouteAccess('/staff-attendance/policy', 'PUT'), 'SCHOOL_ADMIN');
