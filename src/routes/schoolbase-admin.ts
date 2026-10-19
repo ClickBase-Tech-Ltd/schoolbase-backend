@@ -22,6 +22,7 @@ import { access, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/
 import os from 'node:os';
 import { URL } from 'node:url';
 import { compactAuditEventFilters, inferPlatformAuditOutcome, normalizeLegacyPlatformAuditEvent, sanitizeLegacyAuditDetails } from '../services/platform-audit-events.js';
+import { hasMp4FileSignature, isSelfHostedVideoUrl, removeSelfHostedVideoFile, removeUploadedVideoFile, VIDEO_TUTORIAL_MEDIA_PREFIX, videoTutorialUpload } from '../services/video-tutorial-media.js';
 
 const router = Router();
 type PlatformAdminRequest = Request & { platformAdminUserId?: string };
@@ -2877,6 +2878,7 @@ router.get('/videos', async (req: Request, res: Response) => {
         title: video.title,
         description: video.description,
         videoUrl: video.videoUrl,
+        isSelfHosted: isSelfHostedVideoUrl(video.videoUrl),
         category: video.category,
         featured: video.featured,
         createdAt: video.createdAt,
@@ -2916,31 +2918,66 @@ router.get('/videos/:videoId', async (req: Request, res: Response) => {
 router.post('/videos', async (req: Request, res: Response) => {
   const session = await requirePlatformAdminSession(req, res);
   if (!session) return;
+  res.status(410).json({ message: 'External video links are no longer supported. Upload an MP4 video file to SchoolBase.' });
+});
+
+router.post('/videos/upload', (req: Request, res: Response, next) => {
+  videoTutorialUpload.single('video')(req, res, (error) => {
+    if (!error) return next();
+    const status = (error as { code?: string }).code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    return res.status(status).json({ message: error.message || 'Video upload was rejected.' });
+  });
+}, async (req: Request, res: Response) => {
+  const uploadedFile = req.file;
+  if (!uploadedFile) return res.status(400).json({ message: 'Choose an MP4 video file to upload.' });
+
+  const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
+  const description = typeof req.body.description === 'string' ? req.body.description.trim() : '';
+  const category = typeof req.body.category === 'string' ? req.body.category.trim() : '';
+  const videoId = typeof req.body.videoId === 'string' ? req.body.videoId.trim() : '';
+  const featured = req.body.featured === 'true';
 
   try {
-    const { title, description, videoUrl, category, featured } = req.body;
+    const rejectUpload = async (status: number, message: string) => {
+      await removeUploadedVideoFile(uploadedFile.path).catch(() => undefined);
+      return res.status(status).json({ message });
+    };
+    if (!title || title.length > 160) return await rejectUpload(400, 'Enter a video title up to 160 characters.');
+    if (description.length > 5000) return await rejectUpload(400, 'Description must be 5,000 characters or fewer.');
+    if (!category || category.length > 80) return await rejectUpload(400, 'Choose a category up to 80 characters.');
+    if (!(await hasMp4FileSignature(uploadedFile.path))) return await rejectUpload(415, 'The uploaded file is not a valid MP4 video.');
 
-    if (!title || !videoUrl) {
-      return res.status(400).json({ message: 'Title and Video URL are required' });
+    const videoUrl = `${VIDEO_TUTORIAL_MEDIA_PREFIX}${uploadedFile.filename}`;
+    let video;
+    let oldVideoUrl: string | null = null;
+    if (videoId) {
+      const existing = await prisma.videoTutorial.findUnique({ where: { id: videoId } });
+      if (!existing) return await rejectUpload(404, 'Video tutorial not found.');
+      oldVideoUrl = existing.videoUrl;
+      video = await prisma.videoTutorial.update({
+        where: { id: videoId },
+        data: { title, description, category, featured, videoUrl },
+      });
+    } else {
+      video = await prisma.videoTutorial.create({
+        data: { title, description, category, featured, videoUrl },
+      });
     }
 
-    const video = await prisma.videoTutorial.create({
-      data: {
-        title,
-        description: description || '',
-        videoUrl,
-        category: category || 'Getting Started',
-        featured: featured || false,
-      },
-    });
+    if (oldVideoUrl && oldVideoUrl !== videoUrl) {
+      await removeSelfHostedVideoFile(oldVideoUrl).catch((error) => {
+        console.error('Failed to remove replaced tutorial media:', error instanceof Error ? error.name : 'UnknownError');
+      });
+    }
 
-    res.status(201).json({
+    return res.status(videoId ? 200 : 201).json({
       videoId: video.id,
-      ...video,
+      video: { ...video, isSelfHosted: true },
     });
   } catch (error) {
-    console.error('Error creating video:', error);
-    res.status(500).json({ message: (error as Error).message || 'Failed to create video' });
+    await removeUploadedVideoFile(uploadedFile.path).catch(() => undefined);
+    console.error('Error saving uploaded tutorial video:', error);
+    return res.status(500).json({ message: 'Failed to save uploaded video.' });
   }
 });
 
@@ -2956,13 +2993,15 @@ router.patch('/videos/:videoId', async (req: Request, res: Response) => {
     if (!videoId) {
       return res.status(400).json({ message: 'Video ID is required' });
     }
+    if (videoUrl !== undefined) {
+      return res.status(400).json({ message: 'Video URLs cannot be edited. Upload an MP4 file to replace tutorial media.' });
+    }
 
     const video = await prisma.videoTutorial.update({
       where: { id: videoId },
       data: {
         ...(title && { title }),
         ...(description !== undefined && { description }),
-        ...(videoUrl && { videoUrl }),
         ...(category && { category }),
         ...(featured !== undefined && { featured }),
       },
@@ -2987,8 +3026,14 @@ router.delete('/videos/:videoId', async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Video ID is required' });
     }
 
+    const existing = await prisma.videoTutorial.findUnique({ where: { id: videoId } });
+    if (!existing) return res.status(404).json({ message: 'Video not found' });
+
     await prisma.videoTutorial.delete({
       where: { id: videoId },
+    });
+    await removeSelfHostedVideoFile(existing.videoUrl).catch((error) => {
+      console.error('Failed to remove deleted tutorial media:', error instanceof Error ? error.name : 'UnknownError');
     });
 
     res.json({ success: true, message: 'Video deleted successfully' });
