@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import test from 'node:test';
-import { hasMp4FileSignature, isSelfHostedVideoUrl, VIDEO_TUTORIAL_MEDIA_PREFIX } from '../src/services/video-tutorial-media.js';
+import { isSelfHostedVideoUrl, normalizeYouTubeVideoUrl, VIDEO_TUTORIAL_MEDIA_PREFIX } from '../src/services/video-tutorial-media.js';
 
-test('recognizes only generated SchoolBase tutorial media paths', () => {
+test('recognizes only generated legacy SchoolBase tutorial media paths', () => {
   assert.equal(isSelfHostedVideoUrl(`${VIDEO_TUTORIAL_MEDIA_PREFIX}01234567-89ab-cdef-0123-456789abcdef.mp4`), true);
   assert.equal(isSelfHostedVideoUrl('https://www.youtube.com/watch?v=abc'), false);
   assert.equal(isSelfHostedVideoUrl('https://www.loom.com/share/abc'), false);
@@ -13,17 +10,17 @@ test('recognizes only generated SchoolBase tutorial media paths', () => {
   assert.equal(isSelfHostedVideoUrl('/uploads/other/01234567-89ab-cdef-0123-456789abcdef.mp4'), false);
 });
 
-test('checks the MP4 container signature without reading the whole file', async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'schoolbase-video-test-'));
-  const mp4Path = path.join(directory, 'sample.mp4');
-  const wrongPath = path.join(directory, 'sample.txt');
-  try {
-    await writeFile(mp4Path, Buffer.from('0000ftypisom0000'));
-    await writeFile(wrongPath, Buffer.from('not an mp4 file'));
-    assert.equal(await hasMp4FileSignature(mp4Path), true);
-    assert.equal(await hasMp4FileSignature(wrongPath), false);
-    assert.equal(await hasMp4FileSignature(path.join(directory, 'missing.mp4')), false);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+test('normalizes supported YouTube links to canonical watch URLs', () => {
+  assert.equal(normalizeYouTubeVideoUrl('https://www.youtube.com/watch?v=abcdefghijk&t=25'), 'https://www.youtube.com/watch?v=abcdefghijk');
+  assert.equal(normalizeYouTubeVideoUrl('https://youtu.be/abcdefghijk?si=example'), 'https://www.youtube.com/watch?v=abcdefghijk');
+  assert.equal(normalizeYouTubeVideoUrl('https://youtube.com/shorts/abcdefghijk'), 'https://www.youtube.com/watch?v=abcdefghijk');
+  assert.equal(normalizeYouTubeVideoUrl('https://youtube.com/embed/abcdefghijk'), 'https://www.youtube.com/watch?v=abcdefghijk');
+});
+
+test('rejects non-YouTube, malformed, and insecure media links', () => {
+  assert.equal(normalizeYouTubeVideoUrl('https://example.com/watch?v=abcdefghijk'), null);
+  assert.equal(normalizeYouTubeVideoUrl('http://youtube.com/watch?v=abcdefghijk'), null);
+  assert.equal(normalizeYouTubeVideoUrl('https://youtube.com/watch?v=short'), null);
+  assert.equal(normalizeYouTubeVideoUrl('javascript:alert(1)'), null);
+  assert.equal(normalizeYouTubeVideoUrl(null), null);
 });

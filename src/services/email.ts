@@ -2260,6 +2260,69 @@ export async function sendPlatformCommunicationEmail(
   }
 }
 
+export function buildCampaignEmailContent(subject: string, body: string) {
+  const bodyHtml = body
+    .split('\n\n')
+    .filter((paragraph) => paragraph.trim())
+    .map((paragraph) => `<p style="margin: 16px 0; line-height: 1.6;">${escapeEmailHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+
+  return {
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <style>${EMAIL_STYLES}</style>
+        </head>
+        <body>
+          <div class="email-container">
+            <div class="header">
+              <div style="width: 70px; height: 70px; background-color: ${BRAND.surface}; border-radius: 50%; margin: 0 auto 12px; display: flex; align-items: center; justify-content: center;">
+                <img src="https://schoolbase.live/logo.png" alt="SchoolBase Logo" style="width: 50px; height: 50px; display: block; margin: auto;">
+              </div>
+              <h1 style="font-size: 24px; color: ${BRAND.surface};">SchoolBase</h1>
+              <p class="header-subtitle">${escapeEmailHtml(subject)}</p>
+            </div>
+            <div class="content">
+              ${bodyHtml}
+              <div class="footer">
+                <p class="footer-text">&copy; 2026 SchoolBase. All rights reserved.</p>
+                <p class="footer-text"><a href="https://schoolbase.live" style="color: ${BRAND.primary}; text-decoration: none;">Visit SchoolBase</a></p>
+              </div>
+            </div>
+          </div>
+        </body>
+      </html>
+    `,
+    text: body,
+  };
+}
+
+export async function sendCampaignEmail(email: string, emailType: string, subject: string, body: string) {
+  try {
+    if (!isValidEmail(email)) {
+      throw new Error(`Invalid email address: ${email}`);
+    }
+
+    const content = buildCampaignEmailContent(subject, body);
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+      to: email,
+      subject,
+      text: content.text,
+      html: content.html,
+      headers: { 'X-SchoolBase-Email-Type': emailType },
+    });
+
+    console.log('Campaign email sent to:', email);
+    return true;
+  } catch (error) {
+    console.error('Failed to send campaign email:', error);
+    throw error;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SUBSCRIPTION EMAIL TEMPLATES
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSmtpAcceptedRecipients, buildAdmissionApplicantEmailContent, buildEmailAssetUrlCandidates, buildPendingSignupReminderEmailContent, buildTransportConfig, buildSetupReminderTaskSections, escapeEmailHtml, fetchInlineLogo } from '../email.js';
+import { assertSmtpAcceptedRecipients, buildAdmissionApplicantEmailContent, buildCampaignEmailContent, buildEmailAssetUrlCandidates, buildPendingSignupReminderEmailContent, buildTransportConfig, buildSetupReminderTaskSections, escapeEmailHtml, fetchInlineLogo } from '../email.js';
 
 test('buildTransportConfig respects SMTP_SECURE=false in production', () => {
   process.env.NODE_ENV = 'production';
@@ -48,6 +48,23 @@ test('buildTransportConfig honours an explicit SMTP_SECURE override', () => {
 
 test('escapeEmailHtml encodes untrusted school names for OTP email markup', () => {
   assert.equal(escapeEmailHtml('<School & "Friends">'), '&lt;School &amp; &quot;Friends&quot;&gt;');
+});
+
+test('campaign email uses only the supplied body without a generic greeting or school label', () => {
+  const content = buildCampaignEmailContent('A short question', 'Hello there,\n\nWe would love to speak.\n\nBest regards,\nPrecious');
+
+  assert.match(content.html, /<h1 style="font-size: 24px; color: #[A-Fa-f0-9]+;">SchoolBase<\/h1>/);
+  assert.match(content.html, /Hello there,<\/p>/);
+  assert.doesNotMatch(content.html, /For: <strong>/);
+  assert.doesNotMatch(content.html, /<p>Hello there,<\/p>\s*<p style=/);
+  assert.match(content.text, /^Hello there,/);
+});
+
+test('campaign email escapes message markup before rendering HTML', () => {
+  const content = buildCampaignEmailContent('Update', 'Hello,\n\n<img src=x onerror=alert(1)>');
+
+  assert.match(content.html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(content.html, /<img src=x onerror=alert\(1\)>/);
 });
 
 test('pending signup reminder escapes untrusted admin and school names in HTML', () => {
