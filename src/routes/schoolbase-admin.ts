@@ -278,6 +278,7 @@ router.get('/ads/overview', async (req: Request, res: Response) => {
   });
 });
 
+
 router.get('/ads/advertisers', async (req: Request, res: Response) => {
   const session = await requirePlatformAdminSession(req, res);
   if (!session) return;

@@ -197,6 +197,8 @@ async function loadRoutes() {
     console.log('✓ Loaded bursar routes');
     const { default: competitionRoutes } = await import('./routes/competition.js');
     console.log('✓ Loaded Competition routes');
+    const { default: schoolReviewRoutes } = await import('./routes/school-reviews.js');
+    console.log('✓ Loaded school review routes');
 
     app.use('/api/admin', adminRoutes);
     app.use('/api/admin/assessment-components', adminComponentsRoutes);
@@ -218,6 +220,8 @@ async function loadRoutes() {
     app.use('/api/staff', staffRoutes);
     app.use('/api/bursar', bursarRoutes);
     app.use('/api/competition', competitionRoutes);
+    app.use('/api/reviews', schoolReviewRoutes);
+    app.use('/schoolbase-admin/api/reviews', schoolReviewRoutes);
     app.use('/schoolbase-admin/api/competition', competitionRoutes);
     app.use('/api/id-cards', idCardStudioRoutes);
     app.use('/api', timetableRoutes);

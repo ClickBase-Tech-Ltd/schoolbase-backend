@@ -115,6 +115,7 @@ model School {
   staffEmploymentEvents        StaffEmploymentEvent[]
   staffNumberCounters          StaffNumberCounter[]
   users                         User[]
+  schoolReview                  SchoolReview?
   supportRequests               SupportRequest[]
   platformSupportRequests       PlatformSupportRequest[]
   auditLogs                     PlatformAuditLog[]
@@ -535,6 +536,8 @@ model User {
   school            School?               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   employeeProfile   EmployeeProfile?
   staffEmploymentEvents StaffEmploymentEvent[] @relation("StaffEmploymentEventActor")
+  submittedSchoolReviews SchoolReview[] @relation("SchoolReviewSubmitter")
+  moderatedSchoolReviews SchoolReview[] @relation("SchoolReviewModerator")
   
   // Financial transactions
   createdTransactions   FinancialTransaction[] @relation("FinancialTransactionCreatedBy")
@@ -1477,6 +1480,38 @@ model PlatformAuditLog {
   @@index([createdAt, category])
   @@index([createdAt, action])
   @@index([schoolId, createdAt])
+}
+
+model SchoolReview {
+  id                    String            @id @default(cuid())
+  schoolId              String            @unique
+  submittedByUserId     String?
+  rating                Int
+  reviewText            String?           @db.VarChar(2000)
+  status                SchoolReviewStatus @default(PENDING)
+  publishConsent       Boolean           @default(false)
+  schoolNameConsent    Boolean           @default(false)
+  schoolLogoConsent    Boolean           @default(false)
+  consentGrantedAt     DateTime?
+  consentRevokedAt     DateTime?
+  moderatedByUserId    String?
+  moderatedAt          DateTime?
+  moderationNote       String?           @db.VarChar(2000)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  school                School            @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  submittedBy           User?             @relation("SchoolReviewSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
+  moderatedBy           User?             @relation("SchoolReviewModerator", fields: [moderatedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([status, rating, createdAt])
+  @@index([submittedByUserId])
+}
+
+enum SchoolReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 model PlatformSetting {
