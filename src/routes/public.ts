@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash, randomUUID } from 'crypto';
 import multer from 'multer';
-import { isSelfHostedVideoUrl, VIDEO_TUTORIAL_MEDIA_PREFIX } from '../services/video-tutorial-media.js';
+import { isPublicTutorialVideoUrl } from '../services/video-tutorial-media.js';
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
@@ -962,10 +962,9 @@ router.post('/admissions/status', async (req: Request, res: Response) => {
 router.get('/videos', async (_req: Request, res: Response) => {
   try {
     const storedVideos = await prisma.videoTutorial.findMany({
-      where: { videoUrl: { startsWith: VIDEO_TUTORIAL_MEDIA_PREFIX } },
       orderBy: [{ featured: 'desc' }, { createdAt: 'desc' }],
     });
-    const videos = storedVideos.filter((video) => isSelfHostedVideoUrl(video.videoUrl));
+    const videos = storedVideos.filter((video) => isPublicTutorialVideoUrl(video.videoUrl));
 
     res.json({
       videos: videos.map((video) => ({
@@ -995,7 +994,7 @@ router.get('/videos/:id', async (req: Request, res: Response) => {
     if (!video) {
       return res.status(404).json({ error: 'Video not found' });
     }
-    if (!isSelfHostedVideoUrl(video.videoUrl)) {
+    if (!isPublicTutorialVideoUrl(video.videoUrl)) {
       return res.status(404).json({ error: 'Video not found' });
     }
 

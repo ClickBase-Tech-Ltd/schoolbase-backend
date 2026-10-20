@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isSelfHostedVideoUrl, normalizeYouTubeVideoUrl, VIDEO_TUTORIAL_MEDIA_PREFIX } from '../src/services/video-tutorial-media.js';
+import { isPublicTutorialVideoUrl, isSelfHostedVideoUrl, normalizeYouTubeVideoUrl, VIDEO_TUTORIAL_MEDIA_PREFIX } from '../src/services/video-tutorial-media.js';
 
 test('recognizes only generated legacy SchoolBase tutorial media paths', () => {
   assert.equal(isSelfHostedVideoUrl(`${VIDEO_TUTORIAL_MEDIA_PREFIX}01234567-89ab-cdef-0123-456789abcdef.mp4`), true);
@@ -23,4 +23,12 @@ test('rejects non-YouTube, malformed, and insecure media links', () => {
   assert.equal(normalizeYouTubeVideoUrl('https://youtube.com/watch?v=short'), null);
   assert.equal(normalizeYouTubeVideoUrl('javascript:alert(1)'), null);
   assert.equal(normalizeYouTubeVideoUrl(null), null);
+});
+
+test('exposes supported YouTube, legacy Loom, and self-hosted tutorials publicly', () => {
+  assert.equal(isPublicTutorialVideoUrl('https://www.youtube.com/watch?v=abcdefghijk'), true);
+  assert.equal(isPublicTutorialVideoUrl('https://www.loom.com/share/468709e49b96455bb2cb125bdda2048b'), true);
+  assert.equal(isPublicTutorialVideoUrl(`${VIDEO_TUTORIAL_MEDIA_PREFIX}01234567-89ab-cdef-0123-456789abcdef.mp4`), true);
+  assert.equal(isPublicTutorialVideoUrl('https://example.com/video.mp4'), false);
+  assert.equal(isPublicTutorialVideoUrl('http://www.loom.com/share/abcdef123'), false);
 });

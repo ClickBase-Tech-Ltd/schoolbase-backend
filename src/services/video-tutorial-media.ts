@@ -41,6 +41,19 @@ export function isSelfHostedVideoUrl(value: string): boolean {
     && /^[a-f0-9-]{36}\.mp4$/i.test(value.slice(VIDEO_TUTORIAL_MEDIA_PREFIX.length));
 }
 
+export function isPublicTutorialVideoUrl(value: string): boolean {
+  if (isSelfHostedVideoUrl(value) || normalizeYouTubeVideoUrl(value) !== null) return true;
+
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && url.hostname.toLowerCase().replace(/^www\./, '') === 'loom.com'
+      && /^\/share\/[a-zA-Z0-9]+$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 export async function removeSelfHostedVideoFile(value: string): Promise<void> {
   if (!isSelfHostedVideoUrl(value)) return;
   const filePath = path.join(videoDirectory, path.basename(value));
