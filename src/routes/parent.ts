@@ -1052,16 +1052,43 @@ router.get('/payments', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Guardian not found' });
     }
 
-    const payments = await prisma.payment.findMany({
-      where: {
-        invoice: {
-          pupilId: { in: family.pupilIds },
-        },
+    const requestedChildId = typeof req.query.childId === 'string' ? req.query.childId.trim() : '';
+    if (requestedChildId && !family.pupilIds.includes(requestedChildId)) {
+      return res.status(404).json({ error: 'Child not found in this family.' });
+    }
+    const parseQueryInteger = (value: unknown, fallback: number, minimum: number) => {
+      if (value === undefined) return fallback;
+      if (typeof value !== 'string' || !value.trim()) return null;
+      const parsed = Number(value);
+      return Number.isSafeInteger(parsed) && parsed >= minimum ? parsed : null;
+    };
+    const offset = parseQueryInteger(req.query.offset, 0, 0);
+    const requestedLimit = parseQueryInteger(req.query.limit, 50, 1);
+    if (offset === null || requestedLimit === null) {
+      return res.status(400).json({ error: 'Payment offset must be a non-negative integer and limit must be a positive integer.' });
+    }
+    const limit = Math.min(requestedLimit, 50);
+    const paymentWhere = {
+      invoice: {
+        pupilId: { in: requestedChildId ? [requestedChildId] : family.pupilIds },
       },
-      include: { invoice: true },
-      orderBy: { paidAt: 'desc' },
-      take: 50,
-    });
+    };
+
+    const [payments, paymentSummary] = await Promise.all([
+      prisma.payment.findMany({
+        where: paymentWhere,
+        include: { invoice: true },
+        orderBy: { paidAt: 'desc' },
+        skip: offset,
+        take: limit,
+      }),
+      prisma.payment.aggregate({
+        where: paymentWhere,
+        _sum: { amount: true },
+        _count: { _all: true },
+        _max: { paidAt: true },
+      }),
+    ]);
 
     res.json({
       payments: payments.map(p => ({
@@ -1073,6 +1100,11 @@ router.get('/payments', async (req: Request, res: Response) => {
         reference: p.reference || p.invoice?.invoiceNo || p.id,
         invoiceNo: p.invoice?.invoiceNo || null,
       })),
+      totalPaid: paymentSummary._sum.amount ?? 0,
+      paymentCount: paymentSummary._count._all,
+      latestPaidAt: paymentSummary._max.paidAt?.toISOString() ?? null,
+      offset,
+      limit,
     });
   } catch (error) {
     console.error('Error loading payments:', error);

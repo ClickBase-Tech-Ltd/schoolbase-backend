@@ -2084,6 +2084,7 @@ model FeeSchedule {
   schoolId  String
   termId    String
   classId   String?
+  phase     SchoolPhase?
   name      String
   amount    Int
   createdAt DateTime  @default(now())

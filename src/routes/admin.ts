@@ -35,6 +35,7 @@ import { reserveNextStaffNumber } from '../services/staff-number.js';
 import { buildStaffAttendanceSummary, computeStaffAttendanceStatus, getSchoolLocalDate, isEmployeeExpectedOnDate, isStaffAttendanceWorkday, isValidSchoolDate, parseWorkDays, schoolLocalTimeToUtc } from '../services/staff-attendance.js';
 import { createStaffAttendanceRouter } from './staff-attendance.js';
 import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
+import { buildFeeInvoiceIssuanceKey, normalizeFeeScheduleName } from '../services/fee-invoice-issuance.js';
 import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
@@ -502,14 +503,15 @@ function normalizeFeeScheduleItemInput(item: any, fallbackSortOrder: number = 0)
     return null;
   }
 
-  const parsedAmount = Number.parseFloat(String(rawAmount));
-  if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+  const parsedAmount = Number(rawAmount);
+  const amountInMinorUnits = Math.round(parsedAmount * 100);
+  if (!Number.isFinite(parsedAmount) || parsedAmount < 0 || !Number.isSafeInteger(amountInMinorUnits)) {
     return null;
   }
 
   return {
     name,
-    amount: Math.round(parsedAmount * 100),
+    amount: amountInMinorUnits,
     description: item?.description ? String(item.description).trim() : null,
     isRequired: item?.isRequired !== false,
     sortOrder: Number.isFinite(Number(item?.sortOrder)) ? Number(item.sortOrder) : fallbackSortOrder,
@@ -520,7 +522,8 @@ export function hasFeeScheduleItemChanges(nextItems: any[] = [], previousItems: 
   const normalize = (item: any) => {
     const name = String(item?.name ?? '').trim();
     const rawAmount = item?.amount;
-    const parsedAmount = Number.parseFloat(String(rawAmount ?? ''));
+    const amountText = String(rawAmount ?? '').trim();
+    const parsedAmount = amountText ? Number(amountText) : Number.NaN;
 
     return {
       name,
@@ -573,7 +576,8 @@ export function resolveFeeScheduleAmount({
     }>;
 
   if (validItems.length === 0) {
-    const rawAmount = Number.parseFloat(String(amount ?? ''));
+    const amountText = String(amount ?? '').trim();
+    const rawAmount = amountText ? Number(amountText) : Number.NaN;
     return Number.isFinite(rawAmount) && rawAmount >= 0 ? Math.round(rawAmount * 100) : null;
   }
 
@@ -583,7 +587,8 @@ export function resolveFeeScheduleAmount({
     return computeFeeScheduleTotalFromItems(itemPayload);
   }
 
-  const rawAmount = Number.parseFloat(String(amount ?? ''));
+  const amountText = String(amount ?? '').trim();
+  const rawAmount = amountText ? Number(amountText) : Number.NaN;
   if (Number.isFinite(rawAmount) && rawAmount >= 0) {
     return Math.round(rawAmount * 100);
   }
@@ -2465,7 +2470,12 @@ router.get('/fees/data', async (req: Request, res: Response) => {
       include: {
         pupil: { include: { class: true, guardians: { include: { guardian: true } } } },
         payments: { orderBy: { paidAt: 'desc' }, take: 1 },
-        feeSchedule: { include: { term: { include: { academicYear: true } } } },
+        feeSchedule: {
+          include: {
+            term: { include: { academicYear: true } },
+            class: { select: { id: true, name: true, arm: true, phase: true } },
+          },
+        },
         items: {
           include: {
             allocations: { select: { amount: true } },
@@ -2570,17 +2580,32 @@ router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Resp
         firstName: true,
         lastName: true,
         admissionNo: true,
-        class: { select: { id: true, name: true, arm: true } },
+        class: { select: { id: true, name: true, arm: true, phase: true } },
       },
     });
     if (!pupil) return res.status(404).json({ error: 'Active student not found' });
 
     const schedules = await prisma.feeSchedule.findMany({
-      where: { schoolId, termId, OR: [{ classId: null }, { classId: pupil.class?.id ?? null }] },
+      where: {
+        schoolId,
+        termId,
+        OR: [
+          { classId: null, phase: null },
+          ...(pupil.class?.id ? [{
+            classId: pupil.class.id,
+            OR: [{ phase: null }, ...(pupil.class.phase ? [{ phase: pupil.class.phase }] : [])],
+          }] : []),
+          ...(pupil.class?.phase ? [{ classId: null, phase: pupil.class.phase }] : []),
+        ],
+      },
       select: {
         id: true,
         name: true,
         amount: true,
+        termId: true,
+        classId: true,
+        phase: true,
+        class: { select: { id: true, name: true, arm: true, phase: true } },
         items: { select: { id: true, name: true, amount: true, isRequired: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
       },
       orderBy: [{ classId: 'asc' }, { createdAt: 'asc' }],
@@ -2591,10 +2616,14 @@ router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Resp
           where: {
             schoolId,
             pupilId: pupil.id,
-            feeScheduleId: { in: schedules.map((schedule) => schedule.id) },
             status: { not: 'VOIDED' },
+            feeSchedule: { termId },
           },
-          select: { id: true, feeScheduleId: true, invoiceNo: true, amountDue: true, amountPaid: true, status: true },
+          include: {
+            feeSchedule: {
+              select: { id: true, name: true, termId: true, classId: true, phase: true },
+            },
+          },
         })
       : [];
 
@@ -2603,7 +2632,14 @@ router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Resp
       termId,
       schedules: schedules.map((schedule) => ({
         ...schedule,
-        invoice: invoices.find((invoice) => invoice.feeScheduleId === schedule.id) ?? null,
+        invoice: invoices.find((invoice) => invoice.feeScheduleId === schedule.id)
+          ?? invoices.find((invoice) =>
+            normalizeFeeScheduleName(invoice.feeSchedule.name) === normalizeFeeScheduleName(schedule.name)
+            && invoice.feeSchedule.termId === schedule.termId
+            && invoice.feeSchedule.classId === schedule.classId
+            && invoice.feeSchedule.phase === schedule.phase
+          )
+          ?? null,
       })),
     });
   } catch (error) {
@@ -2669,7 +2705,11 @@ router.post('/fees/schedules', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'School ID required' });
     }
 
-    const { termId, classId, name, amount, items } = req.body;
+    const { termId, classId, phase, name, amount, items } = req.body;
+    const scheduleName = typeof name === 'string' ? name.trim() : '';
+    if (items !== undefined && !Array.isArray(items)) {
+      return res.status(400).json({ error: 'Fee items must be provided as a list.' });
+    }
     const itemPayload = Array.isArray(items) ? items : [];
     const validItems = itemPayload.map((item, index) => normalizeFeeScheduleItemInput(item, index)).filter(Boolean) as Array<{
       name: string;
@@ -2681,10 +2721,16 @@ router.post('/fees/schedules', async (req: Request, res: Response) => {
 
     const scheduleAmount = resolveFeeScheduleAmount({ amount, items: itemPayload, previousItems: [] });
 
-    if (!termId || !name || scheduleAmount === null) {
+    if (itemPayload.length !== validItems.length) {
+      return res.status(400).json({ error: 'Every fee item must include a name and a valid non-negative amount.' });
+    }
+    if (!termId || !scheduleName || scheduleAmount === null) {
       return res.status(400).json({
         error: 'Missing required fields: termId, name, and either a total amount or at least one fee item',
       });
+    }
+    if (phase && !['EARLY_YEARS', 'PRIMARY', 'SECONDARY'].includes(phase)) {
+      return res.status(400).json({ error: 'Select a valid school phase.' });
     }
 
     // Verify term belongs to school
@@ -2700,34 +2746,32 @@ router.post('/fees/schedules', async (req: Request, res: Response) => {
     if (classId) {
       const classExists = await prisma.class.findFirst({
         where: { id: classId, schoolId },
+        select: { id: true, phase: true },
       });
 
       if (!classExists) {
         return res.status(404).json({ error: 'Class not found' });
       }
+      if (phase && classExists.phase !== phase) {
+        return res.status(400).json({ error: 'The selected class does not belong to the selected school phase.' });
+      }
     }
 
-    const feeSchedule = await prisma.feeSchedule.create({
-      data: {
-        schoolId,
-        termId,
-        classId: classId || null,
-        name,
-        amount: scheduleAmount,
-      },
-      include: {
-        term: { include: { academicYear: true } },
-        class: true,
-        items: {
-          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+    const refreshedSchedule = await prisma.$transaction(async (transaction) => {
+      const feeSchedule = await transaction.feeSchedule.create({
+        data: {
+          schoolId,
+          termId,
+          classId: classId || null,
+          phase: phase || null,
+          name: scheduleName,
+          amount: scheduleAmount,
         },
-      },
-    });
+      });
 
-    if (validItems.length > 0) {
-      for (const item of validItems) {
-        await prisma.feeScheduleItem.create({
-          data: {
+      if (validItems.length > 0) {
+        await transaction.feeScheduleItem.createMany({
+          data: validItems.map((item) => ({
             schoolId,
             feeScheduleId: feeSchedule.id,
             name: item.name,
@@ -2735,25 +2779,18 @@ router.post('/fees/schedules', async (req: Request, res: Response) => {
             description: item.description,
             isRequired: item.isRequired,
             sortOrder: item.sortOrder,
-          },
+          })),
         });
       }
 
-      await prisma.feeSchedule.update({
+      return transaction.feeSchedule.findUnique({
         where: { id: feeSchedule.id },
-        data: { amount: scheduleAmount },
-      });
-    }
-
-    const refreshedSchedule = await prisma.feeSchedule.findUnique({
-      where: { id: feeSchedule.id },
-      include: {
-        term: { include: { academicYear: true } },
-        class: true,
-        items: {
-          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        include: {
+          term: { include: { academicYear: true } },
+          class: true,
+          items: { orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
         },
-      },
+      });
     });
 
     res.json({ success: true, feeSchedule: refreshedSchedule });
@@ -2772,7 +2809,10 @@ router.patch('/fees/schedules/:id', async (req: Request, res: Response) => {
     }
 
     const { id } = req.params;
-    const { termId, classId, name, amount, items } = req.body;
+    const { termId, classId, phase, name, amount, items } = req.body;
+    if (items !== undefined && !Array.isArray(items)) {
+      return res.status(400).json({ error: 'Fee items must be provided as a list.' });
+    }
 
     // Verify fee schedule belongs to school
     const feeSchedule = await prisma.feeSchedule.findFirst({
@@ -2797,14 +2837,28 @@ router.patch('/fees/schedules/:id', async (req: Request, res: Response) => {
       sortOrder: number;
     }>;
 
-    const updateData: any = {};
+    if (Array.isArray(items) && itemPayload.length !== validItems.length) {
+      return res.status(400).json({ error: 'Every fee item must include a name and a valid non-negative amount.' });
+    }
 
-    if (name !== undefined) updateData.name = name;
+    const updateData: any = {};
+    const nextClassId = classId !== undefined ? classId || null : feeSchedule.classId;
+    const nextPhase = phase !== undefined ? phase || null : feeSchedule.phase;
+
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) {
+        return res.status(400).json({ error: 'Schedule name cannot be empty.' });
+      }
+      updateData.name = name.trim();
+    }
 
     const nextTotal = resolveFeeScheduleAmount({
       amount,
       items: itemPayload,
-      previousItems: feeSchedule.items ?? [],
+      previousItems: (feeSchedule.items ?? []).map((item) => ({
+        ...item,
+        amount: (Number(item.amount) / 100).toFixed(2),
+      })),
     });
 
     if (nextTotal !== null) {
@@ -2824,19 +2878,43 @@ router.patch('/fees/schedules/:id', async (req: Request, res: Response) => {
       updateData.termId = termId;
     }
 
+    if (phase && !['EARLY_YEARS', 'PRIMARY', 'SECONDARY'].includes(phase)) {
+      return res.status(400).json({ error: 'Select a valid school phase.' });
+    }
+
     if (classId !== undefined) {
       if (classId) {
-        // Verify class belongs to school
         const classExists = await prisma.class.findFirst({
           where: { id: classId, schoolId },
+          select: { id: true, phase: true },
         });
 
         if (!classExists) {
           return res.status(404).json({ error: 'Class not found' });
         }
+        if (nextPhase && classExists.phase !== nextPhase) {
+          return res.status(400).json({ error: 'The selected class does not belong to the selected school phase.' });
+        }
       }
 
       updateData.classId = classId || null;
+    }
+
+    if (phase !== undefined) {
+      updateData.phase = phase || null;
+    }
+
+    if (nextClassId && nextPhase && classId === undefined) {
+      const classExists = await prisma.class.findFirst({
+        where: { id: nextClassId, schoolId },
+        select: { id: true, phase: true },
+      });
+      if (!classExists) {
+        return res.status(404).json({ error: 'Class not found' });
+      }
+      if (classExists.phase !== nextPhase) {
+        return res.status(400).json({ error: 'The selected class does not belong to the selected school phase.' });
+      }
     }
 
     const updated = await prisma.$transaction(async (transaction) => {
@@ -2965,8 +3043,11 @@ router.post('/fees/schedules/:id/items', async (req: Request, res: Response) => 
     const { id } = req.params;
     const { name, amount, isRequired, description, sortOrder } = req.body;
 
-    if (!name || amount === undefined) {
+    if (typeof name !== 'string' || !name.trim() || amount === undefined || amount === null || amount === '') {
       return res.status(400).json({ error: 'Missing required fields: name, amount' });
+    }
+    if (isRequired !== undefined && typeof isRequired !== 'boolean') {
+      return res.status(400).json({ error: 'Required status must be true or false.' });
     }
 
     const feeSchedule = await prisma.feeSchedule.findFirst({
@@ -2978,20 +3059,25 @@ router.post('/fees/schedules/:id/items', async (req: Request, res: Response) => 
       return res.status(404).json({ error: 'Fee schedule not found' });
     }
 
-    const amountInCents = Math.round(parseFloat(String(amount)) * 100);
-    if (amountInCents < 0) {
-      return res.status(400).json({ error: 'Amount cannot be negative' });
+    const parsedAmount = Number(amount);
+    const amountInCents = Math.round(parsedAmount * 100);
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 0 || !Number.isSafeInteger(amountInCents)) {
+      return res.status(400).json({ error: 'Amount must be a valid non-negative monetary value.' });
+    }
+    const normalizedSortOrder = sortOrder === undefined ? 0 : Number(sortOrder);
+    if (!Number.isSafeInteger(normalizedSortOrder) || normalizedSortOrder < 0) {
+      return res.status(400).json({ error: 'Sort order must be a non-negative whole number.' });
     }
 
     const item = await prisma.feeScheduleItem.create({
       data: {
         schoolId,
         feeScheduleId: id,
-        name: String(name).trim(),
+        name: name.trim(),
         amount: amountInCents,
         isRequired: isRequired !== false,
         description: description ? String(description).trim() : null,
-        sortOrder: sortOrder !== undefined ? Number(sortOrder) : 0,
+        sortOrder: normalizedSortOrder,
       },
     });
 
@@ -3025,11 +3111,34 @@ router.patch('/fees/schedules/items/:itemId', async (req: Request, res: Response
 
     const updateData: any = {};
 
-    if (name !== undefined) updateData.name = String(name).trim();
-    if (amount !== undefined) updateData.amount = Math.round(parseFloat(String(amount)) * 100);
-    if (isRequired !== undefined) updateData.isRequired = Boolean(isRequired);
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) {
+        return res.status(400).json({ error: 'Fee item name cannot be empty.' });
+      }
+      updateData.name = name.trim();
+    }
+    if (amount !== undefined) {
+      const parsedAmount = Number(amount);
+      const amountInCents = Math.round(parsedAmount * 100);
+      if (!Number.isFinite(parsedAmount) || parsedAmount < 0 || !Number.isSafeInteger(amountInCents)) {
+        return res.status(400).json({ error: 'Amount must be a valid non-negative monetary value.' });
+      }
+      updateData.amount = amountInCents;
+    }
+    if (isRequired !== undefined) {
+      if (typeof isRequired !== 'boolean') {
+        return res.status(400).json({ error: 'Required status must be true or false.' });
+      }
+      updateData.isRequired = isRequired;
+    }
     if (description !== undefined) updateData.description = description ? String(description).trim() : null;
-    if (sortOrder !== undefined) updateData.sortOrder = Number(sortOrder);
+    if (sortOrder !== undefined) {
+      const normalizedSortOrder = Number(sortOrder);
+      if (!Number.isSafeInteger(normalizedSortOrder) || normalizedSortOrder < 0) {
+        return res.status(400).json({ error: 'Sort order must be a non-negative whole number.' });
+      }
+      updateData.sortOrder = normalizedSortOrder;
+    }
 
     const updatedItem = await prisma.feeScheduleItem.update({
       where: { id: itemId },
@@ -3331,7 +3440,18 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
       where: {
         termId,
         schoolId,
-        ...(targetedPupil ? { OR: [{ classId: null }, { classId: targetedPupil.classId }] } : {}),
+        ...(targetedPupil
+          ? {
+              OR: [
+                { classId: null, phase: null },
+                ...(targetedPupil.classId ? [{
+                  classId: targetedPupil.classId,
+                  OR: [{ phase: null }, ...(targetedPupil.class?.phase ? [{ phase: targetedPupil.class.phase }] : [])],
+                }] : []),
+                ...(targetedPupil.class?.phase ? [{ classId: null, phase: targetedPupil.class.phase }] : []),
+              ],
+            }
+          : {}),
       },
       include: { 
         class: true,
@@ -3349,10 +3469,18 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
 
     for (const schedule of feeSchedules) {
       const eligiblePupils = targetedPupil
-        ? [targetedPupil]
+        ? [targetedPupil].filter((pupil) =>
+            (!schedule.classId || schedule.classId === pupil.classId) &&
+            (!schedule.phase || schedule.phase === pupil.class?.phase))
         : await prisma.pupil.findMany({
             where: schedule.classId
-              ? { ...activePupilWhere, classId: schedule.classId }
+              ? {
+                  ...activePupilWhere,
+                  classId: schedule.classId,
+                  ...(schedule.phase ? { class: { phase: schedule.phase } } : {}),
+                }
+              : schedule.phase
+                ? { ...activePupilWhere, class: { phase: schedule.phase } }
               : activePupilWhere,
             include: { guardians: { include: { guardian: true } }, class: true },
           });
@@ -3402,13 +3530,31 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
       for (const pupil of eligiblePupils) {
         eligibleCount++;
         try {
-          // Check if invoice already exists
+          const issuanceKey = buildFeeInvoiceIssuanceKey({
+            pupilId: pupil.id,
+            termId: schedule.termId,
+            scheduleName: schedule.name,
+            classId: schedule.classId,
+            phase: schedule.phase,
+          });
+
+          // Prevent repeat billing when duplicate schedule rows have different IDs.
           const existingInvoice = await prisma.invoice.findFirst({
             where: {
               schoolId,
               pupilId: pupil.id,
-              feeScheduleId: schedule.id,
               status: { not: 'VOIDED' },
+              OR: [
+                { feeScheduleId: schedule.id },
+                {
+                  feeSchedule: {
+                    termId: schedule.termId,
+                    name: schedule.name,
+                    classId: schedule.classId,
+                    phase: schedule.phase,
+                  },
+                },
+              ],
             },
           });
 
@@ -3430,7 +3576,7 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
                   schoolId,
                   pupilId: pupil.id,
                   feeScheduleId: schedule.id,
-                  issuanceKey: invoiceIssuanceKey(pupil.id, schedule.id),
+                  issuanceKey,
                   invoiceNo,
                   amountDue: initialInvoiceTotal,
                   status: 'SENT',
@@ -3463,7 +3609,7 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
           } catch (createError) {
             if (typeof createError === 'object' && createError !== null && 'code' in createError && createError.code === 'P2002') {
               const concurrentInvoice = await prisma.invoice.findUnique({
-                where: { issuanceKey: invoiceIssuanceKey(pupil.id, schedule.id) },
+                where: { issuanceKey },
                 select: { id: true },
               });
               if (concurrentInvoice) {
@@ -4338,18 +4484,87 @@ router.get('/invoices/:id/pdf', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/admin/fees/payments/:paymentId/receipt - Get a school-scoped payment receipt
+router.get('/fees/payments/:paymentId/receipt', requireAccountingAccess, async (req: Request, res: Response) => {
+  try {
+    const schoolId = (req as any).user?.schoolId as string | undefined;
+    if (!schoolId) {
+      return res.status(400).json({ error: 'School ID required' });
+    }
+
+    const payment = await prisma.payment.findFirst({
+      where: { id: req.params.paymentId, invoice: { schoolId } },
+      select: {
+        id: true,
+        invoiceId: true,
+        amount: true,
+        method: true,
+        reference: true,
+        paidAt: true,
+        invoice: {
+          select: {
+            invoiceNo: true,
+            pupil: {
+              select: {
+                firstName: true,
+                middleName: true,
+                lastName: true,
+                class: { select: { name: true, arm: true } },
+              },
+            },
+            feeSchedule: {
+              select: {
+                name: true,
+                term: {
+                  select: {
+                    name: true,
+                    academicYear: { select: { name: true } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment receipt not found' });
+    }
+
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: { name: true, currency: true, address: true, city: true, phone: true, email: true },
+    });
+
+    return res.json({
+      payment: {
+        id: payment.id,
+        invoiceId: payment.invoiceId,
+        invoiceNo: payment.invoice.invoiceNo,
+        amount: payment.amount,
+        method: payment.method,
+        reference: payment.reference,
+        paidAt: payment.paidAt.toISOString(),
+        studentName: [payment.invoice.pupil.firstName, payment.invoice.pupil.middleName, payment.invoice.pupil.lastName].filter(Boolean).join(' '),
+        className: [payment.invoice.pupil.class?.name, payment.invoice.pupil.class?.arm].filter(Boolean).join(' '),
+        scheduleName: payment.invoice.feeSchedule?.name ?? null,
+        termName: payment.invoice.feeSchedule?.term?.name ?? null,
+        academicYear: payment.invoice.feeSchedule?.term?.academicYear?.name ?? null,
+      },
+      school,
+    });
+  } catch (error) {
+    console.error('Error loading payment receipt:', error);
+    return res.status(500).json({ error: 'Failed to load payment receipt' });
+  }
+});
+
 // POST /api/admin/fees/payments/record - Record a payment against an invoice
 router.post('/fees/payments/record', verifyAuth, requireAccountingAccess, requireSubscription, async (req: Request, res: Response) => {
   try {
-    console.log('[/fees/payments/record] Request received');
-    console.log('[/fees/payments/record] Cookies:', Object.keys(req.cookies || {}));
-    console.log('[/fees/payments/record] Body:', req.body);
-    
     const schoolId = (req as any).user?.schoolId as string | undefined;
-    console.log('[/fees/payments/record] Resolved schoolId:', schoolId);
-    
     if (!schoolId) {
-      console.error('[/fees/payments/record] No schoolId resolved');
       return res.status(400).json({ error: 'School ID required' });
     }
 
