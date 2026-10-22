@@ -6843,6 +6843,7 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
   const emergencyContactName = typeof req.body?.emergencyContactName === 'string' ? req.body.emergencyContactName.trim() : '';
   const emergencyContactPhone = typeof req.body?.emergencyContactPhone === 'string' ? req.body.emergencyContactPhone.trim() : '';
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const password = req.body?.password;
   const parseAssignmentIds = (value: unknown): string[] | null => {
     if (value === undefined) return null;
     let parsed = value;
@@ -6868,13 +6869,24 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
     discardStaffPhoto(req);
     return res.status(400).json({ error: 'Provide an update reason between 8 and 1,000 characters.' });
   }
+  if (password !== undefined && (typeof password !== 'string' || (password.length > 0 && (password.length < 8 || password.length > 128)))) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'A new password must be between 8 and 128 characters.' });
+  }
 
   try {
+    const passwordHash = typeof password === 'string' && password.length > 0
+      ? await bcrypt.hash(password, 10)
+      : null;
     const { employee, previousPhotoUrl } = await prisma.$transaction(async (tx) => {
       const current = await tx.employeeProfile.findFirst({ where: { id: req.params.employeeId, schoolId } });
       if (!current) throw Object.assign(new Error('Staff profile not found.'), { statusCode: 404 });
       const linkedUser = await tx.user.findFirst({ where: { id: current.userId, schoolId }, select: { role: true } });
+      if (!linkedUser) throw Object.assign(new Error('Linked staff account not found in this school.'), { statusCode: 404 });
       if ((classIds || subjectIds) && linkedUser?.role !== 'TEACHER') throw Object.assign(new Error('Class and subject assignments can only be updated for teachers.'), { statusCode: 400 });
+      if (passwordHash && !['TEACHER', 'BURSAR'].includes(linkedUser.role)) {
+        throw Object.assign(new Error('Passwords can only be reset for teacher and bursar accounts.'), { statusCode: 400 });
+      }
       if (classIds) {
         const ownedClasses = await tx.class.count({ where: { id: { in: classIds }, schoolId } });
         if (ownedClasses !== classIds.length) throw Object.assign(new Error('One or more selected classes do not belong to this school.'), { statusCode: 400 });
@@ -6916,6 +6928,21 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
           nextDepartment: department || null,
         },
       });
+      if (passwordHash) {
+        await tx.user.update({
+          where: { id: current.userId },
+          data: { passwordHash },
+        });
+        await tx.staffEmploymentEvent.create({
+          data: {
+            schoolId,
+            employeeId: current.id,
+            actorUserId: session.userId,
+            eventType: 'PASSWORD_RESET_BY_ADMIN',
+            reason,
+          },
+        });
+      }
       if (classIds) {
         await tx.teacherClass.deleteMany({ where: { teacherId: current.userId, schoolId } });
         if (classIds.length) await tx.teacherClass.createMany({ data: classIds.map((classId: string) => ({ teacherId: current.userId, classId, schoolId })), skipDuplicates: true });
