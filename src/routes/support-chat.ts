@@ -12,12 +12,6 @@ const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 4, fileSize: 8 * 1024 * 1024 } });
 const privateSupportDir = path.resolve(process.cwd(), 'private-support-uploads');
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf']);
-const allowedExtensions: Record<string, string> = {
-  'image/jpeg': '.jpg',
-  'image/png': '.png',
-  'image/webp': '.webp',
-  'application/pdf': '.pdf',
-};
 const mimeForExtension: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -182,13 +176,22 @@ async function persistAttachments(files: Express.Multer.File[]) {
       const extension = path.extname(path.basename(file.originalname)).toLowerCase();
       const extensionMime = mimeForExtension[extension];
       const detectedMime = detectAllowedMime(file.buffer);
-      if (!detectedMime || !allowedMimeTypes.has(detectedMime) || extensionMime !== detectedMime || file.mimetype !== detectedMime) {
-        throw new Error(`Unsupported attachment type: ${file.originalname}`);
+      let mimeType: string;
+      if (extensionMime || allowedMimeTypes.has(file.mimetype)) {
+        if (!detectedMime || !allowedMimeTypes.has(detectedMime) || extensionMime !== detectedMime || file.mimetype !== detectedMime) {
+          throw new Error(`Unsupported attachment type: ${file.originalname}`);
+        }
+        mimeType = detectedMime;
+      } else if (extension === '.csv') {
+        mimeType = 'text/csv';
+      } else {
+        mimeType = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(file.mimetype)
+          ? file.mimetype
+          : 'application/octet-stream';
       }
-      const ext = allowedExtensions[detectedMime];
-      const storedName = `${randomUUID()}${ext}`;
+      const storedName = randomUUID();
       await writeFile(path.join(privateSupportDir, storedName), file.buffer, { flag: 'wx', mode: 0o600 });
-      persisted.push({ storedName, originalName: path.basename(file.originalname).slice(0, 191), mimeType: detectedMime, size: file.size });
+      persisted.push({ storedName, originalName: path.basename(file.originalname).slice(0, 191), mimeType, size: file.size });
     }
     return persisted;
   } catch (error) {
@@ -339,7 +342,7 @@ router.post('/conversations/:id/messages', authenticate, sendChatMessage, async 
   const actor = req.supportActor!;
   const body = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, 20000) : '';
   const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
-  if (!body && files.length === 0) return res.status(400).json({ error: 'Write a message or attach a supported file.' });
+  if (!body && files.length === 0) return res.status(400).json({ error: 'Write a message or attach a file.' });
 
   let persisted: Awaited<ReturnType<typeof persistAttachments>> = [];
   try {
@@ -478,7 +481,7 @@ platform.get('/conversations/:id', async (req: ChatRequest, res) => {
 platform.post('/conversations/:id/messages', sendChatMessage, async (req: ChatRequest, res) => {
   const body = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, 20000) : '';
   const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
-  if (!body && files.length === 0) return res.status(400).json({ error: 'Write a reply or attach a supported file.' });
+  if (!body && files.length === 0) return res.status(400).json({ error: 'Write a reply or attach a file.' });
   let persisted: Awaited<ReturnType<typeof persistAttachments>> = [];
   try {
     const request = await prisma.supportRequest.findUnique({
@@ -565,7 +568,7 @@ async function streamAttachment(req: ChatRequest, res: Response, platformAdmin: 
       where: { id: req.params.id },
       include: { supportRequest: { select: { id: true, schoolId: true, createdByGuardianId: true, createdByUserId: true } } },
     });
-    if (!attachment || !attachment.fileName.match(/^[0-9a-f-]{36}\.(jpg|png|webp|pdf)$/i)) return res.status(404).json({ error: 'Attachment not found.' });
+    if (!attachment || !attachment.fileName.match(/^[0-9a-f-]{36}(?:\.(jpg|png|webp|pdf))?$/i)) return res.status(404).json({ error: 'Attachment not found.' });
     const actor = req.supportActor!;
     if (platformAdmin) {
       if (actor.role !== 'PLATFORM_ADMIN') return res.status(403).json({ error: 'Platform administrator access required.' });
@@ -579,7 +582,8 @@ async function streamAttachment(req: ChatRequest, res: Response, platformAdmin: 
     const contents = await readFile(filePath);
     res.setHeader('Content-Type', attachment.mimeType);
     res.setHeader('Content-Length', contents.byteLength);
-    res.setHeader('Content-Disposition', `${attachment.mimeType === 'application/pdf' ? 'attachment' : 'inline'}; filename="${encodeURIComponent(attachment.originalName)}"`);
+    const disposition = ['image/jpeg', 'image/png', 'image/webp'].includes(attachment.mimeType) ? 'inline' : 'attachment';
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(attachment.originalName)}"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'private, no-store');
     res.send(contents);
