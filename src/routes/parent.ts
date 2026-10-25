@@ -207,6 +207,7 @@ router.post('/login', async (req: Request, res: Response) => {
           select: { id: true },
         });
         const token = await signToken({
+          role: 'PARENT',
           guardianId: guardianRecord.id,
           guardianIds: familyGuardians.map((guardian) => guardian.id),
           schoolId: matchedPupil?.schoolId ?? guardianRecord.schoolId,
