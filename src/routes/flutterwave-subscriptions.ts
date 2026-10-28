@@ -49,6 +49,66 @@ function safeEqual(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+async function initializeFlutterwaveCheckout(input: {
+  reference: string;
+  amountMinor: number;
+  currency: string;
+  email: string;
+  name: string;
+  schoolName: string;
+  planLabel: string;
+  redirectUrl: string;
+  meta: Record<string, string>;
+}): Promise<string> {
+  const secretKey = process.env.FLUTTERWAVE_SECRET_KEY?.trim();
+  if (!secretKey) throw new Error('Flutterwave is not configured for checkout.');
+
+  const response = await fetch(`${FLUTTERWAVE_API_URL}/payments`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${secretKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      tx_ref: input.reference,
+      amount: input.amountMinor / 100,
+      currency: input.currency,
+      redirect_url: input.redirectUrl,
+      customer: { email: input.email, name: input.name },
+      customizations: {
+        title: 'SchoolBase Subscription',
+        description: `${input.schoolName} - ${input.planLabel}`,
+      },
+      meta: input.meta,
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const responseData: unknown = await response.json().catch(() => null);
+  const checkoutLink = responseData && typeof responseData === 'object'
+    ? (responseData as { data?: { link?: unknown } }).data?.link
+    : null;
+  let checkoutUrl: URL | null = null;
+  if (typeof checkoutLink === 'string') {
+    try {
+      checkoutUrl = new URL(checkoutLink);
+    } catch {
+      checkoutUrl = null;
+    }
+  }
+
+  if (
+    !response.ok ||
+    !checkoutUrl ||
+    checkoutUrl.hostname !== 'checkout.flutterwave.com' ||
+    checkoutUrl.protocol !== 'https:'
+  ) {
+    console.error('Flutterwave checkout initialization returned an invalid response:', response.status);
+    throw new Error('Unable to start Flutterwave checkout.');
+  }
+
+  return checkoutUrl.toString();
+}
+
 async function completeSubscription(reference: string, transactionId: string) {
   const payment = await prisma.platformPayment.findFirst({ where: { reference } });
   if (!payment?.note) {
@@ -80,7 +140,7 @@ async function completeSubscription(reference: string, transactionId: string) {
   }
 
   if (
-    paymentDetails.source !== 'flutterwave-subscription-init' ||
+    !['flutterwave-subscription-init', 'flutterwave-public-subscription-init'].includes(String(paymentDetails.source)) ||
     paymentDetails.subscription !== true ||
     paymentDetails.provider !== 'FLUTTERWAVE' ||
     paymentDetails.paymentStatus !== 'PENDING' ||
@@ -369,6 +429,122 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
     return res.json({ authorization_url: checkoutLink, reference });
   } catch (error) {
     console.error('Flutterwave subscription initialization failed:', error);
+    return res.status(500).json({ error: 'Unable to start Flutterwave checkout.' });
+  }
+});
+
+router.post('/public-subscription/init', async (req: Request, res: Response) => {
+  const schoolSlug = typeof req.body?.slug === 'string' ? req.body.slug.trim() : '';
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const planLabel = typeof req.body?.plan === 'string' ? req.body.plan.trim().toUpperCase() : '';
+  const plan = paymentPlanMap[planLabel];
+
+  if (
+    !schoolSlug ||
+    schoolSlug.length > 120 ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+    email.length > 254 ||
+    !name ||
+    name.length > 120 ||
+    !plan ||
+    plan === 'ENTERPRISE'
+  ) {
+    return res.status(400).json({ error: 'A school URL name, valid contact details, and supported paid plan are required.' });
+  }
+
+  try {
+    const [school, catalog] = await Promise.all([
+      prisma.school.findFirst({
+        where: { slug: schoolSlug },
+        select: { id: true, name: true, slug: true, country: true, currency: true, archivedAt: true },
+      }),
+      getBillingMarketCatalog(prisma),
+    ]);
+    if (!school) return res.status(404).json({ error: 'School not found for subscription checkout.' });
+    if (school.archivedAt) return res.status(409).json({ error: 'Archived schools cannot start subscription checkout.' });
+
+    const market = getBillingMarket(school.country);
+    if (!market || String(school.currency ?? '').trim().toUpperCase() !== market.currency) {
+      return res.status(409).json({ error: 'The school billing country and currency do not match.' });
+    }
+
+    const pricing = getMarketPricing(
+      market,
+      catalog,
+      Boolean(process.env.PAYSTACK_SECRET_KEY?.trim()),
+      isFlutterwaveSubscriptionConfigured(),
+    );
+    if (!pricing.checkoutAvailable || pricing.provider !== 'FLUTTERWAVE') {
+      return res.status(409).json({ error: 'Flutterwave checkout is not enabled for this school billing market.' });
+    }
+
+    const planSetting = catalog[market.countryCode].plans[plan];
+    if (!planSetting || planSetting.amountMinor <= 0 || planSetting.amountMinor > 2147483647) {
+      return res.status(409).json({ error: 'The selected plan does not have a valid online checkout price.' });
+    }
+
+    const frontendBaseUrl = getFlutterwaveFrontendBaseUrl();
+    if (!frontendBaseUrl) {
+      return res.status(503).json({ error: 'Flutterwave checkout is not fully configured on the server.' });
+    }
+
+    const reference = `SB-FLW-${randomUUID()}`;
+    const note = JSON.stringify({
+      schoolId: school.id,
+      schoolName: school.name,
+      schoolSlug: school.slug,
+      plan,
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      source: 'flutterwave-public-subscription-init',
+      provider: 'FLUTTERWAVE',
+      subscription: true,
+      country: market.countryCode,
+      currency: market.currency,
+      expectedAmountMinor: planSetting.amountMinor,
+      contactEmail: email,
+    });
+    const payment = await prisma.platformPayment.create({
+      data: {
+        amount: planSetting.amountMinor,
+        method: PaymentMethod.CARD,
+        reference,
+        recordedBy: school.id,
+        note,
+      },
+      select: { id: true },
+    });
+
+    let checkoutLink: string;
+    try {
+      checkoutLink = await initializeFlutterwaveCheckout({
+        reference,
+        amountMinor: planSetting.amountMinor,
+        currency: market.currency,
+        email,
+        name,
+        schoolName: school.name,
+        planLabel: planSetting.label,
+        redirectUrl: `${frontendBaseUrl}/admin/subscription-success`,
+        meta: {
+          schoolId: school.id,
+          plan,
+          country: market.countryCode,
+        },
+      });
+    } catch (error) {
+      await prisma.platformPayment.updateMany({
+        where: { id: payment.id, note },
+        data: { note: JSON.stringify({ ...JSON.parse(note), paymentStatus: 'FAILED' }) },
+      });
+      console.error('Flutterwave public subscription initialization failed:', error);
+      return res.status(502).json({ error: 'Unable to start Flutterwave checkout. Please try again.' });
+    }
+
+    return res.json({ authorization_url: checkoutLink, reference });
+  } catch (error) {
+    console.error('Flutterwave public subscription initialization failed:', error);
     return res.status(500).json({ error: 'Unable to start Flutterwave checkout.' });
   }
 });
