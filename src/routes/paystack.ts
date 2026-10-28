@@ -6,6 +6,8 @@ import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 import { sendPaymentSuccessEmail } from '../jobs/subscriptionEmails.js';
 import { getConfiguredPaymentPlans } from '../services/platform-settings.js';
+import { getBillingMarketCatalog, getMarketPricing } from '../services/billing-markets.js';
+import { getBillingMarket } from '../services/billing-markets.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -37,26 +39,85 @@ router.post('/init', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: email and amountMinor/amount' });
     }
 
-    const planLabel = String(metadata?.plan || '').trim().toUpperCase();
+    const isSubscription = metadata?.isSubscription === true;
+    const requestedPlan = String(metadata?.plan || '').trim().toUpperCase();
+    const planMap: Record<string, 'STARTER' | 'GROWTH' | 'ENTERPRISE'> = {
+      STARTER: 'STARTER',
+      STANDARD: 'GROWTH',
+      GROWTH: 'GROWTH',
+      ENTERPRISE: 'ENTERPRISE',
+    };
+    const planLabel = planMap[requestedPlan] || requestedPlan;
     const paymentPlans = await getConfiguredPaymentPlans(prisma);
-    if (!paymentPlans) {
+    if (!paymentPlans && !isSubscription) {
       return res.status(503).json({ error: 'Pricing is temporarily unavailable. Please try again later.' });
     }
-    const configuredPlan = (paymentPlans as any)[planLabel];
-    if (configuredPlan && configuredPlan.amountMinor > 0 && Math.round(normalizedAmount * 100) !== configuredPlan.amountMinor) {
+    const configuredPlan = paymentPlans ? (paymentPlans as any)[planLabel] : null;
+    if (!isSubscription && configuredPlan && configuredPlan.amountMinor > 0 && Math.round(normalizedAmount * 100) !== configuredPlan.amountMinor) {
       return res.status(400).json({ error: 'The selected plan price has changed. Please refresh the page and try again.' });
     }
 
     const reference = `TXN-${Date.now()}-${crypto.randomUUID()}`;
+    let school = null;
+    let marketCountry = '';
+    let marketCurrency = '';
+
+    if (isSubscription) {
+      const schoolSlug = typeof metadata?.schoolSlug === 'string' ? metadata.schoolSlug.trim() : '';
+      const requestedCurrency = typeof req.body.currency === 'string' ? req.body.currency.trim().toUpperCase() : '';
+      const requestedAmountMinor = typeof amountMinor === 'number' ? amountMinor : NaN;
+
+      if (!schoolSlug || !Number.isSafeInteger(requestedAmountMinor) || requestedAmountMinor <= 0 || !planMap[requestedPlan]) {
+        return res.status(400).json({ error: 'A school, supported plan, and valid amount are required for subscription checkout.' });
+      }
+
+      school = await prisma.school.findFirst({
+        where: { slug: schoolSlug },
+        select: { id: true, name: true, slug: true, country: true, currency: true },
+      });
+
+      if (!school) return res.status(404).json({ error: 'School not found for subscription checkout.' });
+
+      const schoolMarket = getBillingMarket(school.country);
+      marketCountry = schoolMarket?.countryCode || '';
+      marketCurrency = schoolMarket?.currency || '';
+      if (
+        !schoolMarket ||
+        String(school.currency || '').trim().toUpperCase() !== marketCurrency ||
+        requestedCurrency !== marketCurrency
+      ) {
+        return res.status(409).json({ error: 'Online subscription checkout is not enabled for this school billing market.' });
+      }
+      const catalog = await getBillingMarketCatalog(prisma);
+      const marketPricing = getMarketPricing(schoolMarket, catalog, Boolean(PAYSTACK_SECRET_KEY));
+      const marketPlan = catalog[schoolMarket.countryCode].plans[planMap[requestedPlan]];
+      if (!marketPricing.checkoutAvailable || marketPricing.provider !== 'PAYSTACK') {
+        return res.status(409).json({ error: 'Online subscription checkout is not enabled for this school billing market.' });
+      }
+      if (!PAYSTACK_SECRET_KEY) {
+        return res.status(503).json({ error: 'Paystack is not configured for subscription checkout.' });
+      }
+      if (!marketPlan || marketPlan.amountMinor <= 0 || requestedAmountMinor !== marketPlan.amountMinor) {
+        return res.status(400).json({ error: 'The selected plan price is unavailable or has changed. Refresh the page before trying again.' });
+      }
+    }
+
+    const resolvedAmountMinor = isSubscription
+      ? amountMinor
+      : Math.round(normalizedAmount * 100);
 
     // Build metadata for Paystack while preserving the original values for verification.
     const paystackMetadata = {
-      plan: metadata?.plan || '',
-      schoolName: metadata?.schoolName || '',
-      schoolSlug: metadata?.schoolSlug || metadata?.slug || '',
+      plan: isSubscription ? planLabel : metadata?.plan || '',
+      schoolName: isSubscription ? school.name : metadata?.schoolName || '',
+      schoolSlug: isSubscription ? school.slug : metadata?.schoolSlug || metadata?.slug || '',
+      schoolId: isSubscription ? school.id : '',
+      country: isSubscription ? marketCountry : '',
+      currency: isSubscription ? marketCurrency : '',
+      isSubscription,
       name: metadata?.name || '',
       phone: metadata?.phone || '',
-      amountMinor: normalizedAmount * 100,
+      amountMinor: resolvedAmountMinor,
       custom_fields: [
         { display_name: 'Plan', variable_name: 'plan', value: metadata?.plan || '' },
         { display_name: 'School Name', variable_name: 'school_name', value: metadata?.schoolName || '' },
@@ -65,14 +126,16 @@ router.post('/init', async (req: Request, res: Response) => {
       ],
     };
 
-    const school = metadata?.schoolSlug || metadata?.slug || metadata?.schoolName
-      ? await prisma.school.findFirst({
+    if (!school) {
+      school = metadata?.schoolSlug || metadata?.slug || metadata?.schoolName
+        ? await prisma.school.findFirst({
           where: metadata?.schoolSlug || metadata?.slug
             ? { slug: String(metadata.schoolSlug || metadata.slug) }
             : { name: String(metadata.schoolName) },
-          select: { id: true, name: true, slug: true },
+          select: { id: true, name: true, slug: true, country: true, currency: true },
         })
-      : null;
+        : null;
+    }
 
     const existingPlatformPayment = await prisma.platformPayment.findFirst({
       where: { reference },
@@ -82,7 +145,7 @@ router.post('/init', async (req: Request, res: Response) => {
     if (!existingPlatformPayment) {
       await prisma.platformPayment.create({
         data: {
-          amount: Math.round(normalizedAmount * 100),
+          amount: resolvedAmountMinor,
           method: 'CARD',
           reference,
           recordedBy: school?.id || null,
@@ -90,10 +153,14 @@ router.post('/init', async (req: Request, res: Response) => {
             schoolId: school?.id || null,
             schoolName: school?.name || metadata?.schoolName || '',
             schoolSlug: school?.slug || metadata?.schoolSlug || metadata?.slug || '',
-            plan: metadata?.plan || '',
+            plan: isSubscription ? planLabel : metadata?.plan || '',
             status: 'PENDING',
             paymentStatus: 'PENDING',
             source: 'paystack-init',
+            subscription: isSubscription,
+            country: isSubscription ? marketCountry : undefined,
+            currency: isSubscription ? marketCurrency : undefined,
+            expectedAmountMinor: isSubscription ? resolvedAmountMinor : undefined,
           }),
         },
       });
@@ -104,7 +171,8 @@ router.post('/init', async (req: Request, res: Response) => {
       `${PAYSTACK_BASE_URL}/transaction/initialize`,
       {
         email,
-        amount: Math.round(normalizedAmount * 100), // Convert to kobo (smallest unit)
+        amount: resolvedAmountMinor,
+        ...(isSubscription ? { currency: marketCurrency } : {}),
         reference,
         metadata: paystackMetadata,
         callback_url: normalizedCallbackUrl,
@@ -123,7 +191,6 @@ router.post('/init', async (req: Request, res: Response) => {
     console.error('Error initializing Paystack payment:', {
       message: error.message,
       responseData: error.response?.data,
-      requestBody: req.body,
     });
     const statusCode = error.response?.status || 500;
     res.status(statusCode).json({
@@ -138,12 +205,45 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
   try {
     const { reference } = req.body;
 
-    if (!reference) {
+    if (typeof reference !== 'string' || !reference.trim() || reference.length > 200) {
       return res.status(400).json({ error: 'Missing reference' });
     }
 
+    const payment = await prisma.platformPayment.findFirst({
+      where: { reference: reference.trim() },
+    });
+    if (!payment || !payment.note) {
+      return res.status(404).json({ error: 'A matching server-created payment was not found.' });
+    }
+
+    let paymentDetails: Record<string, any>;
+    try {
+      paymentDetails = JSON.parse(payment.note);
+    } catch {
+      return res.status(400).json({ error: 'The payment record is invalid and requires support review.' });
+    }
+
+    if (paymentDetails.paymentStatus === 'COMPLETED') {
+      const completedSchoolId = paymentDetails.schoolId || payment.recordedBy;
+      const completedSchool = completedSchoolId
+        ? await prisma.school.findUnique({
+          where: { id: completedSchoolId },
+          select: { id: true, name: true, slug: true, status: true, plan: true, subscriptionExpiresAt: true },
+        })
+        : null;
+      if (!completedSchool) return res.status(404).json({ error: 'School not found for completed payment.' });
+      return res.json({
+        success: true,
+        school: completedSchool,
+        transaction: { reference: reference.trim(), amount: payment.amount, currency: paymentDetails.currency || 'NGN' },
+      });
+    }
+    if (paymentDetails.source !== 'paystack-init' || paymentDetails.subscription === false) {
+      return res.status(400).json({ error: 'The payment record is not a subscription checkout.' });
+    }
+
     const verifyResponse = await axios.get(
-      `${PAYSTACK_BASE_URL}/transaction/verify/${encodeURIComponent(reference)}`,
+      `${PAYSTACK_BASE_URL}/transaction/verify/${encodeURIComponent(reference.trim())}`,
       {
         headers: {
           Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
@@ -154,98 +254,136 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
 
     const transaction = verifyResponse.data?.data;
     const metadata = transaction?.metadata || {};
-    const schoolSlug = String(metadata.schoolSlug || metadata.school_slug || '').trim();
-    const schoolName = String(metadata.schoolName || metadata.school_name || '').trim();
-    const planLabel = String(metadata.plan || '').trim().toUpperCase();
-    const amountMinor = Number(metadata.amountMinor || metadata.amount_minor || transaction?.amount || 0);
-
-    if (!transaction || transaction.status !== 'success') {
+    if (
+      !transaction ||
+      transaction.status !== 'success' ||
+      transaction.reference !== reference.trim()
+    ) {
       return res.status(400).json({ error: 'Payment not completed' });
     }
 
-    const school = await prisma.school.findFirst({
-      where: schoolSlug ? { slug: schoolSlug } : schoolName ? { name: schoolName } : undefined,
+    const schoolId = paymentDetails.schoolId || payment.recordedBy;
+    if (!schoolId) return res.status(400).json({ error: 'The payment is not linked to a school.' });
+
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
       select: {
         id: true,
         name: true,
         slug: true,
+        country: true,
+        currency: true,
         status: true,
         plan: true,
         subscriptionExpiresAt: true,
       },
     });
+    if (!school) return res.status(404).json({ error: 'School not found for subscription verification' });
+    const schoolMarket = getBillingMarket(school.country);
 
-    if (!school) {
-      return res.status(404).json({ error: 'School not found for subscription verification' });
-    }
-
+    const planLabel = String(paymentDetails.plan || metadata.plan || '').trim().toUpperCase();
     const planMap: Record<string, 'STARTER' | 'GROWTH' | 'ENTERPRISE'> = {
       STARTER: 'STARTER',
       STANDARD: 'GROWTH',
       GROWTH: 'GROWTH',
       ENTERPRISE: 'ENTERPRISE',
     };
+    const nextPlan = planMap[planLabel];
+    if (!nextPlan) {
+      return res.status(400).json({ error: 'The payment does not contain a supported subscription plan.' });
+    }
 
-    const nextPlan = planMap[planLabel] || school.plan || 'STARTER';
+    const currentCatalog = await getBillingMarketCatalog(prisma);
+    const configuredPlan = currentCatalog.NG.plans[nextPlan];
+    const snapshotAmount = Number(paymentDetails.expectedAmountMinor);
+    const expectedAmountMinor = Number.isSafeInteger(snapshotAmount) && snapshotAmount > 0
+      ? snapshotAmount
+      : configuredPlan?.amountMinor;
+    const transactionAmount = Number(transaction.amount);
+
+    if (
+      schoolMarket?.countryCode !== 'NG' ||
+      String(school.currency || '').trim().toUpperCase() !== schoolMarket.currency ||
+      String(transaction.currency || '').trim().toUpperCase() !== 'NGN' ||
+      !Number.isSafeInteger(expectedAmountMinor) ||
+      expectedAmountMinor <= 0 ||
+      payment.amount !== expectedAmountMinor ||
+      transactionAmount !== expectedAmountMinor ||
+      (paymentDetails.currency && String(paymentDetails.currency).toUpperCase() !== 'NGN') ||
+      (paymentDetails.country && String(paymentDetails.country).toUpperCase() !== 'NG')
+    ) {
+      return res.status(400).json({ error: 'The verified payment does not match the school, market, currency, and plan amount.' });
+    }
+
     const subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
-    const updatedSchool = await prisma.school.update({
-      where: { id: school.id },
-      data: {
-        status: 'ACTIVE',
+    const updatedSchool = await prisma.$transaction(async (tx) => {
+      const completedDetails = {
+        ...paymentDetails,
+        schoolId: school.id,
+        schoolName: school.name,
+        schoolSlug: school.slug,
         plan: nextPlan,
-        subscriptionExpiresAt,
-      },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        status: true,
-        plan: true,
-        subscriptionExpiresAt: true,
-      },
-    });
-
-    const existingPlatformPayment = await prisma.platformPayment.findFirst({
-      where: { reference: transaction.reference },
-      select: { id: true, note: true },
-    });
-
-    if (existingPlatformPayment) {
-      await prisma.platformPayment.update({
-        where: { id: existingPlatformPayment.id },
+        country: 'NG',
+        currency: 'NGN',
+        expectedAmountMinor,
+        status: 'ACTIVE',
+        paymentStatus: 'COMPLETED',
+        source: 'paystack-verify',
+      };
+      const claimed = await tx.platformPayment.updateMany({
+        where: { id: payment.id, note: payment.note },
         data: {
-          // Preserve the original amount recorded during initialization.
           method: 'CARD',
           recordedBy: school.id,
-          note: JSON.stringify({
-            schoolId: school.id,
-            schoolName: updatedSchool.name,
-            schoolSlug: updatedSchool.slug,
-            plan: nextPlan,
-            status: 'ACTIVE',
-            paymentStatus: 'COMPLETED',
-            source: 'paystack-verify',
-          }),
+          note: JSON.stringify(completedDetails),
         },
       });
-    } else {
-      await prisma.platformPayment.create({
+      if (claimed.count !== 1) return null;
+
+      return tx.school.update({
+        where: { id: school.id },
         data: {
-          amount: amountMinor,
-          method: 'CARD',
-          reference: transaction.reference,
-          recordedBy: school.id,
-          note: JSON.stringify({
-            schoolId: school.id,
-            schoolName: updatedSchool.name,
-            schoolSlug: updatedSchool.slug,
-            plan: nextPlan,
-            status: 'ACTIVE',
-            paymentStatus: 'COMPLETED',
-            source: 'paystack-verify',
-          }),
+          status: 'ACTIVE',
+          plan: nextPlan,
+          subscriptionExpiresAt,
         },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          status: true,
+          plan: true,
+          subscriptionExpiresAt: true,
+        },
+      });
+    });
+
+    if (!updatedSchool) {
+      const latestPayment = await prisma.platformPayment.findUnique({
+        where: { id: payment.id },
+        select: { note: true },
+      });
+      let latestPaymentDetails: Record<string, any> | null = null;
+      if (latestPayment?.note) {
+        try {
+          latestPaymentDetails = JSON.parse(latestPayment.note);
+        } catch {
+          return res.status(500).json({ error: 'The payment status could not be confirmed. Contact SchoolBase support with your payment reference.' });
+        }
+      }
+      if (latestPaymentDetails?.paymentStatus !== 'COMPLETED') {
+        return res.status(409).json({ error: 'Payment verification is already in progress. Please retry shortly or contact support.' });
+      }
+
+      const alreadyUpdatedSchool = await prisma.school.findUnique({
+        where: { id: school.id },
+        select: { id: true, name: true, slug: true, status: true, plan: true, subscriptionExpiresAt: true },
+      });
+      if (!alreadyUpdatedSchool) return res.status(404).json({ error: 'School not found after payment verification.' });
+      return res.json({
+        success: true,
+        school: alreadyUpdatedSchool,
+        transaction: { reference: transaction.reference, amount: expectedAmountMinor, currency: 'NGN' },
       });
     }
 
@@ -260,7 +398,7 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
       });
 
       if (admin?.email) {
-        const amountFormatted = (amountMinor / 100).toLocaleString('en-NG', {
+        const amountFormatted = (expectedAmountMinor / 100).toLocaleString('en-NG', {
           style: 'currency',
           currency: 'NGN',
           minimumFractionDigits: 2,
@@ -291,8 +429,8 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
       school: updatedSchool,
       transaction: {
         reference: transaction.reference,
-        amount: amountMinor,
-        currency: transaction.currency,
+        amount: expectedAmountMinor,
+        currency: 'NGN',
       },
     });
   } catch (error: any) {

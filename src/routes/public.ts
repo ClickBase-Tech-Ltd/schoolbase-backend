@@ -14,7 +14,7 @@ import { CommunicationRulesRegistry, DEFAULT_COMMUNICATION_RULES } from '../comm
 import { normalizeAdmissionStatus } from './admissions-utils.js';
 import { getPublicAdmissionStatus, submitPublicAdmissionReply } from '../services/public-admission-status.js';
 import { findAdmissionByRequestKey } from '../services/admission-application-access.js';
-import { getConfiguredPaymentPlans, getPublicPaymentPlans } from '../services/platform-settings.js';
+import { getBillingMarket, getBillingMarketCatalog, getMarketPricing, isFlutterwaveSubscriptionConfigured } from '../services/billing-markets.js';
 import { getActivePlacementAds, isValidLandingUrl, normalizePlacementType } from './ads-utils.js';
 import { sendAdvertiserApplicationNotification, sendAdvertiserStatusEmail } from '../services/email.js';
 import { whatsappDeliveryStore } from '../services/whatsapp-delivery-store.js';
@@ -61,12 +61,31 @@ const prisma = new PrismaClient() as ExtendedPrismaClient;
 const publicAdmissionRetryStore = new AdmissionDeliveryRetryStore(prisma);
 const adApplicationAttempts = new Map<string, number[]>();
 
-router.get('/pricing', async (_req: Request, res: Response) => {
+router.get('/pricing', async (req: Request, res: Response) => {
   try {
-    const plans = await getConfiguredPaymentPlans(prisma);
-    if (!plans) return res.status(503).json({ error: 'Pricing is temporarily unavailable.' });
-    res.json({ currency: 'NGN', plans: getPublicPaymentPlans(plans) });
+    const countryCode = typeof req.query.country === 'string' ? req.query.country : '';
+    const market = getBillingMarket(countryCode);
+    if (!market) return res.status(400).json({ error: 'A supported billing country is required.' });
+
+    const catalog = await getBillingMarketCatalog(prisma);
+    const pricing = getMarketPricing(
+      market,
+      catalog,
+      Boolean(process.env.PAYSTACK_SECRET_KEY),
+      isFlutterwaveSubscriptionConfigured(),
+    );
+    res.json({
+      countryCode: market.countryCode,
+      countryName: market.countryName,
+      currency: market.currency,
+      pricingStatus: pricing.pricingStatus,
+      checkoutAvailable: pricing.checkoutAvailable,
+      provider: pricing.provider,
+      plans: pricing.plans,
+      ...(!pricing.checkoutAvailable ? { message: 'Online subscription checkout is not yet available for this market.' } : {}),
+    });
   } catch (error) {
+    console.error('Unable to load public pricing:', error);
     res.status(500).json({ error: 'Unable to load pricing.' });
   }
 });

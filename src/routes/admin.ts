@@ -32,6 +32,7 @@ import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../se
 import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
 import { reserveNextStaffNumber } from '../services/staff-number.js';
+import { getBillingMarket } from '../services/billing-markets.js';
 import { buildStaffAttendanceSummary, computeStaffAttendanceStatus, getSchoolLocalDate, isEmployeeExpectedOnDate, isStaffAttendanceWorkday, isValidSchoolDate, parseWorkDays, schoolLocalTimeToUtc } from '../services/staff-attendance.js';
 import { createStaffAttendanceRouter } from './staff-attendance.js';
 import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
@@ -1842,6 +1843,45 @@ router.post('/settings', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid slug. Use only lowercase letters, numbers, and hyphens.' });
     }
 
+    const billingMarket = getBillingMarket(country);
+    if (!billingMarket) {
+      return res.status(400).json({ error: 'Choose a supported billing country.' });
+    }
+    if (typeof currency !== 'string' || currency.trim().toUpperCase() !== billingMarket.currency) {
+      return res.status(400).json({ error: 'Billing currency must match the selected country.' });
+    }
+
+    const currentSchool = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: { country: true, currency: true, status: true, plan: true, subscriptionExpiresAt: true },
+    });
+    if (!currentSchool) return res.status(404).json({ error: 'School not found.' });
+
+    const currentMarket = getBillingMarket(currentSchool.country);
+    const billingMarketChanged = currentMarket?.countryCode !== billingMarket.countryCode;
+    const completedSubscriptionPayment = billingMarketChanged
+      ? await prisma.platformPayment.findFirst({
+        where: {
+          recordedBy: schoolId,
+          note: { contains: '"paymentStatus":"COMPLETED"' },
+        },
+        select: { id: true },
+      })
+      : null;
+    if (
+      billingMarketChanged &&
+      (
+        currentSchool.status === 'ACTIVE' ||
+        currentSchool.plan !== 'FREE' ||
+        currentSchool.subscriptionExpiresAt ||
+        completedSubscriptionPayment
+      )
+    ) {
+      return res.status(409).json({
+        error: 'A school billing market cannot be changed after paid billing begins. Contact SchoolBase support for an audited market change.',
+      });
+    }
+
     const existingSlugOwner = await prisma.school.findUnique({
       where: { slug: normalizedSlug },
       select: { id: true },
@@ -1858,8 +1898,8 @@ router.post('/settings', async (req: Request, res: Response) => {
         initials,
         slug: normalizedSlug,
         tagline: typeof tagline === 'string' ? tagline.trim() || null : null,
-        country,
-        currency,
+        country: billingMarket.countryCode,
+        currency: billingMarket.currency,
         address,
         email: typeof email === 'string' ? email.trim() || null : null,
         phone: typeof phone === 'string' ? phone.trim() || null : null,
@@ -11104,6 +11144,8 @@ router.get('/subscription/status', async (req: Request, res: Response) => {
       select: {
         id: true,
         name: true,
+        country: true,
+        currency: true,
         status: true,
         plan: true,
         trialEndsAt: true,
@@ -11167,6 +11209,8 @@ router.get('/subscription/status', async (req: Request, res: Response) => {
     res.json({
       subscriptionStatus,
       schoolName: school.name,
+      country: school.country,
+      currency: school.currency,
       currentPlan: school.plan,
       status: school.status,
       trialEndsAt: school.trialEndsAt,

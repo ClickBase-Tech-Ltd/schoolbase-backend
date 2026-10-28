@@ -113,11 +113,21 @@ export async function ensurePlatformPaymentPlans(prisma: PrismaClient) {
   });
 }
 
-export function getPublicPaymentPlans(settings: Record<string, unknown>) {
+export function getPublicPaymentPlans(
+  settings: Record<string, unknown>,
+  currency = 'NGN',
+  locale = 'en-NG',
+  currencyExponent = 2,
+) {
   const plans = getPaymentPlans(settings);
   const formatPrice = (amountMinor: number, customLabel?: string) => {
     return amountMinor > 0
-      ? `₦${(amountMinor / 100).toLocaleString('en-NG')} / term`
+      ? `${new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency,
+        minimumFractionDigits: 0,
+        maximumFractionDigits: currencyExponent,
+      }).format(amountMinor / (10 ** currencyExponent))} / term`
       : customLabel || 'Custom pricing';
   };
 

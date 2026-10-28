@@ -8,6 +8,16 @@ import path from 'path';
 import fs from 'fs';
 import { sendSetupReminderEmail } from '../services/email.js';
 import { getPlatformSettings, serializePlatformSettingValue, normalizeEmailList, parsePlatformSettingValue, platformSettingDefaults, competitionFeatureKeys } from '../services/platform-settings.js';
+import {
+  billingMarkets,
+  getBillingMarketCatalog,
+  getFlutterwaveFrontendBaseUrl,
+  getFlutterwaveWebhookSecret,
+  getMarketPricing,
+  isFlutterwaveSubscriptionConfigured,
+  isValidBillingMarketCatalog,
+  type BillingMarketCode,
+} from '../services/billing-markets.js';
 import { normalizeCompetitionFeatures } from '../services/competition-feature-gate.js';
 import { sendWelcomeEmail, sendInternalSignupNotification } from '../services/email.js';
 import { sendAdvertiserStatusEmail } from '../services/email.js';
@@ -606,7 +616,7 @@ router.get('/operations/status', async (req: Request, res: Response) => {
   const endpointDefinitions = [
     { key: 'api', label: 'Core API', url: `${localApiBase}/health` },
     { key: 'auth', label: 'Authentication API', url: `${localApiBase}/api/auth/login` },
-    { key: 'public', label: 'Public API', url: `${localApiBase}/api/pricing` },
+    { key: 'public', label: 'Public API', url: `${localApiBase}/api/pricing?country=NG` },
     { key: 'country', label: 'Country API', url: `${localApiBase}/api/country/config` },
     { key: 'schoolAdminApp', label: 'School Admin App', url: `${localApiBase}/api/admin/students/data` },
     { key: 'admin', label: 'Admin API', url: `${localApiBase}/api/admin/verify` },
@@ -1081,9 +1091,56 @@ router.get('/settings', async (req: Request, res: Response) => {
 
   try {
     const settings = await getPlatformSettings(prisma);
+    const billingMarketPricing = await getBillingMarketCatalog(prisma);
+    const flutterwaveConfiguration = {
+      secretKeyConfigured: Boolean(process.env.FLUTTERWAVE_SECRET_KEY?.trim()),
+      webhookSecretConfigured: Boolean(getFlutterwaveWebhookSecret()),
+      frontendUrlConfigured: Boolean(getFlutterwaveFrontendBaseUrl()),
+    };
+    const flutterwaveConfigured = isFlutterwaveSubscriptionConfigured();
+    const billingReadiness = Object.fromEntries(
+      (Object.keys(billingMarkets) as BillingMarketCode[]).map((code) => {
+        const market = billingMarkets[code];
+        const configuration = billingMarketPricing[code];
+        const paystackConfigured = Boolean(process.env.PAYSTACK_SECRET_KEY?.trim());
+        const providerReady = configuration.provider === 'PAYSTACK'
+          ? code === 'NG' && paystackConfigured
+          : code !== 'NG' && flutterwaveConfigured;
+        const pricing = getMarketPricing(
+          market,
+          billingMarketPricing,
+          paystackConfigured,
+          flutterwaveConfigured,
+        );
+        const blockers: string[] = [];
+
+        if (configuration.pricingStatus !== 'PUBLISHED') blockers.push('Publish approved prices.');
+        if (!configuration.checkoutEnabled) blockers.push('Turn on Allow checkout.');
+        if (code !== 'NG' && !configuration.providerVerified) blockers.push('Mark merchant setup reviewed.');
+        if (configuration.provider === 'PAYSTACK' && code !== 'NG') blockers.push('Paystack checkout is only supported for Nigeria.');
+        if (configuration.provider === 'FLUTTERWAVE' && code === 'NG') blockers.push('Flutterwave subscription checkout is not enabled for Nigeria; select Paystack.');
+        if (configuration.provider === 'PAYSTACK' && code === 'NG' && !paystackConfigured) blockers.push('PAYSTACK_SECRET_KEY is not available to the backend process.');
+        if (configuration.provider === 'FLUTTERWAVE' && code !== 'NG') {
+          if (!flutterwaveConfiguration.secretKeyConfigured) blockers.push('FLUTTERWAVE_SECRET_KEY is not available to the backend process.');
+          if (!flutterwaveConfiguration.webhookSecretConfigured) blockers.push('FLUTTERWAVE_WEBHOOK_SECRET_HASH or FLUTTERWAVE_WEBHOOK_SECRET is not available to the backend process.');
+          if (!flutterwaveConfiguration.frontendUrlConfigured) blockers.push('FRONTEND_URL must be a trusted HTTPS URL.');
+        }
+
+        return [code, {
+          checkoutAvailable: pricing.checkoutAvailable,
+          provider: configuration.provider,
+          providerReady,
+          blockers,
+        }];
+      }),
+    );
     res.json({
-      settings,
+      settings: { ...settings, billingMarketPricing },
       defaults: platformSettingDefaults,
+      billingReadiness: {
+        markets: billingReadiness,
+        flutterwave: flutterwaveConfiguration,
+      },
     });
   } catch (error) {
     console.error('Error fetching platform settings:', error);
@@ -1125,6 +1182,35 @@ router.patch('/settings', async (req: Request, res: Response) => {
           return res.status(400).json({ message: `Invalid ${plan} payment plan configuration.` });
         }
       }
+    }
+
+    if ('billingMarketPricing' in input) {
+      if (!isValidBillingMarketCatalog(input.billingMarketPricing)) {
+        return res.status(400).json({ message: 'billingMarketPricing must contain valid settings for all five supported markets.' });
+      }
+
+      normalizedSettings.billingMarketPricing = input.billingMarketPricing;
+      const nigeriaPlans = input.billingMarketPricing.NG.plans;
+      normalizedSettings.paymentPlans = {
+        STARTER: {
+          label: nigeriaPlans.STARTER.label,
+          priceLabel: nigeriaPlans.STARTER.customPriceLabel || 'Custom pricing',
+          amountMinor: nigeriaPlans.STARTER.amountMinor,
+          studentLimit: nigeriaPlans.STARTER.studentLimit,
+        },
+        GROWTH: {
+          label: nigeriaPlans.GROWTH.label,
+          priceLabel: nigeriaPlans.GROWTH.customPriceLabel || 'Custom pricing',
+          amountMinor: nigeriaPlans.GROWTH.amountMinor,
+          studentLimit: nigeriaPlans.GROWTH.studentLimit,
+        },
+        ENTERPRISE: {
+          label: nigeriaPlans.ENTERPRISE.label,
+          priceLabel: nigeriaPlans.ENTERPRISE.customPriceLabel || 'Custom pricing',
+          amountMinor: nigeriaPlans.ENTERPRISE.amountMinor,
+          studentLimit: nigeriaPlans.ENTERPRISE.studentLimit,
+        },
+      };
     }
 
     if ('competitionFeatures' in input) {

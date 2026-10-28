@@ -95,6 +95,8 @@ async function loadRoutes() {
     app.use('/api/country', countryRoutes);
     app.use('/api', publicRoutes);
     app.use('/api/paystack', paystackRoutes);
+    const { default: flutterwaveSubscriptionRoutes } = await import('./routes/flutterwave-subscriptions.js');
+    app.use('/api/flutterwave', flutterwaveSubscriptionRoutes);
     app.use('/api/trial', trialRoutes);
     app.use('/api/whatsapp', whatsappRoutes);
     app.use('/api/parent', parentRoutes);

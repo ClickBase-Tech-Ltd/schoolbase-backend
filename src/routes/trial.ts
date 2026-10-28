@@ -9,6 +9,7 @@ import { recordActivity } from '../middleware/activityAudit.js';
 import { getPlatformSettingValue } from '../services/platform-settings.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { allowSignupOtpRequest, verifyClientIpAssertion } from '../services/signup-rate-limit.js';
+import { getBillingMarket } from '../services/billing-markets.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -68,16 +69,21 @@ router.post('/request-otp', async (req: Request, res: Response) => {
     const tagline = String(req.body.tagline ?? '').trim();
     const address = String(req.body.address ?? '').trim();
     const phone = String(req.body.phone ?? '').trim();
-    const country = String(req.body.country ?? '').trim();
+    const requestedCountry = String(req.body.country ?? '').trim();
+    const billingMarket = getBillingMarket(requestedCountry);
     const adminName = String(req.body.adminName ?? '').trim();
     const adminEmail = String(req.body.adminEmail ?? '').trim().toLowerCase();
     const password = String(req.body.password ?? '');
 
-    if (!schoolName || !slug || !country || !adminName || !adminEmail || !password) {
+    if (!schoolName || !slug || !requestedCountry || !adminName || !adminEmail || !password) {
       return res.status(400).json({
         error: 'Missing required fields'
       });
     }
+    if (!billingMarket) {
+      return res.status(400).json({ error: 'Choose a supported billing country.' });
+    }
+    const country = billingMarket.countryCode;
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
     }
@@ -263,6 +269,10 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     if (!signupOtp || !recoveryHash) {
       return res.status(401).json({ error: 'Invalid or expired verification code' });
     }
+    const billingMarket = getBillingMarket(signupOtp.country);
+    if (!billingMarket) {
+      return res.status(400).json({ error: 'The signup billing country is no longer supported. Please contact SchoolBase support.' });
+    }
 
     // Create school
     const { school, adminUser } = await prisma.$transaction(async (tx) => {
@@ -273,7 +283,8 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
           tagline: signupOtp.tagline || null,
           address: signupOtp.address || null,
           phone: signupOtp.phone || null,
-          country: signupOtp.country,
+          country: billingMarket.countryCode,
+          currency: billingMarket.currency,
           email: adminEmail,
           status: 'TRIAL',
           trialEndsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
