@@ -1,6 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import { ResultWorkflowState } from './ResultWorkflowState.js';
 import { isStudentCurrentlyEnrolled } from '../../services/student-lifecycle.js';
+import {
+  calculateWeightedTotalScore,
+  normalizeTeacherAssessmentScores,
+  parseAssessmentScoreComponents,
+} from '../../services/result-score-calculation.js';
 
 export interface ValidationError {
   field: string;
@@ -105,69 +110,88 @@ export class ResultsValidator {
       warnings.push(warn);
     }
 
-    // VALIDATION 3: Student coverage
-    if (assessment.classId && assessment.class) {
-      const expectedPupils = assessment.class.pupils.filter(isStudentCurrentlyEnrolled);
-      const expectedCount = expectedPupils.length;
-      const actualUniqueStudentCount = new Set(assessment.results.map((r) => r.pupilId)).size;
-
-      if (actualUniqueStudentCount < expectedCount) {
-        const missingCount = expectedCount - actualUniqueStudentCount;
-        const error: ValidationError = {
-          field: 'studentCoverage',
-          message: `Teachers still need to record results for ${missingCount} student${missingCount === 1 ? '' : 's'}.`,
-          severity: 'error',
-          details: {
-            expected: expectedCount,
-            recorded: actualUniqueStudentCount,
-            missing: missingCount,
-          },
-        };
-        errors.push(error);
-        blockers.push(error);
-      }
-
-      // VALIDATION 4: Subject coverage per student
-      const missingSubjects: Array<{ pupilName: string; subjectName: string }> = [];
-
-      if (assessment.class.subjectClasses.length > 0) {
-        const expectedSubjects = new Set(assessment.class.subjectClasses.map((sc) => sc.subject.id));
-
-        for (const pupil of expectedPupils) {
-          const pupilResults = assessment.results.filter((r) => r.pupilId === pupil.id);
-          const pupilSubjects = new Set(pupilResults.map((r) => r.subjectId));
-
-          for (const subjectId of expectedSubjects) {
-            if (!pupilSubjects.has(subjectId)) {
-              const subject = assessment.class.subjectClasses.find(
-                (sc) => sc.subject.id === subjectId
-              )?.subject;
-              missingSubjects.push({
-                pupilName: `${pupil.firstName} ${pupil.lastName}`,
-                subjectName: subject?.name || 'Unknown',
-              });
-            }
-          }
-        }
-
-        if (missingSubjects.length > 0) {
-          const error: ValidationError = {
-            field: 'subjectCoverage',
-            message: `Teachers still need to complete ${missingSubjects.length} student-subject entry${missingSubjects.length === 1 ? '' : 'ies'}.`,
-            severity: 'error',
-            details: {
-              count: missingSubjects.length,
-              samples: missingSubjects.slice(0, 5),
+    const assessmentClasses =
+      assessment.classId && assessment.class
+        ? [assessment.class]
+        : await this.prisma.class.findMany({
+            where: { schoolId: assessment.schoolId, phase: assessment.phase },
+            include: {
+              pupils: true,
+              subjectClasses: { include: { subject: true } },
             },
-          };
-          errors.push(error);
-          blockers.push(error);
+          });
+    const expectedPupils = assessmentClasses.flatMap((classRecord) =>
+      classRecord.pupils.filter(isStudentCurrentlyEnrolled)
+    );
+    const expectedPupilIds = new Set(expectedPupils.map((pupil) => pupil.id));
+    const actualPupilIds = new Set(
+      assessment.results
+        .map((result) => result.pupilId)
+        .filter((pupilId) => expectedPupilIds.has(pupilId))
+    );
+
+    // VALIDATION 3: Student coverage for active pupils in the assessment's class or phase.
+    if (expectedPupils.length > actualPupilIds.size) {
+      const missingCount = expectedPupils.length - actualPupilIds.size;
+      const error: ValidationError = {
+        field: 'studentCoverage',
+        message: `Teachers still need to record results for ${missingCount} student${missingCount === 1 ? '' : 's'}.`,
+        severity: 'error',
+        details: {
+          expected: expectedPupils.length,
+          recorded: actualPupilIds.size,
+          missing: missingCount,
+        },
+      };
+      errors.push(error);
+      blockers.push(error);
+    }
+
+    // VALIDATION 4: Subject coverage per active pupil.
+    const missingSubjects: Array<{ pupilName: string; subjectName: string }> = [];
+    for (const classRecord of assessmentClasses) {
+      const expectedSubjects = new Set(classRecord.subjectClasses.map((sc) => sc.subject.id));
+      for (const pupil of classRecord.pupils.filter(isStudentCurrentlyEnrolled)) {
+        const pupilSubjects = new Set(
+          assessment.results
+            .filter((result) => result.pupilId === pupil.id)
+            .map((result) => result.subjectId)
+        );
+
+        for (const subjectId of expectedSubjects) {
+          if (!pupilSubjects.has(subjectId)) {
+            const subject = classRecord.subjectClasses.find(
+              (subjectClass) => subjectClass.subject.id === subjectId
+            )?.subject;
+            missingSubjects.push({
+              pupilName: `${pupil.firstName} ${pupil.lastName}`,
+              subjectName: subject?.name || 'Unknown',
+            });
+          }
         }
       }
     }
 
-    // VALIDATION 5: Total scores exist
-    const resultsWithoutTotals = assessment.results.filter(
+    if (missingSubjects.length > 0) {
+      const error: ValidationError = {
+        field: 'subjectCoverage',
+        message: `Teachers still need to complete ${missingSubjects.length} student-subject entry${missingSubjects.length === 1 ? '' : 'ies'}.`,
+        severity: 'error',
+        details: {
+          count: missingSubjects.length,
+          samples: missingSubjects.slice(0, 5),
+        },
+      };
+      errors.push(error);
+      blockers.push(error);
+    }
+
+    const activeRosterResults = assessment.results.filter((result) =>
+      expectedPupilIds.has(result.pupilId)
+    );
+
+    // Inactive pupils' saved rows are retained but no longer block a current assessment.
+    const resultsWithoutTotals = activeRosterResults.filter(
       (r) => r.totalScore === null || r.totalScore === undefined
     );
     if (resultsWithoutTotals.length > 0) {
@@ -182,7 +206,7 @@ export class ResultsValidator {
     }
 
     // VALIDATION 6: Grades assigned
-    const resultsWithoutGrades = assessment.results.filter(
+    const resultsWithoutGrades = activeRosterResults.filter(
       (r) => r.grade === null || r.grade === undefined
     );
     if (resultsWithoutGrades.length > 0) {
@@ -197,7 +221,7 @@ export class ResultsValidator {
     }
 
     // VALIDATION 7: Positions calculated
-    const resultsWithoutPositions = assessment.results.filter(
+    const resultsWithoutPositions = activeRosterResults.filter(
       (r) => !r.classPosition || !r.subjectPosition
     );
     if (resultsWithoutPositions.length > 0) {
@@ -211,30 +235,52 @@ export class ResultsValidator {
       blockers.push(error);
     }
 
-    // VALIDATION 8: Score ranges valid
-    if (assessment.componentData) {
-      try {
-        const config = JSON.parse(assessment.componentData);
-        const components = config.components || [];
+    // VALIDATION 8: Invalid scores block publishing.
+    const components = assessment.componentData
+      ? parseAssessmentScoreComponents(assessment.componentData)
+      : null;
+    for (const result of activeRosterResults) {
+      let invalidScore: string | null = null;
+      if (result.totalScore !== null && result.totalScore !== undefined &&
+          (!Number.isFinite(result.totalScore) || result.totalScore < 0 || result.totalScore > 100)) {
+        invalidScore = `total score ${result.totalScore} is outside 0-100`;
+      }
 
-        for (const result of assessment.results) {
-          if (result.totalScore !== null && result.totalScore !== undefined) {
-            if (result.totalScore < 0 || result.totalScore > 100) {
-              const warn: ValidationError = {
-                field: 'scoreRange',
-                message: `Student ${result.pupil.firstName} has invalid total score: ${result.totalScore}`,
-                severity: 'warning',
-                details: {
-                  studentId: result.pupilId,
-                  score: result.totalScore,
-                },
-              };
-              warnings.push(warn);
-            }
+      if (components && result.scores) {
+        try {
+          const parsedScores: unknown = JSON.parse(result.scores);
+          if (!parsedScores || typeof parsedScores !== 'object' || Array.isArray(parsedScores)) {
+            invalidScore = invalidScore ?? 'component scores are malformed';
+          } else {
+            calculateWeightedTotalScore(
+              components,
+              parsedScores as Record<string, number | null | undefined>
+            );
           }
+        } catch (error) {
+          invalidScore =
+            invalidScore ??
+            (error instanceof Error ? error.message : 'component scores are invalid');
         }
-      } catch (e) {
-        // Component parsing error already caught in VALIDATION 1
+      } else if (assessment.componentData) {
+        try {
+          normalizeTeacherAssessmentScores(assessment.componentData, result);
+        } catch (error) {
+          invalidScore =
+            invalidScore ??
+            (error instanceof Error ? error.message : 'component scores are invalid');
+        }
+      }
+
+      if (invalidScore) {
+        const error: ValidationError = {
+          field: 'scoreRange',
+          message: `Student ${result.pupil.firstName} ${result.pupil.lastName}: ${invalidScore}.`,
+          severity: 'error',
+          details: { studentId: result.pupilId },
+        };
+        errors.push(error);
+        blockers.push(error);
       }
     }
 
@@ -273,26 +319,33 @@ export class ResultsValidator {
         };
       }
 
-      // Validate total weight = 100%
-      const totalWeight = components.reduce((sum: number, c: any) => sum + (c.weight || 0), 0);
-      if (Math.abs(totalWeight - 100) > 0.01) {
-        return {
-          field: 'componentData',
-          message: `Component weights total ${totalWeight}%, must equal 100%`,
-          severity: 'error',
-          details: { totalWeight },
-        };
-      }
-
-      // Validate each component
+      const componentIds = new Set<string>();
       for (const component of components) {
-        if (!component.name || component.maxScore === undefined || component.weight === undefined) {
+        if (
+          typeof component.id !== 'string' ||
+          component.id.trim().length === 0 ||
+          typeof component.name !== 'string' ||
+          component.name.trim().length === 0 ||
+          typeof component.maxScore !== 'number' ||
+          !Number.isFinite(component.maxScore) ||
+          typeof component.weight !== 'number' ||
+          !Number.isFinite(component.weight)
+        ) {
           return {
             field: 'componentData',
-            message: `Component missing required fields: ${component.name || 'unnamed'}`,
+            message: `Component missing valid ID, name, maximum score, or weight: ${component.name || 'unnamed'}`,
             severity: 'error',
           };
         }
+
+        if (componentIds.has(component.id)) {
+          return {
+            field: 'componentData',
+            message: `Duplicate component ID: ${component.id}`,
+            severity: 'error',
+          };
+        }
+        componentIds.add(component.id);
 
         if (component.maxScore <= 0) {
           return {
@@ -309,6 +362,16 @@ export class ResultsValidator {
             severity: 'error',
           };
         }
+      }
+
+      const totalWeight = components.reduce((sum: number, component: any) => sum + component.weight, 0);
+      if (Math.abs(totalWeight - 100) > 0.01) {
+        return {
+          field: 'componentData',
+          message: `Component weights total ${totalWeight}%, must equal 100%`,
+          severity: 'error',
+          details: { totalWeight },
+        };
       }
 
       return null;

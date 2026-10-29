@@ -4,102 +4,14 @@ import { PrismaClient } from '@prisma/client';
 import { verifyAuth, requireTeacher, AuthenticatedRequest } from '../middleware/roleAuth.js';
 import { filterActiveStudents, isStudentCurrentlyEnrolled } from '../services/student-lifecycle.js';
 import ResultsEngineService from '../services/results-engine.service.js';
+import {
+  normalizeTeacherAssessmentScores,
+  resolveStoredAssessmentTotal,
+} from '../services/result-score-calculation.js';
 
 const router = Router();
 const prisma = new PrismaClient();
 const resultsEngine = new ResultsEngineService(prisma);
-
-const DEFAULT_WA_COMPONENTS = [
-  { id: 'ca', name: 'Continuous Assessment', maxScore: 20, weight: 20, sortOrder: 1 },
-  { id: 'test', name: 'Test', maxScore: 20, weight: 20, sortOrder: 2 },
-  { id: 'exam', name: 'Examination', maxScore: 60, weight: 60, sortOrder: 3 },
-];
-
-function getAssessmentComponents(componentData?: string | null) {
-  if (!componentData) return DEFAULT_WA_COMPONENTS;
-
-  try {
-    const parsed = JSON.parse(componentData);
-    const components = Array.isArray(parsed?.components) ? parsed.components : [];
-
-    if (components.length === 0) return DEFAULT_WA_COMPONENTS;
-
-    return [...components].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-  } catch {
-    return DEFAULT_WA_COMPONENTS;
-  }
-}
-
-function normalizeTeacherResultScores(
-  componentData: string | null,
-  score: {
-    caScore?: number | null;
-    testScore?: number | null;
-    examScore?: number | null;
-    totalScore?: number | null;
-  }
-) {
-  const components = getAssessmentComponents(componentData);
-  const rawScores = {
-    ca: score.caScore ?? null,
-    test: score.testScore ?? null,
-    exam: score.examScore ?? null,
-  };
-
-  const mappedScores: Record<string, number | null> = {};
-  for (let index = 0; index < components.length; index++) {
-    const component = components[index];
-    const id = (component.id ?? '').toString().toLowerCase();
-    const name = (component.name ?? '').toString().toLowerCase();
-    let value: number | null = null;
-
-    if (id.includes('ca') || name.includes('ca') || name.includes('continuous')) {
-      value = rawScores.ca;
-    } else if (id.includes('test') || name.includes('test')) {
-      value = rawScores.test;
-    } else if (id.includes('exam') || name.includes('exam') || name.includes('examination')) {
-      value = rawScores.exam;
-    } else if (index === 0) {
-      value = rawScores.ca;
-    } else if (index === 1) {
-      value = rawScores.test;
-    } else if (index === 2) {
-      value = rawScores.exam;
-    } else {
-      value = rawScores.ca ?? rawScores.test ?? rawScores.exam ?? null;
-    }
-
-    mappedScores[component.id] = value;
-  }
-
-  const allScoresPresent = Object.values(mappedScores).every(
-    (value) => value !== null && value !== undefined
-  );
-
-  const totalScore =
-    score.totalScore !== null && score.totalScore !== undefined
-      ? score.totalScore
-      : allScoresPresent
-      ? parseFloat(
-          components
-            .reduce((sum, component) => {
-              const componentValue = mappedScores[component.id] ?? 0;
-              return sum + (componentValue / component.maxScore) * component.weight;
-            }, 0)
-            .toFixed(1)
-        )
-      : null;
-
-  const scoresJson: Record<string, number> = {};
-  for (const component of components) {
-    const componentValue = mappedScores[component.id];
-    if (componentValue !== null && componentValue !== undefined) {
-      scoresJson[component.id] = componentValue;
-    }
-  }
-
-  return { totalScore, scoresJson };
-}
 
 // Apply authentication middleware to all teacher routes
 router.use(verifyAuth);
@@ -633,7 +545,7 @@ router.get('/assessments', async (req: AuthenticatedRequest, res) => {
           ).values(),
         ),
         isLocked: assessment.results.some((result) => result.lockedAt !== null),
-        canEdit: !assessment.results.some((result) => result.lockedAt !== null) && assessment.status !== 'PUBLISHED',
+        canEdit: !assessment.results.some((result) => result.lockedAt !== null) && assessment.status === 'DRAFT',
         studentCount: studentsByPhase.get(assessment.phase)?.size ?? 0,
         entryCount: assessment._count.results,
         subjectCount: new Set(assessment.results.map((result) => result.subjectId || result.subjectRef?.id || result.subjectRef?.name || result.subject).filter(Boolean)).size,
@@ -765,8 +677,16 @@ router.get('/assessments/:assessmentId', async (req: AuthenticatedRequest, res) 
     }
 
     const phaseClassIds = teacherClasses
-      .filter((teacherClass) => teacherClass.class.phase === assessment.phase)
+      .filter(
+        (teacherClass) =>
+          teacherClass.class.phase === assessment.phase &&
+          (!assessment.classId || teacherClass.classId === assessment.classId)
+      )
       .map((teacherClass) => teacherClass.classId);
+
+    if (phaseClassIds.length === 0) {
+      return res.status(403).json({ error: 'Not authorized to view this assessment class' });
+    }
 
     let eligibleClassIds = new Set<string>(phaseClassIds);
     let forcedSubjectName: string | null = null;
@@ -901,13 +821,7 @@ router.get('/assessments/:assessmentId', async (req: AuthenticatedRequest, res) 
           const subjectName =
             forcedSubjectName || result.subjectRef?.name || result.subject || 'Unknown';
 
-          const totalFromResult = result.totalScore ?? null;
-          const computedTotal =
-            totalFromResult !== null
-              ? totalFromResult
-              : result.caScore !== null && result.testScore !== null && result.examScore !== null
-              ? result.caScore + result.testScore + result.examScore
-              : null;
+          const computedTotal = resolveStoredAssessmentTotal(assessment.componentData, result);
 
           let grade = result.grade ?? null;
           if (!grade && computedTotal !== null) {
@@ -964,7 +878,7 @@ router.get('/assessments/:assessmentId', async (req: AuthenticatedRequest, res) 
       .filter(Boolean)
       .sort((a, b) => a.localeCompare(b));
 
-    const isLocked = activeAssessmentResults.some((result) => result.lockedAt !== null);
+    const isLocked = assessment.results.some((result) => result.lockedAt !== null);
 
     res.json({
       assessment: {
@@ -973,7 +887,7 @@ router.get('/assessments/:assessmentId', async (req: AuthenticatedRequest, res) 
         phase: assessment.phase,
         status: assessment.status,
         isLocked,
-        canEdit: !isLocked && assessment.status !== 'PUBLISHED',
+        canEdit: !isLocked && assessment.status === 'DRAFT',
         studentCount: uniqueStudentCount,
         entryCount: filteredResults.length,
         subjectCount: resultSubjects.length,
@@ -1133,8 +1047,36 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
       ? requestEntries
       : [];
 
-    if (!assessmentId || !Array.isArray(scores)) {
+    if (typeof assessmentId !== 'string' || !Array.isArray(scores) || scores.length === 0) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    if (
+      scores.some(
+        (score) =>
+          !score ||
+          typeof score !== 'object' ||
+          typeof score.pupilId !== 'string' ||
+          score.pupilId.trim().length === 0
+      )
+    ) {
+      return res.status(400).json({ error: 'Each result must include a pupil ID' });
+    }
+
+    if (
+      scores.some(
+        (score) =>
+          [score.caScore, score.testScore, score.examScore].every(
+            (value) => value === null || value === undefined
+          )
+      )
+    ) {
+      return res.status(400).json({ error: 'Each result must include at least one component score' });
+    }
+
+    const pupilIds = scores.map((score) => score.pupilId.trim());
+    if (new Set(pupilIds).size !== pupilIds.length) {
+      return res.status(400).json({ error: 'Duplicate pupils are not allowed in one score submission' });
     }
 
     // Verify assessment belongs to teacher's school
@@ -1144,6 +1086,19 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
 
     if (!assessment || assessment.schoolId !== schoolId) {
       return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (assessment.status !== 'DRAFT') {
+      return res.status(403).json({ error: 'Only draft assessments can be edited by teachers.' });
+    }
+
+    const existingAssessmentResults = await prisma.result.findMany({
+      where: { assessmentId },
+      select: { lockedAt: true },
+    });
+
+    if (existingAssessmentResults.some((result) => result.lockedAt !== null)) {
+      return res.status(403).json({ error: 'This assessment is locked and can no longer be edited.' });
     }
 
     const teacherClasses = await prisma.teacherClass.findMany({
@@ -1161,12 +1116,25 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
       },
     });
 
+    const classIdsInAssessmentPhase = teacherClasses
+      .filter(
+        (teacherClass) =>
+          teacherClass.class.phase === assessment.phase &&
+          (!assessment.classId || teacherClass.classId === assessment.classId)
+      )
+      .map((teacherClass) => teacherClass.classId);
+
+    if (classIdsInAssessmentPhase.length === 0) {
+      return res.status(403).json({ error: 'Not authorized to score this assessment class' });
+    }
+
     const eligiblePupilIds = new Set(
       (
         await prisma.pupil.findMany({
           where: {
             schoolId,
-            id: { in: scores.map((score) => score.pupilId).filter(Boolean) },
+            id: { in: pupilIds },
+            classId: { in: classIdsInAssessmentPhase },
             isActive: true,
             OR: [{ status: null }, { status: { not: 'INACTIVE' } }],
           },
@@ -1175,30 +1143,26 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
       ).map((pupil) => pupil.id)
     );
 
-    const filteredScores = scores.filter((score) => {
-      const pupilId = score.pupilId;
-      return typeof pupilId === 'string' && eligiblePupilIds.has(pupilId);
-    });
-
-    if (filteredScores.length === 0) {
-      return res.json({ success: true, results: [] });
+    if (eligiblePupilIds.size !== pupilIds.length) {
+      return res.status(403).json({
+        error: 'One or more pupils are inactive or outside your assigned assessment classes.',
+      });
     }
 
-    const existingAssessmentResults = await prisma.result.findMany({
-      where: { assessmentId },
-      select: { lockedAt: true },
-    });
-
-    const assessmentIsLocked = existingAssessmentResults.some((result) => result.lockedAt !== null);
-    const assessmentIsPublished = assessment.status === 'PUBLISHED';
-
-    if (assessmentIsPublished || assessmentIsLocked) {
-      return res.status(403).json({ error: 'This assessment is locked and can no longer be edited.' });
+    const filteredScores = scores.map((score, index) => ({
+      ...score,
+      pupilId: pupilIds[index],
+    }));
+    let normalizedScores;
+    try {
+      normalizedScores = filteredScores.map((score) =>
+        normalizeTeacherAssessmentScores(assessment.componentData, score)
+      );
+    } catch (error) {
+      return res.status(400).json({
+        error: error instanceof Error ? error.message : 'Invalid assessment score',
+      });
     }
-
-    const classIdsInAssessmentPhase = teacherClasses
-      .filter((teacherClass) => teacherClass.class.phase === assessment.phase)
-      .map((teacherClass) => teacherClass.classId);
 
     // If subject is specified, verify teacher is assigned to it
     if ((subjectId && typeof subjectId === 'string') || (subject && typeof subject === 'string')) {
@@ -1247,7 +1211,7 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
       const resolvedSubjectName = teacherSubjectAssignment.subject.name;
 
       // Bulk upsert results
-      const results = await Promise.all(
+      const results = await prisma.$transaction(
         filteredScores.map(
           (score: {
             pupilId: string;
@@ -1255,12 +1219,8 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
             testScore?: number | null;
             examScore?: number | null;
             totalScore?: number | null;
-          }) => {
-            const { totalScore, scoresJson } = normalizeTeacherResultScores(
-              assessment.componentData,
-              score
-            );
-
+          }, index: number) => {
+            const { totalScore, scoresJson } = normalizedScores[index];
             return prisma.result.upsert({
               where: {
                 assessmentId_pupilId_subject: {
@@ -1305,7 +1265,7 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
     }
 
     // Bulk upsert results
-    const results = await Promise.all(
+    const results = await prisma.$transaction(
       filteredScores.map(
         (score: {
           pupilId: string;
@@ -1313,12 +1273,8 @@ router.post('/results', async (req: AuthenticatedRequest, res) => {
           testScore?: number | null;
           examScore?: number | null;
           totalScore?: number | null;
-        }) => {
-          const { totalScore, scoresJson } = normalizeTeacherResultScores(
-            assessment.componentData,
-            score
-          );
-
+        }, index: number) => {
+          const { totalScore, scoresJson } = normalizedScores[index];
           return prisma.result.upsert({
             where: {
               assessmentId_pupilId_subject: {

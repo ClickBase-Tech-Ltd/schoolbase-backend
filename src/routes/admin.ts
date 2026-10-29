@@ -40,6 +40,7 @@ import { buildFeeInvoiceIssuanceKey, normalizeFeeScheduleName } from '../service
 import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
+import { resolveStoredAssessmentTotal } from '../services/result-score-calculation.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -8505,6 +8506,7 @@ router.get('/results/:id', async (req: Request, res: Response) => {
     // Historical assessment results remain visible even after a pupil leaves the school.
     const transformedResults = assessment.results.map((r) => ({
       ...r,
+      totalScore: resolveStoredAssessmentTotal(assessment.componentData, r),
       pupil: {
         ...r.pupil,
         name: `${r.pupil.firstName} ${r.pupil.lastName}`.trim(),
@@ -8624,6 +8626,8 @@ router.get('/results/:id', async (req: Request, res: Response) => {
             pupilId: result.pupil.id,
             pupilName: result.pupil.name,
             admissionNo: result.pupil.admissionNo ?? null,
+            isInactive:
+              result.pupil.isActive === false || result.pupil.status?.trim().toUpperCase() === 'INACTIVE',
             subjectId,
             subjectName,
             terms: previousTerms.map((term) => {

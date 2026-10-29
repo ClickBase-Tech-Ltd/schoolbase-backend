@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { jwtVerify } from 'jose';
 import { ResultsDomainService } from '../domain/results/ResultsDomainService.js';
+import { resolveStoredAssessmentTotal } from '../services/result-score-calculation.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { resolveSchoolScope } from '../services/security-context.js';
 
@@ -94,36 +95,8 @@ router.post('/calculate-grades/:assessmentId', async (req: Request, res: Respons
     const config = JSON.parse(assessment.componentData);
     const components = config.components || [];
 
-    const calculateResultTotal = (result: any): number | null => {
-      if (result.totalScore !== null && result.totalScore !== undefined) {
-        return result.totalScore;
-      }
-
-      if (assessment.componentData) {
-        try {
-          const config = JSON.parse(assessment.componentData);
-          const components = config.components || [];
-          if (result.scores) {
-            const scores = typeof result.scores === 'string' ? JSON.parse(result.scores) : result.scores;
-            if (scores && typeof scores === 'object') {
-              return resultsDomain.calculateTotalScore(scores, components, schoolId);
-            }
-          }
-        } catch {
-          // ignore parse issues and fallback to direct fields
-        }
-      }
-
-      if (
-        result.caScore !== null && result.caScore !== undefined &&
-        result.testScore !== null && result.testScore !== undefined &&
-        result.examScore !== null && result.examScore !== undefined
-      ) {
-        return result.caScore + result.testScore + result.examScore;
-      }
-
-      return null;
-    };
+    const calculateResultTotal = (result: any): number | null =>
+      resolveStoredAssessmentTotal(assessment.componentData, result);
 
     // Calculate grades for all results
     let updateCount = 0;

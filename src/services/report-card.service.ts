@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import resolveReportSignatory from './signatory-resolver.js';
 import { getDistinctStudentCount } from './report-card-statistics.js';
+import { resolveStoredAssessmentTotal } from './result-score-calculation.js';
 
 interface SubjectResult {
   subjectId: string;
@@ -303,8 +304,8 @@ class ReportCardService {
     }
 
     // Get pupil
-    const pupil = await this.prisma.pupil.findUnique({
-      where: { id: pupilId },
+    const pupil = await this.prisma.pupil.findFirst({
+      where: { id: pupilId, schoolId },
       include: { class: true },
     });
 
@@ -349,11 +350,8 @@ class ReportCardService {
         continue;
       }
 
-      const totalScore =
-        result.totalScore ??
-        (result.caScore ?? 0) +
-          (result.testScore ?? 0) +
-          (result.examScore ?? 0);
+      const totalScore = resolveStoredAssessmentTotal(assessment.componentData, result);
+      if (totalScore === null) continue;
       const grade = await this.calculateGrade(schoolId, totalScore, result.grade);
 
       subjects.push({
@@ -375,7 +373,7 @@ class ReportCardService {
     const thirdTermHistory = await this.getThirdTermHistory(assessment, schoolId, pupil.id, subjects);
 
     // Calculate statistics
-    const validScores = subjects.filter((s) => s.totalScore > 0).map((s) => s.totalScore);
+    const validScores = subjects.map((subject) => subject.totalScore);
     const averageScore =
       validScores.length > 0
         ? Math.round((validScores.reduce((a, b) => a + b, 0) / validScores.length) * 100) / 100
@@ -538,7 +536,7 @@ class ReportCardService {
 
     // Get all results for this assessment
     const results = await this.prisma.result.findMany({
-      where: { assessmentId, assessment: { schoolId } },
+      where: { assessmentId, assessment: { schoolId }, pupil: { schoolId } },
       select: { pupilId: true },
       distinct: ['pupilId'],
     });
@@ -586,7 +584,7 @@ class ReportCardService {
 
     // Get all unique students in this assessment
     const results = await this.prisma.result.findMany({
-      where: { assessmentId, assessment: { schoolId } },
+      where: { assessmentId, assessment: { schoolId }, pupil: { schoolId } },
       include: {
         pupil: true,
       },
@@ -640,20 +638,13 @@ class ReportCardService {
 
     // Get all results
     const results = await this.prisma.result.findMany({
-      where: { assessmentId, assessment: { schoolId } },
+      where: { assessmentId, assessment: { schoolId }, pupil: { schoolId } },
     });
 
     const computedResults = results.map((r) => {
-      const total =
-        r.totalScore !== null
-          ? r.totalScore
-          : r.caScore !== null && r.testScore !== null && r.examScore !== null
-          ? r.caScore + r.testScore + r.examScore
-          : null;
-
       return {
         ...r,
-        computedTotal: total,
+        computedTotal: resolveStoredAssessmentTotal(assessment.componentData, r),
       };
     });
 
