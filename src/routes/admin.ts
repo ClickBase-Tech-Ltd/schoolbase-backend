@@ -29,7 +29,7 @@ import { createAdminRouteAuthorization } from '../middleware/adminRouteAuthoriza
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../services/student-import.js';
-import { buildActiveStudentWhere, buildStudentRosterWhere, filterActiveStudents, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
+import { buildActiveStudentWhere, buildStudentRosterWhere, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
 import { reserveNextStaffNumber } from '../services/staff-number.js';
 import { getBillingMarket } from '../services/billing-markets.js';
@@ -8502,17 +8502,8 @@ router.get('/results/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Assessment not found' });
     }
 
-    const activeAssessmentResults = assessment.results.filter((result) =>
-      filterActiveStudents([
-        {
-          isActive: result.pupil?.isActive ?? true,
-          status: result.pupil?.status ?? null,
-        },
-      ]).length > 0
-    );
-
-    // Transform results to include full name
-    const transformedResults = activeAssessmentResults.map((r) => ({
+    // Historical assessment results remain visible even after a pupil leaves the school.
+    const transformedResults = assessment.results.map((r) => ({
       ...r,
       pupil: {
         ...r.pupil,
@@ -8673,7 +8664,7 @@ router.get('/results/:id', async (req: Request, res: Response) => {
 
     // Ensure publishedAt is available at the assessment level.
     const fallbackPublishedAt =
-      activeAssessmentResults.find((r: any) => r.publishedAt)?.publishedAt || null;
+      assessment.results.find((r) => r.publishedAt)?.publishedAt || null;
 
     res.json({
       ...assessment,
