@@ -659,6 +659,7 @@ class ReportCardService {
         assessmentId,
         totalStudents: distinctStudentCount,
         totalResults: results.length,
+        scoredResults: scores.length,
         statistics: {
           highestScore: 0,
           lowestScore: 0,
@@ -688,7 +689,8 @@ class ReportCardService {
 
     // Grade distribution
     const gradeDistribution: Record<string, number> = {};
-    results.forEach((r) => {
+    computedResults.forEach((r) => {
+      if (r.computedTotal === null) return;
       if (r.grade) {
         gradeDistribution[r.grade] = (gradeDistribution[r.grade] || 0) + 1;
       }
@@ -700,6 +702,7 @@ class ReportCardService {
       assessmentId,
       totalStudents: distinctStudentCount,
       totalResults: results.length,
+      scoredResults: scores.length,
       statistics: {
         highestScore: Math.max(...scores),
         lowestScore: Math.min(...scores),
