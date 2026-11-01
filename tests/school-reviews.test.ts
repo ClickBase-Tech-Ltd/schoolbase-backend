@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { isPubliclyEligibleSchoolReview, isTrustedSchoolBaseOrigin, redactSchoolName, schoolReviewPublicIdentity, validateSchoolReviewSubmission } from '../src/services/school-reviews.js';
+import { isPubliclyEligibleSchoolReview, isTrustedSchoolBaseOrigin, redactSchoolName, schoolReviewPublicIdentity, validateAssistedReviewAuthorization, validateSchoolReviewSubmission } from '../src/services/school-reviews.js';
 
 const validInput = {
   rating: 5,
@@ -23,6 +23,10 @@ assert.equal(validateSchoolReviewSubmission({ ...validInput, reviewText: 'x'.rep
 assert.equal(validateSchoolReviewSubmission({ ...validInput, reviewText: '<script>alert(1)</script>' }).valid, true);
 assert.equal(validateSchoolReviewSubmission({ ...validInput, publishConsent: false, schoolNameConsent: true }).valid, false);
 assert.equal(validateSchoolReviewSubmission({ ...validInput, schoolLogoConsent: 'yes' }).valid, false);
+assert.equal(validateAssistedReviewAuthorization({ schoolRepresentativeConsentConfirmed: true, consentSource: 'SUPPORT_TICKET' }).valid, true);
+assert.equal(validateAssistedReviewAuthorization({ schoolRepresentativeConsentConfirmed: true, consentSource: 'WHATSAPP' }).valid, true);
+assert.equal(validateAssistedReviewAuthorization({ schoolRepresentativeConsentConfirmed: false, consentSource: 'WHATSAPP' }).valid, false);
+assert.equal(validateAssistedReviewAuthorization({ schoolRepresentativeConsentConfirmed: true, consentSource: 'EMAIL' }).valid, false);
 
 assert.equal(isPubliclyEligibleSchoolReview({ status: 'PENDING', publishConsent: true, consentRevokedAt: null }), false);
 assert.equal(isPubliclyEligibleSchoolReview({ status: 'REJECTED', publishConsent: true, consentRevokedAt: null }), false);

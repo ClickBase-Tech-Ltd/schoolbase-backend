@@ -8,6 +8,26 @@ export type SchoolReviewSubmission = {
   schoolLogoConsent: boolean;
 };
 
+export type SchoolReviewConsentSource = 'SUPPORT_TICKET' | 'WHATSAPP';
+
+export function validateAssistedReviewAuthorization(input: unknown):
+  | { valid: true; source: SchoolReviewConsentSource }
+  | { valid: false; error: string } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, error: 'Confirm the school representative authorized this assisted submission.' };
+  }
+
+  const value = input as Record<string, unknown>;
+  if (value.schoolRepresentativeConsentConfirmed !== true) {
+    return { valid: false, error: 'Confirm the school representative authorized this assisted submission.' };
+  }
+  if (value.consentSource !== 'SUPPORT_TICKET' && value.consentSource !== 'WHATSAPP') {
+    return { valid: false, error: 'Choose where the school representative provided permission.' };
+  }
+
+  return { valid: true, source: value.consentSource };
+}
+
 export type SchoolReviewValidation =
   | { valid: true; value: SchoolReviewSubmission }
   | { valid: false; error: string };

@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { PrismaClient, SchoolReviewStatus } from '@prisma/client';
 import { createHmac, randomUUID } from 'node:crypto';
 import { verifyAuth, type AuthenticatedRequest } from '../middleware/roleAuth.js';
-import { isPubliclyEligibleSchoolReview, isTrustedSchoolBaseOrigin, redactSchoolName, schoolReviewPublicIdentity, validateSchoolReviewSubmission } from '../services/school-reviews.js';
+import { isPubliclyEligibleSchoolReview, isTrustedSchoolBaseOrigin, redactSchoolName, schoolReviewPublicIdentity, validateAssistedReviewAuthorization, validateSchoolReviewSubmission } from '../services/school-reviews.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { jwtVerify } from 'jose';
 
@@ -128,15 +128,18 @@ router.get('/public', async (req, res) => {
 
 router.get('/mine', verifyAuth, async (req: Request, res: Response) => {
   const user = (req as AuthenticatedRequest).user;
+  const isAssistedSubmission = user?.role === 'SCHOOL_ADMIN' && user.sessionPurpose === 'SCHOOL_IMPERSONATION';
   if (user?.role !== 'SCHOOL_ADMIN' || !user.userId || !user.schoolId) {
     return res.status(403).json({ error: 'School administrator access required.' });
   }
 
-  const membership = await prisma.user.findFirst({
-    where: { id: user.userId, schoolId: user.schoolId, role: 'SCHOOL_ADMIN', isActive: true },
-    select: { id: true },
-  });
-  if (!membership) return res.status(403).json({ error: 'School administrator access required.' });
+  if (!isAssistedSubmission) {
+    const membership = await prisma.user.findFirst({
+      where: { id: user.userId, schoolId: user.schoolId, role: 'SCHOOL_ADMIN', isActive: true },
+      select: { id: true },
+    });
+    if (!membership) return res.status(403).json({ error: 'School administrator access required.' });
+  }
 
   try {
     const review = await prisma.schoolReview.findUnique({
@@ -154,7 +157,7 @@ router.get('/mine', verifyAuth, async (req: Request, res: Response) => {
         updatedAt: true,
       },
     });
-    return res.json({ review });
+    return res.json({ review, assistedSubmission: isAssistedSubmission });
   } catch (error) {
     console.error('[school-reviews] own review lookup failed:', error instanceof Error ? error.message : 'unknown error');
     return res.status(500).json({ error: 'Unable to load your review.' });
@@ -164,18 +167,25 @@ router.get('/mine', verifyAuth, async (req: Request, res: Response) => {
 router.put('/mine', verifyAuth, async (req: Request, res: Response) => {
   if (!isTrustedSchoolBaseOrigin(req.get('origin'))) return res.status(403).json({ error: 'Request origin is not allowed.' });
   const user = (req as AuthenticatedRequest).user;
+  const isAssistedSubmission = user?.role === 'SCHOOL_ADMIN' && user.sessionPurpose === 'SCHOOL_IMPERSONATION';
   if (user?.role !== 'SCHOOL_ADMIN' || !user.userId || !user.schoolId) {
     return res.status(403).json({ error: 'School administrator access required.' });
+  }
+  const assistedAuthorization = isAssistedSubmission ? validateAssistedReviewAuthorization(req.body) : null;
+  if (assistedAuthorization && !assistedAuthorization.valid) {
+    return res.status(400).json({ error: assistedAuthorization.error });
   }
   if (!(await allowMutation(`school:${user.schoolId}`, 5, 60 * 60 * 1000))) {
     return res.status(429).json({ error: 'Please wait before submitting another review update.' });
   }
 
-  const membership = await prisma.user.findFirst({
-    where: { id: user.userId, schoolId: user.schoolId, role: 'SCHOOL_ADMIN', isActive: true },
-    select: { id: true },
-  });
-  if (!membership) return res.status(403).json({ error: 'School administrator access required.' });
+  if (!isAssistedSubmission) {
+    const membership = await prisma.user.findFirst({
+      where: { id: user.userId, schoolId: user.schoolId, role: 'SCHOOL_ADMIN', isActive: true },
+      select: { id: true },
+    });
+    if (!membership) return res.status(403).json({ error: 'School administrator access required.' });
+  }
 
   const validation = validateSchoolReviewSubmission(req.body);
   if (!validation.valid) return res.status(400).json({ error: validation.error });
@@ -235,9 +245,20 @@ router.put('/mine', verifyAuth, async (req: Request, res: Response) => {
           outcome: 'SUCCESS',
           resourceType: 'School review',
           resourceId: saved.id,
-          summary: 'Submitted or updated a SchoolBase review',
-          actorRole: 'SCHOOL_ADMIN',
-          details: JSON.stringify({ rating, reviewTextPresent: Boolean(reviewText), publishConsent }),
+          summary: isAssistedSubmission
+            ? 'Recorded a school review on behalf of the school'
+            : 'Submitted or updated a SchoolBase review',
+          actorRole: isAssistedSubmission ? 'PLATFORM_ADMIN' : 'SCHOOL_ADMIN',
+          details: JSON.stringify({
+            rating,
+            reviewTextPresent: Boolean(reviewText),
+            publishConsent,
+            ...(assistedAuthorization?.valid ? {
+              submissionMode: 'ASSISTED',
+              consentSource: assistedAuthorization.source,
+              schoolRepresentativeConsentConfirmed: true,
+            } : {}),
+          }),
         },
       });
       return saved;
@@ -284,7 +305,7 @@ router.get('/moderation', async (req, res) => {
           moderatedAt: true,
           moderationNote: true,
           school: { select: { name: true, logoUrl: true } },
-          submittedBy: { select: { name: true, email: true } },
+          submittedBy: { select: { name: true, email: true, role: true } },
           moderatedBy: { select: { name: true } },
         },
       }),
