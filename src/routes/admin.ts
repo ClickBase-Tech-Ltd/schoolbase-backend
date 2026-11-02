@@ -10683,6 +10683,124 @@ router.delete('/class-subjects/:classId/:subjectId', async (req: Request, res: R
   }
 });
 
+// PUT /api/admin/classes/:classId/subjects - Replace a class curriculum atomically
+router.put('/classes/:classId/subjects', async (req: Request, res: Response) => {
+  try {
+    const { classId } = req.params;
+    const schoolId = await resolveSchoolId(req);
+    const subjectIds = (req.body as { subjectIds?: unknown } | null)?.subjectIds;
+
+    if (!schoolId) {
+      return res.status(401).json({ error: 'School ID required' });
+    }
+
+    if (!Array.isArray(subjectIds) || subjectIds.some((id) => typeof id !== 'string' || !id.trim())) {
+      return res.status(400).json({ error: 'subjectIds must be an array of subject IDs' });
+    }
+
+    const uniqueSubjectIds = [...new Set(subjectIds as string[])];
+    const assignments = await prisma.$transaction(async (tx) => {
+      const classItem = await tx.class.findFirst({ where: { id: classId, schoolId }, select: { id: true } });
+      if (!classItem) {
+        throw Object.assign(new Error('Class not found'), { statusCode: 404 });
+      }
+
+      const ownedSubjects = uniqueSubjectIds.length
+        ? await tx.subject.findMany({
+            where: { id: { in: uniqueSubjectIds }, schoolId },
+            select: { id: true },
+          })
+        : [];
+      if (ownedSubjects.length !== uniqueSubjectIds.length) {
+        throw Object.assign(new Error('One or more subjects do not belong to this school.'), { statusCode: 400 });
+      }
+
+      await tx.subjectClass.deleteMany({ where: { classId, schoolId } });
+      if (uniqueSubjectIds.length) {
+        await tx.subjectClass.createMany({
+          data: uniqueSubjectIds.map((subjectId) => ({ schoolId, classId, subjectId })),
+        });
+      }
+
+      return tx.subjectClass.findMany({
+        where: { classId, schoolId },
+        include: { class: true, subject: true },
+        orderBy: { subject: { name: 'asc' } },
+      });
+    });
+
+    res.json({ subjectClasses: assignments });
+  } catch (error) {
+    const statusCode = typeof error === 'object' && error !== null && 'statusCode' in error
+      ? Number(error.statusCode)
+      : 500;
+    if (statusCode !== 500) {
+      return res.status(statusCode).json({ error: (error as Error).message });
+    }
+    console.error('Error updating class curriculum:', error);
+    res.status(500).json({ error: 'Failed to update class curriculum' });
+  }
+});
+
+// PUT /api/admin/subjects/:id/classes - Replace all class assignments for a subject atomically
+router.put('/subjects/:id/classes', async (req: Request, res: Response) => {
+  try {
+    const { id: subjectId } = req.params;
+    const schoolId = await resolveSchoolId(req);
+    const classIds = (req.body as { classIds?: unknown } | null)?.classIds;
+
+    if (!schoolId) {
+      return res.status(401).json({ error: 'School ID required' });
+    }
+
+    if (!Array.isArray(classIds) || classIds.some((id) => typeof id !== 'string' || !id.trim())) {
+      return res.status(400).json({ error: 'classIds must be an array of class IDs' });
+    }
+
+    const uniqueClassIds = [...new Set(classIds as string[])];
+    const assignments = await prisma.$transaction(async (tx) => {
+      const subject = await tx.subject.findFirst({ where: { id: subjectId, schoolId }, select: { id: true } });
+      if (!subject) {
+        throw Object.assign(new Error('Subject not found'), { statusCode: 404 });
+      }
+
+      const ownedClasses = uniqueClassIds.length
+        ? await tx.class.findMany({
+            where: { id: { in: uniqueClassIds }, schoolId },
+            select: { id: true },
+          })
+        : [];
+      if (ownedClasses.length !== uniqueClassIds.length) {
+        throw Object.assign(new Error('One or more classes do not belong to this school.'), { statusCode: 400 });
+      }
+
+      await tx.subjectClass.deleteMany({ where: { subjectId, schoolId } });
+      if (uniqueClassIds.length) {
+        await tx.subjectClass.createMany({
+          data: uniqueClassIds.map((classId) => ({ schoolId, classId, subjectId })),
+        });
+      }
+
+      return tx.subjectClass.findMany({
+        where: { subjectId, schoolId },
+        include: { class: true, subject: true },
+        orderBy: { class: { name: 'asc' } },
+      });
+    });
+
+    res.json({ subjectClasses: assignments });
+  } catch (error) {
+    const statusCode = typeof error === 'object' && error !== null && 'statusCode' in error
+      ? Number(error.statusCode)
+      : 500;
+    if (statusCode !== 500) {
+      return res.status(statusCode).json({ error: (error as Error).message });
+    }
+    console.error('Error updating subject class assignments:', error);
+    res.status(500).json({ error: 'Failed to update subject class assignments' });
+  }
+});
+
 // GET /api/admin/attendance/data - Get attendance records for class and date
 router.get('/attendance/data', async (req: Request, res: Response) => {
   try {
