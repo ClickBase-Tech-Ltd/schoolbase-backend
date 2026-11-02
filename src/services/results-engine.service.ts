@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { isStudentCurrentlyEnrolled } from './student-lifecycle.js';
+import { isPassingGrade, resolveGradeForScore } from './result-score-calculation.js';
 
 interface GradeResult {
   score: number;
@@ -89,36 +90,11 @@ export default class ResultsEngineService {
    * Uses school's GradingScale or defaults
    */
   async calculateGrade(schoolId: string, totalScore: number): Promise<string> {
-    // Fetch school's grading scale
     const gradingScales = await this.prisma.gradingScale.findMany({
       where: { schoolId },
       orderBy: { minScore: 'desc' },
     });
-
-    // Use custom grading scale if available
-    if (gradingScales.length > 0) {
-      for (const scale of gradingScales) {
-        if (totalScore >= scale.minScore && totalScore <= scale.maxScore) {
-          return scale.grade;
-        }
-      }
-      // If no match, return lowest grade
-      return gradingScales[gradingScales.length - 1].grade;
-    }
-
-    // DEFAULT GRADING SCALE
-    // 70 - 100 = A
-    // 60 - 69 = B
-    // 50 - 59 = C
-    // 45 - 49 = D
-    // 40 - 44 = E
-    // 0 - 39 = F
-    if (totalScore >= 70) return 'A';
-    if (totalScore >= 60) return 'B';
-    if (totalScore >= 50) return 'C';
-    if (totalScore >= 45) return 'D';
-    if (totalScore >= 40) return 'E';
-    return 'F';
+    return resolveGradeForScore(totalScore, gradingScales);
   }
 
   /**
@@ -543,12 +519,17 @@ export default class ResultsEngineService {
     });
 
     // Calculate statistics
-    const totalScores = assessment.results
-      .map((r) => r.totalScore || 0)
-      .filter((s) => s > 0);
-
-    const passCount = assessment.results.filter(
-      (r) => (r.totalScore || 0) >= 40
+    const scoredResults = assessment.results.filter(
+      (result) => typeof result.totalScore === 'number' && Number.isFinite(result.totalScore),
+    );
+    const totalScores = scoredResults.map((result) => result.totalScore!);
+    const gradingScales = await this.prisma.gradingScale.findMany({
+      where: { schoolId },
+      orderBy: { minScore: 'desc' },
+      select: { grade: true, minScore: true, maxScore: true },
+    });
+    const passCount = scoredResults.filter((result) =>
+      isPassingGrade(resolveGradeForScore(result.totalScore!, gradingScales)),
     ).length;
 
     const stats = {
@@ -556,15 +537,15 @@ export default class ResultsEngineService {
       totalStudents: pupils.length,
       totalSubjects: subjects.length,
       highestScore: Math.max(...totalScores, 0),
-      lowestScore: Math.min(...totalScores, 0),
+      lowestScore: totalScores.length > 0 ? Math.min(...totalScores) : 0,
       averageScore:
         totalScores.length > 0
           ? Math.round((totalScores.reduce((a, b) => a + b, 0) / totalScores.length) * 100) / 100
           : 0,
       passRate:
-        assessment.results.length > 0
+        scoredResults.length > 0
           ? Math.round(
-              ((passCount / assessment.results.length) * 100 * 100) / 100
+              ((passCount / scoredResults.length) * 100 * 100) / 100
             )
           : 0,
     };

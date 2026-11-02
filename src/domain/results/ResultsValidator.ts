@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { ResultWorkflowState } from './ResultWorkflowState.js';
 import { isStudentCurrentlyEnrolled } from '../../services/student-lifecycle.js';
 import {
@@ -28,9 +28,9 @@ export interface ValidationResult {
  * No validation logic should exist in routes.
  */
 export class ResultsValidator {
-  private prisma: PrismaClient;
+  private prisma: PrismaClient | Prisma.TransactionClient;
 
-  constructor(prismaClient?: PrismaClient) {
+  constructor(prismaClient?: PrismaClient | Prisma.TransactionClient) {
     this.prisma = prismaClient || new PrismaClient();
   }
 

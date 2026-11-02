@@ -1,8 +1,9 @@
 import { PrismaClient } from '@prisma/client';
 import resolveReportSignatory from './signatory-resolver.js';
 import { getDistinctStudentCount } from './report-card-statistics.js';
-import { resolveStoredAssessmentTotal } from './result-score-calculation.js';
+import { isPassingGrade, resolveGradeForScore, resolveStoredAssessmentTotal } from './result-score-calculation.js';
 import { buildReportCardAttendanceSummary, isReportCardRating, readReportCardSectionsConfig, type ReportCardAttendanceSummary } from './report-card-sections.js';
+import { BulkReportCardGenerationError, generateCompleteBulkReportCards } from './report-card-bulk.js';
 
 interface ReportCardSections {
   affective?: Record<string, string>;
@@ -108,29 +109,12 @@ class ReportCardService {
     this.prisma = prismaClient || new PrismaClient();
   }
 
-  private async calculateGrade(schoolId: string, totalScore: number, storedGrade: string | null): Promise<string> {
+  private async calculateGrade(schoolId: string, totalScore: number): Promise<string> {
     const gradingScales = await this.prisma.gradingScale.findMany({
       where: { schoolId },
       orderBy: { minScore: 'desc' },
     });
-
-    if (gradingScales.length > 0) {
-      for (const scale of gradingScales) {
-        if (totalScore >= scale.minScore && totalScore <= scale.maxScore) {
-          return scale.grade;
-        }
-      }
-
-      return gradingScales[gradingScales.length - 1].grade;
-    }
-
-    if (totalScore >= 70) return 'A';
-    if (totalScore >= 60) return 'B';
-    if (totalScore >= 50) return 'C';
-    if (totalScore >= 45) return 'D';
-    if (totalScore >= 40) return 'E';
-
-    return storedGrade || 'F';
+    return resolveGradeForScore(totalScore, gradingScales);
   }
 
   private async getThirdTermHistory(
@@ -452,7 +436,7 @@ class ReportCardService {
 
       const totalScore = resolveStoredAssessmentTotal(assessment.componentData, result);
       if (totalScore === null) continue;
-      const grade = await this.calculateGrade(schoolId, totalScore, result.grade);
+      const grade = await this.calculateGrade(schoolId, totalScore);
 
       subjects.push({
         subjectId: result.subjectId || '',
@@ -479,7 +463,7 @@ class ReportCardService {
         ? Math.round((validScores.reduce((a, b) => a + b, 0) / validScores.length) * 100) / 100
         : 0;
 
-    const passCount = subjects.filter((s) => s.totalScore >= 40).length;
+    const passCount = subjects.filter((subject) => isPassingGrade(subject.grade)).length;
     const passRate =
       subjects.length > 0
         ? Math.round((passCount / subjects.length) * 100 * 100) / 100
@@ -644,27 +628,25 @@ class ReportCardService {
     });
 
     // Generate report card for each student
-    const reportCards: ReportCardData[] = [];
-
-    for (const result of results) {
-      try {
-        const reportCard = await this.generateReportCard(
+    try {
+      return await generateCompleteBulkReportCards(
+        results.map((result) => result.pupilId),
+        (pupilId) => this.generateReportCard(
           assessmentId,
-          result.pupilId,
+          pupilId,
           schoolId,
           explicitSignatoryId ?? null,
-          explicitSignatoryMode ?? null
-        );
-        reportCards.push(reportCard);
-      } catch (error) {
-        console.error(
-          `Error generating report card for pupil ${result.pupilId}:`,
-          error
-        );
+          explicitSignatoryMode ?? null,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof BulkReportCardGenerationError) {
+        for (const failure of error.failures) {
+          console.error(`Error generating report card for pupil ${failure.pupilId}:`, failure.error);
+        }
       }
+      throw error;
     }
-
-    return reportCards;
   }
 
   /**
@@ -743,10 +725,17 @@ class ReportCardService {
       where: { assessmentId, assessment: { schoolId }, pupil: { schoolId } },
     });
 
-    const computedResults = results.map((r) => {
+    const gradingScales = await this.prisma.gradingScale.findMany({
+      where: { schoolId },
+      orderBy: { minScore: 'desc' },
+      select: { grade: true, minScore: true, maxScore: true },
+    });
+    const computedResults = results.map((result) => {
+      const computedTotal = resolveStoredAssessmentTotal(assessment.componentData, result);
       return {
-        ...r,
-        computedTotal: resolveStoredAssessmentTotal(assessment.componentData, r),
+        ...result,
+        computedTotal,
+        computedGrade: computedTotal === null ? null : resolveGradeForScore(computedTotal, gradingScales),
       };
     });
 
@@ -793,12 +782,14 @@ class ReportCardService {
     const gradeDistribution: Record<string, number> = {};
     computedResults.forEach((r) => {
       if (r.computedTotal === null) return;
-      if (r.grade) {
-        gradeDistribution[r.grade] = (gradeDistribution[r.grade] || 0) + 1;
+      if (r.computedGrade) {
+        gradeDistribution[r.computedGrade] = (gradeDistribution[r.computedGrade] || 0) + 1;
       }
     });
 
-    const passCount = scores.filter((s) => s >= 40).length;
+    const passCount = computedResults.filter(
+      (result) => result.computedTotal !== null && isPassingGrade(result.computedGrade),
+    ).length;
 
     return {
       assessmentId,

@@ -17,6 +17,33 @@ export interface StoredAssessmentResult extends RawAssessmentScores {
   scores?: string | null;
 }
 
+export interface GradeBand {
+  grade: string;
+  minScore: number;
+  maxScore: number;
+}
+
+export function resolveGradeForScore(totalScore: number, gradingScales: GradeBand[]): string {
+  if (gradingScales.length > 0) {
+    const matchingScale = gradingScales.find(
+      (scale) => totalScore >= scale.minScore && totalScore <= scale.maxScore,
+    );
+    return matchingScale?.grade ?? gradingScales[gradingScales.length - 1].grade;
+  }
+
+  if (totalScore >= 70) return 'A';
+  if (totalScore >= 60) return 'B';
+  if (totalScore >= 50) return 'C';
+  if (totalScore >= 45) return 'D';
+  if (totalScore >= 40) return 'E';
+  return 'F';
+}
+
+export function isPassingGrade(grade: string | null | undefined): boolean {
+  if (!grade?.trim()) return false;
+  return grade.trim().toUpperCase() !== 'F';
+}
+
 export const DEFAULT_ASSESSMENT_COMPONENTS: AssessmentScoreComponent[] = [
   { id: 'ca', name: 'Continuous Assessment', maxScore: 20, weight: 20, sortOrder: 1 },
   { id: 'test', name: 'Test', maxScore: 20, weight: 20, sortOrder: 2 },
