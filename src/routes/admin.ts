@@ -8461,6 +8461,14 @@ router.get('/results/:id', async (req: Request, res: Response) => {
     const assessment = await prisma.assessment.findFirst({
       where: { id, schoolId },
       include: {
+        class: {
+          select: {
+            id: true,
+            name: true,
+            arm: true,
+            phase: true,
+          },
+        },
         term: {
           include: {
             academicYear: {

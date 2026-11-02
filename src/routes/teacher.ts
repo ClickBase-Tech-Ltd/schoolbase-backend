@@ -577,6 +577,7 @@ router.get('/assessments/:assessmentId', async (req: AuthenticatedRequest, res) 
       include: {
         class: {
           select: {
+            id: true,
             name: true,
             phase: true,
             pupils: {
@@ -886,6 +887,13 @@ router.get('/assessments/:assessmentId', async (req: AuthenticatedRequest, res) 
         name: assessment.name,
         phase: assessment.phase,
         status: assessment.status,
+        termId: assessment.termId,
+        classes: teacherClasses
+          .filter((teacherClass) => teacherClass.class.phase === assessment.phase)
+          .map((teacherClass) => ({
+            id: teacherClass.class.id,
+            name: teacherClass.class.name,
+          })),
         isLocked,
         canEdit: !isLocked && assessment.status === 'DRAFT',
         studentCount: uniqueStudentCount,

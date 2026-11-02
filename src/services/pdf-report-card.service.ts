@@ -40,6 +40,24 @@ interface ReportCardData {
   totalSubjects: number;
   teacherRemark: string | null;
   principalRemark: string | null;
+  reportCardSections?: {
+    affective?: Record<string, string>;
+    psychomotor?: Record<string, string>;
+    teacherCommentsEnabled?: boolean;
+    principalCommentsEnabled?: boolean;
+    termPrincipalRemark?: string | null;
+    attendance?: {
+      present: number;
+      late: number;
+      absent: number;
+      excused: number;
+      recordedDays: number;
+      classRecordedDays: number;
+      percentage: number | null;
+      coverageComplete: boolean;
+      unavailableReason: string | null;
+    };
+  };
   statistics: {
     highestScore: number;
     lowestScore: number;
@@ -169,6 +187,21 @@ class PDFReportCardService {
 
     const subjects = reportCard.subjects as ReportCardSubject[];
     const totalLabel = 'Total';
+    const formatRatings = (ratings?: Record<string, string>) => ratings
+      ? Object.entries(ratings).length
+        ? Object.entries(ratings)
+        .map(([indicator, rating]) => `<div><strong>${this.escapeHtml(indicator)}:</strong> ${this.escapeHtml(rating.replace(/_/g, ' ').toLowerCase())}</div>`)
+        .join('')
+        : '<div>Not assessed</div>'
+      : '';
+    const sections = reportCard.reportCardSections;
+    const optionalSectionsHtml = sections ? `
+      ${sections.affective ? `<div class="remark-box"><div class="remark-title">AFFECTIVE DEVELOPMENT</div>${formatRatings(sections.affective)}</div>` : ''}
+      ${sections.psychomotor ? `<div class="remark-box"><div class="remark-title">PSYCHOMOTOR SKILLS</div>${formatRatings(sections.psychomotor)}</div>` : ''}
+      ${sections.attendance && sections.attendance.classRecordedDays > 0 ? `<div class="remark-box"><div class="remark-title">ATTENDANCE</div><div>${sections.attendance.percentage !== null
+        ? `${sections.attendance.percentage}% (${sections.attendance.present + sections.attendance.late} of ${sections.attendance.present + sections.attendance.late + sections.attendance.absent} recorded school days)`
+        : `${sections.attendance.recordedDays} pupil attendance records across ${sections.attendance.classRecordedDays} class attendance days`}</div>${sections.attendance.unavailableReason ? `<div>${this.escapeHtml(sections.attendance.unavailableReason)}</div>` : ''}</div>` : ''}
+    ` : '';
 
     const subjectsHtml = subjects
       .map((subject) => `
@@ -346,7 +379,7 @@ class PDFReportCardService {
             }
             .summary-grid {
               display: grid;
-              grid-template-columns: repeat(4, 1fr);
+              grid-template-columns: repeat(${reportCard.reportCardSections?.attendance ? 5 : 4}, 1fr);
               gap: 8px;
               margin: 14px 0;
               font-size: 10px;
@@ -448,9 +481,17 @@ class PDFReportCardService {
                 <div class="summary-box"><div class="name">Position</div><div class="value">${summaryPosition}</div></div>
                 <div class="summary-box"><div class="name">Subjects</div><div class="value">${reportCard.totalSubjects}</div></div>
                 <div class="summary-box"><div class="name">Pass Rate</div><div class="value">${reportCard.statistics.passRate.toFixed(0)}%</div></div>
+                ${reportCard.reportCardSections?.attendance ? `<div class="summary-box"><div class="name">Attendance</div><div class="value">${reportCard.reportCardSections.attendance.percentage !== null
+                  ? `${reportCard.reportCardSections.attendance.percentage}%`
+                  : reportCard.reportCardSections.attendance.classRecordedDays === 0
+                    ? 'No records'
+                    : 'Incomplete'}</div>${reportCard.reportCardSections.attendance.percentage !== null
+                  ? `<div class="name">${reportCard.reportCardSections.attendance.present + reportCard.reportCardSections.attendance.late}/${reportCard.reportCardSections.attendance.present + reportCard.reportCardSections.attendance.late + reportCard.reportCardSections.attendance.absent} days</div>`
+                  : ''}</div>` : ''}
               </div>
 
               <div class="remarks">
+                ${optionalSectionsHtml}
                 ${reportCard.teacherRemark ? `<div class="remark-box"><div class="remark-title">TEACHER'S REMARK:</div><div>${this.escapeHtml(reportCard.teacherRemark)}</div></div>` : ''}
                 ${reportCard.principalRemark ? `<div class="remark-box"><div class="remark-title">PRINCIPAL'S REMARK:</div><div>${this.escapeHtml(reportCard.principalRemark)}</div></div>` : ''}
                 ${thirdTermHistoryHtml}

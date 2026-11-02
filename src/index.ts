@@ -187,6 +187,8 @@ async function loadRoutes() {
     console.log('✓ Loaded results engine routes');
     const { default: reportCardRoutes } = await import('./routes/report-card.js');
     console.log('✓ Loaded report card routes');
+    const { default: reportCardSectionsRoutes } = await import('./routes/report-card-sections.js');
+    console.log('✓ Loaded report-card sections routes');
     const { default: pdfReportsRoutes } = await import('./routes/pdf-reports.js');
     console.log('✓ Loaded PDF reports routes');
     const { default: assessmentSetupRoutes } = await import('./routes/assessment-setup.js');
@@ -207,6 +209,7 @@ async function loadRoutes() {
     app.use('/api/result-pins', resultPinRoutes);
     app.use('/api/results', resultsEngineRoutes);
     app.use('/api/report-cards', reportCardRoutes);
+    app.use('/api/report-card-sections', reportCardSectionsRoutes);
     app.use('/api/pdf-reports', pdfReportsRoutes);
     app.use('/api/country', countryRoutes);
     app.use('/api', publicRoutes);

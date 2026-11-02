@@ -2,6 +2,16 @@ import { PrismaClient } from '@prisma/client';
 import resolveReportSignatory from './signatory-resolver.js';
 import { getDistinctStudentCount } from './report-card-statistics.js';
 import { resolveStoredAssessmentTotal } from './result-score-calculation.js';
+import { buildReportCardAttendanceSummary, isReportCardRating, readReportCardSectionsConfig, type ReportCardAttendanceSummary } from './report-card-sections.js';
+
+interface ReportCardSections {
+  affective?: Record<string, string>;
+  psychomotor?: Record<string, string>;
+  attendance?: ReportCardAttendanceSummary;
+  teacherCommentsEnabled?: boolean;
+  principalCommentsEnabled?: boolean;
+  termPrincipalRemark?: string | null;
+}
 
 interface SubjectResult {
   subjectId: string;
@@ -62,6 +72,7 @@ interface ReportCardData {
   totalSubjects: number;
   teacherRemark: string | null;
   principalRemark: string | null;
+  reportCardSections?: ReportCardSections;
   publishedAt?: string | null;
   statistics: {
     highestScore: number;
@@ -336,9 +347,98 @@ class ReportCardService {
     });
 
     // Get class info (use from pupil or assessment)
-    const classInfo = pupil.class || assessment.class;
+    const classInfo = assessment.class || pupil.class;
     if (!classInfo) {
       throw new Error('Class information not found');
+    }
+
+    let reportCardSections: ReportCardSections | undefined;
+    let termTeacherRemark: string | null = null;
+    let termPrincipalRemark: string | null = null;
+    const sectionConfigRecord = await this.prisma.termReportCardConfig.findFirst({
+      where: { termId: assessment.termId, schoolId, publishedAt: { not: null } },
+    });
+    if (sectionConfigRecord) {
+      const sectionConfig = readReportCardSectionsConfig(sectionConfigRecord.configData);
+      reportCardSections = {
+        ...(sectionConfig.teacherCommentsEnabled ? { teacherCommentsEnabled: true } : {}),
+        ...(sectionConfig.principalCommentsEnabled
+          ? { principalCommentsEnabled: true, termPrincipalRemark: null }
+          : {}),
+      };
+      if (sectionConfig.affectiveEnabled) {
+        reportCardSections.affective = {};
+        const record = await this.prisma.behaviourAssessment.findUnique({
+          where: { pupilId_termId: { pupilId, termId: assessment.termId } },
+          select: { behaviours: true },
+        });
+        if (record) {
+          const parsed: unknown = JSON.parse(record.behaviours);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const ratings = Object.fromEntries(
+              Object.entries(parsed).filter(([indicator, rating]) =>
+                sectionConfig.affectiveIndicators.includes(indicator) && isReportCardRating(rating),
+              ),
+            ) as Record<string, string>;
+            reportCardSections.affective = ratings;
+          }
+        }
+      }
+      if (sectionConfig.psychomotorEnabled) {
+        reportCardSections.psychomotor = {};
+        const record = await this.prisma.psychomotorAssessment.findUnique({
+          where: { pupilId_termId: { pupilId, termId: assessment.termId } },
+          select: { skills: true },
+        });
+        if (record) {
+          const parsed: unknown = JSON.parse(record.skills);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const ratings = Object.fromEntries(
+              Object.entries(parsed).filter(([indicator, rating]) =>
+                sectionConfig.psychomotorIndicators.includes(indicator) && isReportCardRating(rating),
+              ),
+            ) as Record<string, string>;
+            reportCardSections.psychomotor = ratings;
+          }
+        }
+      }
+      if (sectionConfig.teacherCommentsEnabled || sectionConfig.principalCommentsEnabled) {
+        const comments = await this.prisma.termReportCardComment.findUnique({
+          where: { pupilId_termId: { pupilId, termId: assessment.termId } },
+          select: { teacherRemark: true, principalRemark: true },
+        });
+        if (sectionConfig.teacherCommentsEnabled) termTeacherRemark = comments?.teacherRemark ?? null;
+        if (sectionConfig.principalCommentsEnabled) {
+          termPrincipalRemark = comments?.principalRemark ?? null;
+          reportCardSections.termPrincipalRemark = termPrincipalRemark;
+        }
+      }
+      if (sectionConfig.attendanceEnabled) {
+        const startsOn = assessment.term?.startsOn;
+        const endsOn = assessment.term?.endsOn;
+        if (!startsOn || !endsOn || startsOn > endsOn) {
+          reportCardSections.attendance = {
+            present: 0, late: 0, absent: 0, excused: 0, recordedDays: 0,
+            classRecordedDays: 0, percentage: null, coverageComplete: false,
+            unavailableReason: 'Term dates are not configured',
+          };
+        } else {
+          const dateRange = { gte: startsOn, lte: endsOn };
+          const [records, classDates] = await Promise.all([
+            this.prisma.attendanceRecord.findMany({
+              where: { schoolId, classId: classInfo.id, pupilId, date: dateRange },
+              select: { status: true },
+            }),
+            this.prisma.attendanceRecord.findMany({
+              where: { schoolId, classId: classInfo.id, date: dateRange },
+              distinct: ['date'],
+              select: { date: true },
+            }),
+          ]);
+          reportCardSections.attendance = buildReportCardAttendanceSummary(records, classDates.length);
+        }
+      }
+      if (!Object.keys(reportCardSections).length) reportCardSections = undefined;
     }
 
     // Build subject results
@@ -390,10 +490,11 @@ class ReportCardService {
 
     // principalRemark will be determined from resolved signatory if present,
     // otherwise fall back to any per-result principalRemark (but never read from School table)
-    let principalRemark: string | null = results[0]?.principalRemark || null;
+    let principalRemark: string | null = termPrincipalRemark || results[0]?.principalRemark || null;
 
     // Get teacher remark (from first result with one)
     const teacherRemark =
+      termTeacherRemark ||
       results.find((r) => r.teacherRemark)?.teacherRemark ||
       results[0]?.comment ||
       null;
@@ -458,7 +559,7 @@ class ReportCardService {
     }
 
     // If we have a resolved signatory, prefer its comment as the principal remark
-    if (resolvedSignatory && (resolvedSignatory as any).comment) {
+    if (!termPrincipalRemark && resolvedSignatory && (resolvedSignatory as any).comment) {
       principalRemark = (resolvedSignatory as any).comment ?? principalRemark;
     }
 
@@ -506,6 +607,7 @@ class ReportCardService {
       totalSubjects: subjects.length,
       teacherRemark,
       principalRemark,
+      reportCardSections,
       publishedAt,
       statistics: {
         highestScore: validScores.length > 0 ? Math.max(...validScores) : 0,

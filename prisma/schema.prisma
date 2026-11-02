@@ -42,6 +42,7 @@ model School {
   principalSignatureUrl         String?
   stampUrl                      String?
   principalComment              String?                  @db.LongText
+  reportCardSectionDefaults     String?                  @db.LongText
   manualPaymentAccountName      String?
   manualPaymentAccountNumber    String?
   manualPaymentBankName         String?
@@ -73,6 +74,8 @@ model School {
   admissionCounters             AdmissionCounter[]
   announcements                 Announcement[]
   assessments                   Assessment[]
+  reportCardSectionConfigs    TermReportCardConfig[]
+  termReportCardComments       TermReportCardComment[]
   assessmentComponents          AssessmentComponent[]
   assessmentTemplates           AssessmentTemplate[]
   attendance                    AttendanceRecord[]
@@ -214,6 +217,8 @@ model Term {
   endsOn                 DateTime?
   assessments            Assessment[]
   behaviourAssessments   BehaviourAssessment[]
+  reportCardSectionConfig TermReportCardConfig?
+  termReportCardComments TermReportCardComment[]
   feeSchedules           FeeSchedule[]
   psychomotorAssessments PsychomotorAssessment[]
   resultSheets           ResultSheet[]
@@ -403,6 +408,7 @@ model Class {
   attendance             AttendanceRecord[]
   behaviourAssessments   BehaviourAssessment[]
   psychomotorAssessments PsychomotorAssessment[]
+  termReportCardComments TermReportCardComment[]
   resultSheets           ResultSheet[]
   school                 School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   pupils                 Pupil[]
@@ -452,6 +458,7 @@ model Pupil {
   invoices               Invoice[]
   promotionRecords       PromotionRecord[]
   psychomotorAssessments PsychomotorAssessment[]
+  termReportCardComments TermReportCardComment[]
   studentSummaries       StudentTermSummary[]
   subjectResults         SubjectResult[]
   class                  Class?                  @relation(fields: [classId], references: [id])
@@ -2542,6 +2549,47 @@ model PsychomotorAssessment {
   term   Term   @relation(fields: [termId], references: [id], onDelete: Cascade)
 
   @@unique([pupilId, termId])
+  @@index([classId, termId])
+}
+
+model TermReportCardConfig {
+  id          String   @id @default(cuid())
+  schoolId    String
+  termId      String   @unique
+  configData  String   @db.LongText
+  publishedAt DateTime?
+  publishedBy String?
+  reopenedAt  DateTime?
+  reopenedBy  String?
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  term   Term   @relation(fields: [termId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
+}
+
+model TermReportCardComment {
+  id              String   @id @default(cuid())
+  schoolId        String
+  classId         String
+  pupilId         String
+  termId          String
+  teacherRemark   String?  @db.LongText
+  principalRemark String?  @db.LongText
+  updatedBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  class  Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  pupil  Pupil  @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  term   Term   @relation(fields: [termId], references: [id], onDelete: Cascade)
+
+  @@unique([pupilId, termId])
+  @@index([schoolId, termId])
   @@index([classId, termId])
 }
 
