@@ -24,6 +24,25 @@ export function createStaffRouter(database: StaffProfileDatabase, authenticate: 
 const router = Router();
 router.use(authenticate);
 
+router.get('/school', async (req: AuthenticatedRequest, res: Response) => {
+  const user = req.user;
+  if (!user?.userId || !['STAFF', 'TEACHER'].includes(user.role) || !user.schoolId) {
+    return res.status(403).json({ error: 'Staff account required.' });
+  }
+
+  try {
+    const school = await database.school.findUnique({
+      where: { id: user.schoolId },
+      select: { id: true, name: true, city: true, country: true, logoUrl: true, primaryColor: true },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found.' });
+    return res.json({ school });
+  } catch (error) {
+    console.error('Unable to load school details for staff workspace:', error instanceof Error ? error.message : 'Unknown error');
+    return res.status(500).json({ error: 'Unable to load school details.' });
+  }
+});
+
 router.get('/me', async (req: AuthenticatedRequest, res: Response) => {
   const user = req.user;
   if (!user?.userId || !['STAFF', 'TEACHER', 'BURSAR'].includes(user.role) || !user.schoolId) {

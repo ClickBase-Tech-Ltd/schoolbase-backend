@@ -6885,13 +6885,18 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
   const emergencyContactPhone = typeof req.body?.emergencyContactPhone === 'string' ? req.body.emergencyContactPhone.trim() : '';
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   const password = req.body?.password;
+  const requestedRole = req.body?.role === undefined ? undefined : String(req.body.role).toUpperCase();
+  const classIdsProvided = req.body?.classIds !== undefined;
+  const subjectIdsProvided = req.body?.subjectIds !== undefined;
   const parseAssignmentIds = (value: unknown): string[] | null => {
     if (value === undefined) return null;
-    let parsed = value;
+    let parsed: unknown = value;
     if (typeof parsed === 'string') {
-      try { parsed = JSON.parse(parsed); } catch { return []; }
+      try { parsed = JSON.parse(parsed); } catch { return null; }
     }
-    return Array.isArray(parsed) ? [...new Set(parsed.filter((id: unknown): id is string => typeof id === 'string'))] : [];
+    return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === 'string')
+      ? [...new Set(parsed)]
+      : null;
   };
   const classIds = parseAssignmentIds(req.body?.classIds);
   const subjectIds = parseAssignmentIds(req.body?.subjectIds);
@@ -6905,6 +6910,14 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
   if (!['ACADEMIC', 'NON_ACADEMIC'].includes(classification) || !['FULL_TIME', 'PART_TIME', 'CONTRACT', 'TEMPORARY'].includes(employmentType)) {
     discardStaffPhoto(req);
     return res.status(400).json({ error: 'Choose valid employment classification and type values.' });
+  }
+  if (requestedRole !== undefined && !['STAFF', 'TEACHER', 'BURSAR'].includes(requestedRole)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Choose a valid staff account role.' });
+  }
+  if ((classIdsProvided && !classIds) || (subjectIdsProvided && !subjectIds)) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Class and subject assignments must be valid lists of IDs.' });
   }
   if (reason.length < 8 || reason.length > 1000) {
     discardStaffPhoto(req);
@@ -6922,10 +6935,18 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
     const { employee, previousPhotoUrl } = await prisma.$transaction(async (tx) => {
       const current = await tx.employeeProfile.findFirst({ where: { id: req.params.employeeId, schoolId } });
       if (!current) throw Object.assign(new Error('Staff profile not found.'), { statusCode: 404 });
-      const linkedUser = await tx.user.findFirst({ where: { id: current.userId, schoolId }, select: { role: true } });
+      const linkedUser = await tx.user.findFirst({ where: { id: current.userId, schoolId }, select: { id: true, email: true, role: true, isActive: true } });
       if (!linkedUser) throw Object.assign(new Error('Linked staff account not found in this school.'), { statusCode: 404 });
-      if ((classIds || subjectIds) && linkedUser?.role !== 'TEACHER') throw Object.assign(new Error('Class and subject assignments can only be updated for teachers.'), { statusCode: 400 });
-      if (passwordHash && !['TEACHER', 'BURSAR'].includes(linkedUser.role)) {
+      const managedRoles = ['STAFF', 'TEACHER', 'BURSAR'];
+      if (requestedRole !== undefined && (!managedRoles.includes(linkedUser.role) || !managedRoles.includes(requestedRole))) {
+        throw Object.assign(new Error('Only staff, teacher, and bursar account roles can be changed here.'), { statusCode: 400 });
+      }
+      const nextRole = requestedRole ?? linkedUser.role;
+      const roleChanged = nextRole !== linkedUser.role;
+      if ((classIdsProvided || subjectIdsProvided) && nextRole !== 'TEACHER') {
+        throw Object.assign(new Error('Class and subject assignments can only be updated for teachers.'), { statusCode: 400 });
+      }
+      if (passwordHash && !['TEACHER', 'BURSAR'].includes(nextRole)) {
         throw Object.assign(new Error('Passwords can only be reset for teacher and bursar accounts.'), { statusCode: 400 });
       }
       if (classIds) {
@@ -6935,6 +6956,26 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
       if (subjectIds) {
         const ownedSubjects = await tx.subject.count({ where: { id: { in: subjectIds }, schoolId } });
         if (ownedSubjects !== subjectIds.length) throw Object.assign(new Error('One or more selected subjects do not belong to this school.'), { statusCode: 400 });
+      }
+      if (roleChanged) {
+        await tx.user.update({
+          where: { id: current.userId },
+          data: { role: nextRole as 'STAFF' | 'TEACHER' | 'BURSAR' },
+        });
+      }
+      if (roleChanged && nextRole !== 'TEACHER') {
+        await tx.teacherClass.deleteMany({ where: { teacherId: current.userId, schoolId } });
+        await tx.teacherSubject.deleteMany({ where: { teacherId: current.userId, schoolId } });
+      }
+      if (nextRole === 'TEACHER') {
+        if (classIds) {
+          await tx.teacherClass.deleteMany({ where: { teacherId: current.userId, schoolId } });
+          if (classIds.length) await tx.teacherClass.createMany({ data: classIds.map((classId) => ({ teacherId: current.userId, classId, schoolId })), skipDuplicates: true });
+        }
+        if (subjectIds) {
+          await tx.teacherSubject.deleteMany({ where: { teacherId: current.userId, schoolId } });
+          if (subjectIds.length) await tx.teacherSubject.createMany({ data: subjectIds.map((subjectId) => ({ teacherId: current.userId, subjectId, schoolId })), skipDuplicates: true });
+        }
       }
       const updated = await tx.employeeProfile.update({
         where: { id: current.id },
@@ -6969,6 +7010,17 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
           nextDepartment: department || null,
         },
       });
+      if (roleChanged) {
+        await tx.staffEmploymentEvent.create({
+          data: {
+            schoolId,
+            employeeId: current.id,
+            actorUserId: session.userId,
+            eventType: 'ACCOUNT_ROLE_CHANGED',
+            reason: `Account role changed from ${linkedUser.role} to ${nextRole}. ${reason}`,
+          },
+        });
+      }
       if (passwordHash) {
         await tx.user.update({
           where: { id: current.userId },
@@ -6984,15 +7036,19 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
           },
         });
       }
-      if (classIds) {
-        await tx.teacherClass.deleteMany({ where: { teacherId: current.userId, schoolId } });
-        if (classIds.length) await tx.teacherClass.createMany({ data: classIds.map((classId: string) => ({ teacherId: current.userId, classId, schoolId })), skipDuplicates: true });
-      }
-      if (subjectIds) {
-        await tx.teacherSubject.deleteMany({ where: { teacherId: current.userId, schoolId } });
-        if (subjectIds.length) await tx.teacherSubject.createMany({ data: subjectIds.map((subjectId: string) => ({ teacherId: current.userId, subjectId, schoolId })), skipDuplicates: true });
-      }
-      return { employee: updated, previousPhotoUrl: current.photoUrl };
+      const account = await tx.user.findUnique({
+        where: { id: current.userId },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          isActive: true,
+          teacherClasses: { where: { schoolId }, select: { classId: true } },
+          teacherSubjects: { where: { schoolId }, select: { subjectId: true } },
+        },
+      });
+      if (!account) throw Object.assign(new Error('Linked staff account not found in this school.'), { statusCode: 404 });
+      return { employee: { ...updated, user: account }, previousPhotoUrl: current.photoUrl };
     });
     if (req.file && previousPhotoUrl && previousPhotoUrl !== employee.photoUrl && previousPhotoUrl.startsWith('/uploads/photos/')) {
       const previousPath = path.join(uploadDir, path.basename(previousPhotoUrl));
