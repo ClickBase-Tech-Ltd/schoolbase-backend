@@ -191,6 +191,7 @@ async function getSchoolSetupChecklistData(schoolId: string) {
   return {
     completedItems,
     missingItems,
+    requiredIncompleteItems: status.incompleteItems,
     completionPercentage: status.completionPercentage,
     setupItems: status.setupItems,
     isComplete: status.isComplete,
@@ -242,6 +243,63 @@ router.use(async (req: Request, res: Response, next) => {
   const userId = await requirePlatformAdminSession(req, res);
   if (!userId) return;
   next();
+});
+
+router.get('/schools/setup-statuses', async (req: Request, res: Response) => {
+  try {
+    const schools = await prisma.school.findMany({
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+      },
+    });
+
+    const setupStatuses: Record<string, any> = {};
+    const requiredKeys = [
+      'hasSchoolProfile',
+      'hasStaff',
+      'hasStudents',
+      'hasFees',
+      'hasAnnouncement',
+      'hasAssessment',
+      'hasSchoolLogo',
+      'hasPrincipalInfo',
+      'hasPrincipalSignature',
+      'hasSchoolStamp',
+    ] as const;
+
+    for (const school of schools) {
+      const checklist = await getSchoolSetupChecklistData(school.id);
+      const requiredCompleted = requiredKeys.filter((key) => Boolean(checklist.setupItems?.[key])).length;
+      const requiredTotal = requiredKeys.length;
+      const checklistTotal = Object.keys(checklist.setupItems ?? {}).length || requiredTotal;
+
+      setupStatuses[school.id] = {
+        isComplete: Boolean(checklist.isComplete),
+        completionPercent: Number.isFinite(checklist.completionPercentage) ? checklist.completionPercentage : 0,
+        incompleteTasks: Array.isArray(checklist.requiredIncompleteItems) ? checklist.requiredIncompleteItems : [],
+        requiredCompleted,
+        requiredTotal,
+        checklistTotal,
+        setupItems: checklist.setupItems ?? {},
+      };
+    }
+
+    res.json({
+      schools,
+      setupStatuses,
+      total: schools.length,
+    });
+  } catch (error: any) {
+    console.error('[schoolbase-admin] Failed to load school setup statuses:', error);
+    res.status(500).json({
+      success: false,
+      message: error?.message || 'Failed to load school setup statuses',
+    });
+  }
 });
 
 router.get('/ads/overview', async (req: Request, res: Response) => {
