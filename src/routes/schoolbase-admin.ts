@@ -28,6 +28,7 @@ import { allowPendingSignupReminder } from '../services/signup-rate-limit.js';
 import { attemptAndAuditSignupReminder } from '../services/signup-operations-audit.js';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
+import { getRenewedExpiry, SUBSCRIPTION_TERM_DAYS } from '../services/subscription-billing.js';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
