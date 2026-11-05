@@ -1,5 +1,16 @@
 import { PaymentMethod, PrismaClient } from '@prisma/client';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import {
+  PDFDocument,
+  StandardFonts,
+  appendBezierCurve,
+  clip,
+  closePath,
+  endPath,
+  moveTo,
+  popGraphicsState,
+  pushGraphicsState,
+  rgb,
+} from 'pdf-lib';
 import { isValidEmail, sendSubscriptionReceiptEmail } from './email.js';
 
 const prisma = new PrismaClient();
@@ -196,24 +207,48 @@ export async function buildSubscriptionReceiptPdf(receipt: SubscriptionReceiptDa
   const page = document.addPage([595.28, 841.89]);
   const regular = await document.embedFont(StandardFonts.Helvetica);
   const bold = await document.embedFont(StandardFonts.HelveticaBold);
-  const blue = rgb(0.04, 0.31, 0.63);
+  const blue = rgb(10 / 255, 102 / 255, 194 / 255);
   const navy = rgb(0.07, 0.12, 0.20);
 
   page.drawRectangle({ x: 0, y: 680, width: 595.28, height: 161.89, color: blue });
-  page.drawRectangle({ x: 46, y: 752, width: 44, height: 44, color: rgb(1, 1, 1) });
+  page.drawCircle({ x: 68, y: 773, size: 24, color: rgb(1, 1, 1) });
   const logo = await getReceiptLogo();
   if (logo) {
     try {
       const image = logo.contentType === 'image/png'
         ? await document.embedPng(logo.bytes)
         : await document.embedJpg(logo.bytes);
-      const scale = Math.min(38 / image.width, 38 / image.height);
-      page.drawImage(image, {
-        x: 49 + (38 - image.width * scale) / 2,
-        y: 755 + (38 - image.height * scale) / 2,
-        width: image.width * scale,
-        height: image.height * scale,
-      });
+      const logoSize = 38;
+      const logoX = 49;
+      const logoY = 754;
+      const scale = Math.min(logoSize / image.width, logoSize / image.height);
+      const imageWidth = image.width * scale;
+      const imageHeight = image.height * scale;
+      const centerX = logoX + logoSize / 2;
+      const centerY = logoY + logoSize / 2;
+      const radius = logoSize / 2;
+      const curve = radius * 0.5522847498;
+      page.pushOperators(
+        pushGraphicsState(),
+        moveTo(centerX, centerY + radius),
+        appendBezierCurve(centerX + curve, centerY + radius, centerX + radius, centerY + curve, centerX + radius, centerY),
+        appendBezierCurve(centerX + radius, centerY - curve, centerX + curve, centerY - radius, centerX, centerY - radius),
+        appendBezierCurve(centerX - curve, centerY - radius, centerX - radius, centerY - curve, centerX - radius, centerY),
+        appendBezierCurve(centerX - radius, centerY + curve, centerX - curve, centerY + radius, centerX, centerY + radius),
+        closePath(),
+        clip(),
+        endPath(),
+      );
+      try {
+        page.drawImage(image, {
+          x: logoX + (logoSize - imageWidth) / 2,
+          y: logoY + (logoSize - imageHeight) / 2,
+          width: imageWidth,
+          height: imageHeight,
+        });
+      } finally {
+        page.pushOperators(popGraphicsState());
+      }
     } catch (error) {
       console.warn('SchoolBase receipt logo could not be embedded; using the text mark:', error);
       page.drawText('SB', { x: 53, y: 766, size: 17, font: bold, color: blue });
@@ -221,9 +256,15 @@ export async function buildSubscriptionReceiptPdf(receipt: SubscriptionReceiptDa
   } else {
     page.drawText('SB', { x: 53, y: 766, size: 17, font: bold, color: blue });
   }
-  page.drawText('SchoolBase', { x: 104, y: 773, size: 23, font: bold, color: rgb(1, 1, 1) });
+  page.drawText('SchoolBase', { x: 104, y: 780, size: 23, font: bold, color: rgb(1, 1, 1) });
+  page.drawText('The school management system built for West African schools.', {
+    x: 105, y: 759, size: 8.5, font: regular, color: rgb(0.94, 0.96, 1),
+  });
+  page.drawText('https://schoolbase.live', {
+    x: 105, y: 742, size: 9, font: regular, color: rgb(1, 1, 1),
+  });
   page.drawText('Plot 994 Action Layout, Abuja - Nigeria', {
-    x: 104, y: 752, size: 9, font: regular, color: rgb(0.88, 0.92, 0.98),
+    x: 105, y: 723, size: 9, font: regular, color: rgb(0.88, 0.92, 0.98),
   });
   page.drawText('OFFICIAL PAYMENT RECEIPT', {
     x: 54, y: 631, size: 18, font: bold, color: navy,

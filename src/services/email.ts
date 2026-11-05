@@ -2468,9 +2468,16 @@ export async function sendSubscriptionReceiptEmail(input: {
     html: `<!doctype html>
       <html><body style="margin:0;background:#f3f5f8;font-family:Arial,sans-serif;color:#172033">
         <div style="max-width:620px;margin:32px auto;background:#fff;border:1px solid #e2e8f0">
-          <div style="padding:28px 32px;background:#0a4f9e;color:#fff">
-            <div style="font-size:23px;font-weight:700">SchoolBase</div>
-            <div style="margin-top:5px;font-size:13px">Official payment receipt</div>
+          <div style="padding:24px 32px;background:#0A66C2;color:#fff">
+            <div style="display:flex;align-items:center;gap:14px">
+              <img src="https://schoolbase.live/logo.png" alt="SchoolBase logo" width="48" height="48" style="display:block;width:48px;height:48px;border-radius:50%;background:#fff;padding:6px;object-fit:contain">
+              <div>
+                <div style="font-size:23px;font-weight:700">SchoolBase</div>
+                <div style="margin-top:4px;font-size:12px">The school management system built for West African schools.</div>
+                <div style="margin-top:4px;font-size:12px"><a href="https://schoolbase.live" style="color:#fff;text-decoration:underline">https://schoolbase.live</a></div>
+              </div>
+            </div>
+            <div style="margin:18px 0 0 62px;font-size:13px">Official payment receipt</div>
           </div>
           <div style="padding:30px 32px">
             <p style="font-size:16px">Hello ${schoolName},</p>
