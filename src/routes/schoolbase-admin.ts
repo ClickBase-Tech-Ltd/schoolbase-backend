@@ -6,7 +6,7 @@ import axios from 'axios';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { sendSetupReminderEmail } from '../services/email.js';
+import { isValidEmail, sendSetupReminderEmail } from '../services/email.js';
 import { getPlatformSettings, serializePlatformSettingValue, normalizeEmailList, parsePlatformSettingValue, platformSettingDefaults, competitionFeatureKeys } from '../services/platform-settings.js';
 import {
   billingMarkets,
@@ -29,6 +29,7 @@ import { attemptAndAuditSignupReminder } from '../services/signup-operations-aud
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { getRenewedExpiry, SUBSCRIPTION_TERM_DAYS } from '../services/subscription-billing.js';
+import { buildSubscriptionReceiptPdf, getSubscriptionReceiptData, sendSubscriptionReceipt } from '../services/subscription-receipts.js';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -1107,6 +1108,103 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/subscription-payments/:paymentId/receipt', async (req: Request, res: Response) => {
+  const session = await requirePlatformAdminSession(req, res);
+  if (!session) return;
+
+  try {
+    const receipt = await getSubscriptionReceiptData(req.params.paymentId);
+    if (!receipt) return res.status(404).json({ message: 'A confirmed subscription payment receipt was not found.' });
+
+    const pdf = await buildSubscriptionReceiptPdf(receipt);
+    await prisma.platformAuditLog.create({
+      data: {
+        userId: session,
+        schoolId: receipt.schoolId,
+        event: 'SUBSCRIPTION_RECEIPT_DOWNLOADED',
+        category: 'BILLING',
+        action: 'DOWNLOAD_RECEIPT',
+        outcome: 'SUCCESS',
+        resourceType: 'PLATFORM_PAYMENT',
+        resourceId: receipt.id,
+        summary: `Downloaded payment receipt ${receipt.receiptNumber}`,
+        actorRole: 'PLATFORM_ADMIN',
+        details: JSON.stringify({ receiptNumber: receipt.receiptNumber }),
+      },
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="SchoolBase-Receipt-${receipt.receiptNumber}.pdf"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.send(Buffer.from(pdf));
+  } catch (error) {
+    console.error('Failed to generate platform subscription receipt:', error);
+    return res.status(500).json({ message: 'Could not generate the subscription receipt.' });
+  }
+});
+
+router.post('/subscription-payments/:paymentId/receipt/send', async (req: Request, res: Response) => {
+  const session = await requirePlatformAdminSession(req, res);
+  if (!session) return;
+
+  let auditLogId: string | null = null;
+  let receipt: Awaited<ReturnType<typeof getSubscriptionReceiptData>> = null;
+  try {
+    receipt = await getSubscriptionReceiptData(req.params.paymentId);
+    if (!receipt) return res.status(404).json({ message: 'A confirmed subscription payment receipt was not found.' });
+    const auditLog = await prisma.platformAuditLog.create({
+      data: {
+        userId: session,
+        schoolId: receipt.schoolId,
+        event: 'SUBSCRIPTION_RECEIPT_EMAIL_REQUESTED',
+        category: 'BILLING',
+        action: 'SEND_RECEIPT',
+        outcome: 'PENDING',
+        resourceType: 'PLATFORM_PAYMENT',
+        resourceId: receipt.id,
+        summary: `Requested payment receipt ${receipt.receiptNumber}`,
+        actorRole: 'PLATFORM_ADMIN',
+        details: JSON.stringify({ receiptNumber: receipt.receiptNumber }),
+      },
+    });
+    auditLogId = auditLog.id;
+
+    const { emailResult } = await sendSubscriptionReceipt(req.params.paymentId);
+    await prisma.platformAuditLog.update({
+      where: { id: auditLog.id },
+      data: {
+        event: 'SUBSCRIPTION_RECEIPT_EMAIL_SENT',
+        outcome: 'SUCCESS',
+        summary: `Sent payment receipt ${receipt.receiptNumber}`,
+        details: JSON.stringify({ receiptNumber: receipt.receiptNumber, recipients: emailResult.recipients }),
+      },
+    });
+    return res.json({
+      success: true,
+      message: `Receipt ${receipt.receiptNumber} was emailed successfully.`,
+      recipients: emailResult.recipients,
+    });
+  } catch (error) {
+    console.error('Failed to send platform subscription receipt:', error);
+    if (auditLogId && receipt) {
+      await prisma.platformAuditLog.update({
+        where: { id: auditLogId },
+        data: {
+          event: 'SUBSCRIPTION_RECEIPT_EMAIL_FAILED',
+          outcome: 'FAILURE',
+          summary: `Failed to send payment receipt ${receipt.receiptNumber}`,
+          details: JSON.stringify({
+            receiptNumber: receipt.receiptNumber,
+            error: error instanceof Error ? error.message : 'Unknown receipt email error',
+          }),
+        },
+      }).catch((auditError) => console.error('Failed to finalize subscription receipt email audit:', auditError));
+    }
+    return res.status(502).json({
+      message: error instanceof Error ? error.message : 'Could not email the subscription receipt.',
+    });
+  }
+});
+
 // POST /schoolbase-admin/api/subscription-payments - Record a confirmed custom subscription payment
 router.post('/subscription-payments', async (req: Request, res: Response) => {
   const session = await requirePlatformAdminSession(req, res);
@@ -1119,6 +1217,7 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
     const paymentDate = typeof req.body?.paymentDate === 'string' ? req.body.paymentDate.trim() : '';
     const reference = typeof req.body?.reference === 'string' ? req.body.reference.trim() : '';
     const schoolId = typeof req.body?.schoolId === 'string' ? req.body.schoolId.trim() : '';
+    const requestedSchoolEmail = typeof req.body?.schoolEmail === 'string' ? req.body.schoolEmail.trim().toLowerCase() : '';
     const requestedPlan = typeof req.body?.plan === 'string' ? req.body.plan.trim().toUpperCase() : 'CUSTOM';
     const plans = ['STARTER', 'GROWTH', 'ENTERPRISE', 'CUSTOM'] as const;
     const plan = plans.find((value) => value === requestedPlan);
@@ -1166,6 +1265,9 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
     }
     if (reference.length > 120) {
       return res.status(400).json({ message: 'Payment reference must be 120 characters or fewer.' });
+    }
+    if (requestedSchoolEmail && !isValidEmail(requestedSchoolEmail)) {
+      return res.status(400).json({ message: 'Enter a valid school receipt email address.' });
     }
 
     const school = schoolId
@@ -1244,7 +1346,7 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
       schoolName,
       schoolSlug: school?.slug,
       schoolCountry: school?.country,
-      schoolEmail: school?.email || school?.users?.[0]?.email || null,
+      schoolEmail: school?.email || school?.users?.[0]?.email || requestedSchoolEmail || null,
       currency,
       expectedAmountMinor: amountMinor,
       recordedByPlatformAdminId: session,
@@ -1328,6 +1430,56 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
       return res.status(409).json({ message: 'The school subscription changed while this payment was being recorded. Refresh and retry after reviewing the current subscription.' });
     }
     const payment = transactionResult.payment;
+    let receiptEmailStatus: 'SENT' | 'FAILED' | 'NOT_SENT' = 'NOT_SENT';
+    let receiptEmailMessage: string | null = null;
+    let receiptNumber: string | null = null;
+    let receiptRecipients: string[] = [];
+    if (billingAction !== 'RECORD_ONLY') {
+      try {
+        const { receipt, emailResult } = await sendSubscriptionReceipt(payment.id);
+        receiptNumber = receipt.receiptNumber;
+        receiptRecipients = emailResult.recipients;
+        receiptEmailStatus = 'SENT';
+      } catch (error) {
+        console.error('Subscription payment was applied, but its receipt email failed:', error);
+        receiptEmailStatus = 'FAILED';
+        receiptEmailMessage = error instanceof Error ? error.message : 'Receipt email delivery failed.';
+      }
+
+      if (receiptEmailStatus === 'SENT') {
+        await prisma.platformAuditLog.create({
+          data: {
+            userId: session,
+            schoolId: school?.id || null,
+            event: 'SUBSCRIPTION_RECEIPT_EMAIL_SENT',
+            category: 'BILLING',
+            action: 'SEND_RECEIPT',
+            outcome: 'SUCCESS',
+            resourceType: 'PLATFORM_PAYMENT',
+            resourceId: payment.id,
+            summary: `Sent payment receipt ${receiptNumber}`,
+            actorRole: 'PLATFORM_ADMIN',
+            details: JSON.stringify({ receiptNumber, recipients: receiptRecipients }),
+          },
+        }).catch((auditError) => console.error('Receipt email was sent, but its audit record failed:', auditError));
+      } else {
+        await prisma.platformAuditLog.create({
+          data: {
+            userId: session,
+            schoolId: school?.id || null,
+            event: 'SUBSCRIPTION_RECEIPT_EMAIL_FAILED',
+            category: 'BILLING',
+            action: 'SEND_RECEIPT',
+            outcome: 'FAILURE',
+            resourceType: 'PLATFORM_PAYMENT',
+            resourceId: payment.id,
+            summary: 'Receipt email delivery failed after a confirmed subscription payment',
+            actorRole: 'PLATFORM_ADMIN',
+            details: JSON.stringify({ error: receiptEmailMessage }),
+          },
+        }).catch((auditError) => console.error('Failed to audit subscription receipt email failure:', auditError));
+      }
+    }
 
     return res.status(201).json({
       payment: {
@@ -1339,7 +1491,7 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
         schoolId: school?.id || null,
         schoolName,
         schoolSlug: school?.slug || null,
-        schoolEmail: school?.email || school?.users?.[0]?.email || null,
+        schoolEmail: school?.email || school?.users?.[0]?.email || requestedSchoolEmail || null,
         schoolCountry: school?.country || null,
         plan,
         currency,
@@ -1348,6 +1500,8 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
       },
       subscriptionApplied: billingAction !== 'RECORD_ONLY',
       subscriptionExpiresAt: transactionResult.subscriptionExpiresAt,
+      receiptEmailStatus,
+      receiptEmailMessage,
     });
   } catch (error) {
     console.error('Error recording custom subscription payment:', error);

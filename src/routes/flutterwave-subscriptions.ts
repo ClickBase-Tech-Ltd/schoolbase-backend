@@ -1,7 +1,7 @@
 import { PaymentMethod, PrismaClient } from '@prisma/client';
 import { Router, Request, Response } from 'express';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { sendPaymentSuccessEmail } from '../jobs/subscriptionEmails.js';
+import { sendSubscriptionReceipt } from '../services/subscription-receipts.js';
 import { requireAdmin, verifyAuth, type AuthenticatedRequest } from '../middleware/roleAuth.js';
 import {
   getBillingMarket,
@@ -144,6 +144,7 @@ async function completeSubscription(reference: string, transactionId: string) {
       body: {
         success: true,
         school,
+        receiptPaymentId: payment.id,
         reference,
         subscriptionApplied: paymentDetails.subscriptionApplied !== false,
         message: paymentDetails.subscriptionApplied === false
@@ -311,6 +312,13 @@ async function completeSubscription(reference: string, transactionId: string) {
 
   const updatedSchool = applyResult.school;
   if (!updatedSchool && applyResult.reviewRequired) {
+    let receiptEmailStatus: 'SENT' | 'FAILED' = 'SENT';
+    try {
+      await sendSubscriptionReceipt(payment.id);
+    } catch (error) {
+      receiptEmailStatus = 'FAILED';
+      console.error('Flutterwave payment was confirmed for review, but sending its receipt email failed:', error);
+    }
     return {
       status: 200,
       body: {
@@ -318,6 +326,8 @@ async function completeSubscription(reference: string, transactionId: string) {
         subscriptionApplied: false,
         message: 'Payment was received, but the subscription changed or expired during checkout. Contact SchoolBase to apply it.',
         reference,
+        receiptPaymentId: payment.id,
+        receiptEmailStatus,
         transaction: { reference, amount: expectedAmountMinor, currency: expectedCurrency },
       },
     };
@@ -346,6 +356,7 @@ async function completeSubscription(reference: string, transactionId: string) {
       body: {
         success: true,
         school: alreadyUpdatedSchool,
+        receiptPaymentId: payment.id,
         reference,
         subscriptionApplied: latestDetails.subscriptionApplied !== false,
         message: latestDetails.subscriptionApplied === false
@@ -356,31 +367,17 @@ async function completeSubscription(reference: string, transactionId: string) {
     };
   }
 
+  let receiptEmailStatus: 'SENT' | 'FAILED' = 'SENT';
   try {
-    const admin = await prisma.user.findFirst({
-      where: { schoolId: school.id, role: 'SCHOOL_ADMIN' },
-      select: { email: true, name: true },
-    });
-    if (admin?.email) {
-      const amountFormatted = new Intl.NumberFormat(market.locale, {
-        style: 'currency',
-        currency: market.currency,
-        minimumFractionDigits: 2,
-      }).format(expectedAmountMinor / 100);
-      const expiryDate = subscriptionExpiresAt.toLocaleDateString(market.locale, {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      });
-      await sendPaymentSuccessEmail(admin.email, updatedSchool.name, admin.name, plan, amountFormatted, expiryDate);
-    }
+    await sendSubscriptionReceipt(payment.id);
   } catch (error) {
-    console.error('Failed to send Flutterwave subscription confirmation email:', error);
+    receiptEmailStatus = 'FAILED';
+    console.error('Flutterwave subscription payment was confirmed, but sending its receipt email failed:', error);
   }
 
   return {
     status: 200,
-    body: { success: true, school: updatedSchool, reference, transaction: { reference, amount: expectedAmountMinor, currency: expectedCurrency } },
+    body: { success: true, school: updatedSchool, reference, receiptPaymentId: payment.id, receiptEmailStatus, transaction: { reference, amount: expectedAmountMinor, currency: expectedCurrency } },
   };
 }
 

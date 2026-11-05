@@ -2416,6 +2416,85 @@ Our support team is here to help. If you have any questions or need assistance, 
   }
 }
 
+export async function sendSubscriptionReceiptEmail(input: {
+  receiptNumber: string;
+  schoolName: string;
+  plan: string;
+  amount: string;
+  paidAt: Date;
+  schoolEmails: string[];
+  pdf: Uint8Array;
+}) {
+  const internalRecipients = ['sales@schoolbase.live', 'clickbasetechnologiesltd@gmail.com'];
+  const schoolRecipients = [...new Set(input.schoolEmails.map((email) => email.trim().toLowerCase()).filter(Boolean))];
+  if (schoolRecipients.some((email) => !isValidEmail(email))) {
+    throw new Error('The subscription receipt contains an invalid email recipient.');
+  }
+  const recipients = [...new Set([...schoolRecipients, ...internalRecipients])];
+  const internalOnlyRecipients = internalRecipients.filter((email) => !schoolRecipients.includes(email));
+
+  const escapeHtml = (value: string) => value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  const date = input.paidAt.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+  const schoolName = escapeHtml(input.schoolName);
+  const plan = escapeHtml(input.plan);
+  const amount = escapeHtml(input.amount);
+  const receiptNumber = escapeHtml(input.receiptNumber);
+
+  const message = await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+    to: schoolRecipients.length ? schoolRecipients : internalRecipients,
+    bcc: schoolRecipients.length ? internalOnlyRecipients : undefined,
+    subject: `SchoolBase payment receipt ${input.receiptNumber} — ${input.schoolName}`,
+    text: [
+      `Payment received for ${input.schoolName}.`,
+      `Receipt: ${input.receiptNumber}`,
+      `Plan: ${input.plan}`,
+      `Amount received: ${input.amount}`,
+      `Payment date: ${date}`,
+      '',
+      'Your official SchoolBase payment receipt is attached as a PDF.',
+      'SchoolBase, Plot 994 Action Layout, Abuja - Nigeria.',
+    ].join('\n'),
+    html: `<!doctype html>
+      <html><body style="margin:0;background:#f3f5f8;font-family:Arial,sans-serif;color:#172033">
+        <div style="max-width:620px;margin:32px auto;background:#fff;border:1px solid #e2e8f0">
+          <div style="padding:28px 32px;background:#0a4f9e;color:#fff">
+            <div style="font-size:23px;font-weight:700">SchoolBase</div>
+            <div style="margin-top:5px;font-size:13px">Official payment receipt</div>
+          </div>
+          <div style="padding:30px 32px">
+            <p style="font-size:16px">Hello ${schoolName},</p>
+            <p>Your subscription payment has been received and recorded. Your official receipt is attached as a PDF.</p>
+            <table style="width:100%;border-collapse:collapse;margin:22px 0">
+              <tr><td style="padding:10px;border-bottom:1px solid #e2e8f0;color:#64748b">Receipt number</td><td style="padding:10px;border-bottom:1px solid #e2e8f0;font-weight:700">${receiptNumber}</td></tr>
+              <tr><td style="padding:10px;border-bottom:1px solid #e2e8f0;color:#64748b">Plan</td><td style="padding:10px;border-bottom:1px solid #e2e8f0">${plan}</td></tr>
+              <tr><td style="padding:10px;border-bottom:1px solid #e2e8f0;color:#64748b">Amount received</td><td style="padding:10px;border-bottom:1px solid #e2e8f0;font-weight:700">${amount}</td></tr>
+              <tr><td style="padding:10px;border-bottom:1px solid #e2e8f0;color:#64748b">Payment date</td><td style="padding:10px;border-bottom:1px solid #e2e8f0">${date}</td></tr>
+            </table>
+            <p style="margin-bottom:0">SchoolBase<br>Plot 994 Action Layout, Abuja - Nigeria<br><a href="https://schoolbase.live">schoolbase.live</a></p>
+          </div>
+        </div>
+      </body></html>`,
+    attachments: [{
+      filename: `SchoolBase-Receipt-${input.receiptNumber}.pdf`,
+      content: Buffer.from(input.pdf),
+      contentType: 'application/pdf',
+    }],
+  });
+  assertSmtpAcceptedRecipients(message, recipients);
+  return { recipients };
+}
+
 /**
  * Send subscription expiry warning email
  */

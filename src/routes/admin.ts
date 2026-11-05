@@ -41,6 +41,7 @@ import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 import { resolveStoredAssessmentTotal } from '../services/result-score-calculation.js';
+import { buildSubscriptionReceiptPdf, getSubscriptionReceiptData, listSchoolSubscriptionReceipts } from '../services/subscription-receipts.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -766,6 +767,7 @@ router.use((req: Request, res: Response, next: any) => {
     '/school/',
     '/subscribe',
     '/subscription/status',
+    '/subscription/receipts',
     '/impersonate',
     '/request-password-reset',
     '/reset-password',
@@ -11400,6 +11402,38 @@ router.get('/subscription/status', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching subscription status:', error);
     res.status(500).json({ error: 'Failed to fetch subscription status' });
+  }
+});
+
+router.get('/subscription/receipts', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(400).json({ error: 'School ID required.' });
+    const receipts = await listSchoolSubscriptionReceipts(schoolId);
+    return res.json({ receipts });
+  } catch (error) {
+    console.error('Error fetching school subscription receipts:', error);
+    return res.status(500).json({ error: 'Failed to fetch subscription receipts.' });
+  }
+});
+
+router.get('/subscription/receipts/:paymentId/pdf', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(400).json({ error: 'School ID required.' });
+    const receipt = await getSubscriptionReceiptData(req.params.paymentId);
+    if (!receipt || receipt.schoolId !== schoolId) {
+      return res.status(404).json({ error: 'Subscription receipt not found.' });
+    }
+
+    const pdf = await buildSubscriptionReceiptPdf(receipt);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="SchoolBase-Receipt-${receipt.receiptNumber}.pdf"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.send(Buffer.from(pdf));
+  } catch (error) {
+    console.error('Error generating school subscription receipt:', error);
+    return res.status(500).json({ error: 'Failed to generate subscription receipt.' });
   }
 });
 

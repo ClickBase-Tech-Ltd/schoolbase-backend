@@ -4,7 +4,7 @@ import { Router, Request, Response } from 'express';
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
-import { sendPaymentSuccessEmail } from '../jobs/subscriptionEmails.js';
+import { sendSubscriptionReceipt } from '../services/subscription-receipts.js';
 import { getConfiguredPaymentPlans } from '../services/platform-settings.js';
 import { getBillingMarketCatalog, getMarketPricing } from '../services/billing-markets.js';
 import { getBillingMarket } from '../services/billing-markets.js';
@@ -292,6 +292,7 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
       return res.json({
         success: true,
         school: completedSchool,
+        receiptPaymentId: payment.id,
         subscriptionApplied: paymentDetails.subscriptionApplied !== false,
         message: paymentDetails.subscriptionApplied === false
           ? 'Payment was received, but the subscription needs SchoolBase review before access can be updated.'
@@ -466,11 +467,20 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
 
     const updatedSchool = applyResult.school;
     if (!updatedSchool && applyResult.reviewRequired) {
+      let receiptEmailStatus: 'SENT' | 'FAILED' = 'SENT';
+      try {
+        await sendSubscriptionReceipt(payment.id);
+      } catch (emailError) {
+        receiptEmailStatus = 'FAILED';
+        console.error('Payment was confirmed for review, but sending its receipt email failed:', emailError);
+      }
       return res.json({
         success: true,
         subscriptionApplied: false,
         message: 'Payment was received, but the subscription changed or expired during checkout. Contact SchoolBase to apply it.',
         reference: transaction.reference,
+        receiptPaymentId: payment.id,
+        receiptEmailStatus,
         transaction: { reference: transaction.reference, amount: expectedAmountMinor, currency: 'NGN' },
       });
     }
@@ -500,50 +510,24 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
       return res.json({
         success: true,
         school: alreadyUpdatedSchool,
+        receiptPaymentId: payment.id,
         transaction: { reference: transaction.reference, amount: expectedAmountMinor, currency: 'NGN' },
       });
     }
 
-    // Send payment success email
+    let receiptEmailStatus: 'SENT' | 'FAILED' = 'SENT';
     try {
-      const admin = await prisma.user.findFirst({
-        where: {
-          schoolId: school.id,
-          role: 'SCHOOL_ADMIN',
-        },
-        select: { email: true, name: true },
-      });
-
-      if (admin?.email) {
-        const amountFormatted = (expectedAmountMinor / 100).toLocaleString('en-NG', {
-          style: 'currency',
-          currency: 'NGN',
-          minimumFractionDigits: 2,
-        });
-
-        const expiryDate = subscriptionExpiresAt.toLocaleDateString('en-NG', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric',
-        });
-
-        await sendPaymentSuccessEmail(
-          admin.email,
-          updatedSchool.name,
-          admin.name,
-          nextPlan,
-          amountFormatted,
-          expiryDate
-        );
-      }
+      await sendSubscriptionReceipt(payment.id);
     } catch (emailError) {
-      console.error('Error sending payment success email:', emailError);
-      // Don't fail the subscription verification if email fails
+      receiptEmailStatus = 'FAILED';
+      console.error('Subscription payment was confirmed, but sending its receipt email failed:', emailError);
     }
 
     res.json({
       success: true,
       school: updatedSchool,
+      receiptPaymentId: payment.id,
+      receiptEmailStatus,
       transaction: {
         reference: transaction.reference,
         amount: expectedAmountMinor,
