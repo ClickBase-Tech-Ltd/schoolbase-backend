@@ -8,6 +8,12 @@ import { sendPaymentSuccessEmail } from '../jobs/subscriptionEmails.js';
 import { getConfiguredPaymentPlans } from '../services/platform-settings.js';
 import { getBillingMarketCatalog, getMarketPricing } from '../services/billing-markets.js';
 import { getBillingMarket } from '../services/billing-markets.js';
+import {
+  addSubscriptionBillingMetadata,
+  getRenewedExpiry,
+  getSubscriptionQuote,
+  type SubscriptionBillingIntent,
+} from '../services/subscription-billing.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -61,6 +67,9 @@ router.post('/init', async (req: Request, res: Response) => {
     let school = null;
     let marketCountry = '';
     let marketCurrency = '';
+    let subscriptionQuote = null;
+    let subscriptionBillingIntent: SubscriptionBillingIntent | null = null;
+    let subscriptionCurrentExpiry: Date | null = null;
 
     if (isSubscription) {
       const schoolSlug = typeof metadata?.schoolSlug === 'string' ? metadata.schoolSlug.trim() : '';
@@ -73,7 +82,15 @@ router.post('/init', async (req: Request, res: Response) => {
 
       school = await prisma.school.findFirst({
         where: { slug: schoolSlug },
-        select: { id: true, name: true, slug: true, country: true, currency: true },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          country: true,
+          currency: true,
+          plan: true,
+          subscriptionExpiresAt: true,
+        },
       });
 
       if (!school) return res.status(404).json({ error: 'School not found for subscription checkout.' });
@@ -90,20 +107,58 @@ router.post('/init', async (req: Request, res: Response) => {
       }
       const catalog = await getBillingMarketCatalog(prisma);
       const marketPricing = getMarketPricing(schoolMarket, catalog, Boolean(PAYSTACK_SECRET_KEY));
-      const marketPlan = catalog[schoolMarket.countryCode].plans[planMap[requestedPlan]];
+      const marketPlans = catalog[schoolMarket.countryCode].plans;
+      const marketPlan = marketPlans[planMap[requestedPlan]];
       if (!marketPricing.checkoutAvailable || marketPricing.provider !== 'PAYSTACK') {
         return res.status(409).json({ error: 'Online subscription checkout is not enabled for this school billing market.' });
       }
       if (!PAYSTACK_SECRET_KEY) {
         return res.status(503).json({ error: 'Paystack is not configured for subscription checkout.' });
       }
-      if (!marketPlan || marketPlan.amountMinor <= 0 || requestedAmountMinor !== marketPlan.amountMinor) {
+      if (!marketPlan || marketPlan.amountMinor <= 0) {
         return res.status(400).json({ error: 'The selected plan price is unavailable or has changed. Refresh the page before trying again.' });
+      }
+      const now = new Date();
+      const hasActivePaidSubscription = ['STARTER', 'GROWTH', 'ENTERPRISE'].includes(school.plan)
+        && school.subscriptionExpiresAt !== null
+        && school.subscriptionExpiresAt.getTime() > now.getTime();
+      const requestedIntent = metadata?.billingIntent;
+      if (
+        requestedIntent !== undefined &&
+        requestedIntent !== 'NEW' &&
+        requestedIntent !== 'RENEWAL' &&
+        requestedIntent !== 'UPGRADE'
+      ) {
+        return res.status(400).json({ error: 'Choose whether this payment is a new subscription, renewal, or upgrade.' });
+      }
+      subscriptionBillingIntent = requestedIntent || (hasActivePaidSubscription ? null : 'NEW');
+      if (!subscriptionBillingIntent) {
+        return res.status(400).json({ error: 'Choose Upgrade explicitly to change an active subscription plan.' });
+      }
+      subscriptionCurrentExpiry = school.subscriptionExpiresAt;
+      try {
+        subscriptionQuote = getSubscriptionQuote({
+          intent: subscriptionBillingIntent,
+          currentPlan: school.plan,
+          currentExpiry: school.subscriptionExpiresAt,
+          targetPlan: planMap[requestedPlan],
+          planPrices: {
+            STARTER: marketPlans.STARTER.amountMinor,
+            GROWTH: marketPlans.GROWTH.amountMinor,
+            ENTERPRISE: marketPlans.ENTERPRISE.amountMinor,
+          },
+          now,
+        });
+      } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to calculate the subscription price.' });
+      }
+      if (requestedAmountMinor !== subscriptionQuote.amountMinor) {
+        return res.status(400).json({ error: 'The subscription price has changed. Refresh the page and review the updated amount before paying.' });
       }
     }
 
     const resolvedAmountMinor = isSubscription
-      ? amountMinor
+      ? subscriptionQuote.amountMinor
       : Math.round(normalizedAmount * 100);
 
     // Build metadata for Paystack while preserving the original values for verification.
@@ -115,6 +170,7 @@ router.post('/init', async (req: Request, res: Response) => {
       country: isSubscription ? marketCountry : '',
       currency: isSubscription ? marketCurrency : '',
       isSubscription,
+      billingIntent: subscriptionBillingIntent,
       name: metadata?.name || '',
       phone: metadata?.phone || '',
       amountMinor: resolvedAmountMinor,
@@ -149,7 +205,7 @@ router.post('/init', async (req: Request, res: Response) => {
           method: 'CARD',
           reference,
           recordedBy: school?.id || null,
-          note: JSON.stringify({
+          note: JSON.stringify(addSubscriptionBillingMetadata({
             schoolId: school?.id || null,
             schoolName: school?.name || metadata?.schoolName || '',
             schoolSlug: school?.slug || metadata?.schoolSlug || metadata?.slug || '',
@@ -161,7 +217,8 @@ router.post('/init', async (req: Request, res: Response) => {
             country: isSubscription ? marketCountry : undefined,
             currency: isSubscription ? marketCurrency : undefined,
             expectedAmountMinor: isSubscription ? resolvedAmountMinor : undefined,
-          }),
+            schoolPlanAtCheckout: isSubscription ? school.plan : undefined,
+          }, subscriptionQuote, subscriptionCurrentExpiry)),
         },
       });
     }
@@ -235,10 +292,14 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
       return res.json({
         success: true,
         school: completedSchool,
+        subscriptionApplied: paymentDetails.subscriptionApplied !== false,
+        message: paymentDetails.subscriptionApplied === false
+          ? 'Payment was received, but the subscription needs SchoolBase review before access can be updated.'
+          : undefined,
         transaction: { reference: reference.trim(), amount: payment.amount, currency: paymentDetails.currency || 'NGN' },
       });
     }
-    if (paymentDetails.source !== 'paystack-init' || paymentDetails.subscription === false) {
+    if (paymentDetails.source !== 'paystack-init' || paymentDetails.subscription !== true) {
       return res.status(400).json({ error: 'The payment record is not a subscription checkout.' });
     }
 
@@ -317,8 +378,45 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'The verified payment does not match the school, market, currency, and plan amount.' });
     }
 
-    const subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    const updatedSchool = await prisma.$transaction(async (tx) => {
+    const billingIntent: SubscriptionBillingIntent = ['NEW', 'RENEWAL', 'UPGRADE'].includes(paymentDetails.billingIntent)
+      ? paymentDetails.billingIntent
+      : 'NEW';
+    const previousExpiry = typeof paymentDetails.previousExpiry === 'string'
+      ? new Date(paymentDetails.previousExpiry)
+      : null;
+    const hasBillingSnapshot = ['NEW', 'RENEWAL', 'UPGRADE'].includes(paymentDetails.billingIntent)
+      && Object.hasOwn(paymentDetails, 'previousExpiry')
+      && Object.hasOwn(paymentDetails, 'schoolPlanAtCheckout');
+    const paidAt = paymentRecordedAt;
+    const subscriptionExpiresAt = billingIntent === 'UPGRADE'
+      ? previousExpiry
+      : billingIntent === 'RENEWAL'
+        ? getRenewedExpiry(previousExpiry, paidAt)
+        : getRenewedExpiry(null, paidAt);
+    const applyResult = await prisma.$transaction(async (tx) => {
+      const currentSchool = await tx.school.findUnique({
+        where: { id: school.id },
+        select: { plan: true, subscriptionExpiresAt: true },
+      });
+      if (!currentSchool) return { school: null, reviewRequired: false };
+      const snapshotMatches = !hasBillingSnapshot || (
+        currentSchool.plan === paymentDetails.schoolPlanAtCheckout &&
+        (currentSchool.subscriptionExpiresAt?.getTime() ?? null) === (previousExpiry?.getTime() ?? null)
+      );
+      const currentPlanRanks: Record<string, number> = { STARTER: 1, GROWTH: 2, ENTERPRISE: 3 };
+      const activeAtPayment = Boolean(
+        currentPlanRanks[currentSchool.plan] &&
+        currentSchool.subscriptionExpiresAt &&
+        currentSchool.subscriptionExpiresAt.getTime() > paidAt.getTime(),
+      );
+      const intentStillValid = billingIntent === 'NEW'
+        ? !activeAtPayment
+        : billingIntent === 'RENEWAL'
+          ? currentSchool.plan === nextPlan
+          : currentPlanRanks[nextPlan] > currentPlanRanks[currentSchool.plan]
+            && Boolean(currentSchool.subscriptionExpiresAt && currentSchool.subscriptionExpiresAt.getTime() > paidAt.getTime());
+      const legacyActivePaymentNeedsReview = !hasBillingSnapshot && activeAtPayment;
+      const reviewRequired = !snapshotMatches || !intentStillValid || legacyActivePaymentNeedsReview;
       const completedDetails = {
         ...paymentDetails,
         schoolId: school.id,
@@ -331,6 +429,8 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
         status: 'ACTIVE',
         paymentStatus: 'COMPLETED',
         source: 'paystack-verify',
+        subscriptionApplied: !reviewRequired,
+        subscriptionApplicationStatus: reviewRequired ? 'REVIEW_REQUIRED' : 'APPLIED',
         paymentDateSource: providerPaidAt && !Number.isNaN(providerPaidAt.getTime()) ? 'PAYSTACK_PAID_AT' : 'VERIFIED_AT',
       };
       const claimed = await tx.platformPayment.updateMany({
@@ -342,9 +442,10 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
           note: JSON.stringify(completedDetails),
         },
       });
-      if (claimed.count !== 1) return null;
+      if (claimed.count !== 1) return { school: null, reviewRequired: false };
+      if (reviewRequired) return { school: null, reviewRequired: true };
 
-      return tx.school.update({
+      const updated = await tx.school.update({
         where: { id: school.id },
         data: {
           status: 'ACTIVE',
@@ -360,7 +461,19 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
           subscriptionExpiresAt: true,
         },
       });
+      return { school: updated, reviewRequired: false };
     });
+
+    const updatedSchool = applyResult.school;
+    if (!updatedSchool && applyResult.reviewRequired) {
+      return res.json({
+        success: true,
+        subscriptionApplied: false,
+        message: 'Payment was received, but the subscription changed or expired during checkout. Contact SchoolBase to apply it.',
+        reference: transaction.reference,
+        transaction: { reference: transaction.reference, amount: expectedAmountMinor, currency: 'NGN' },
+      });
+    }
 
     if (!updatedSchool) {
       const latestPayment = await prisma.platformPayment.findUnique({

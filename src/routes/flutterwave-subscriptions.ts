@@ -12,6 +12,12 @@ import {
   isFlutterwaveSubscriptionConfigured,
 } from '../services/billing-markets.js';
 import type { BillingPlanCode } from '../services/billing-markets.js';
+import {
+  addSubscriptionBillingMetadata,
+  getRenewedExpiry,
+  getSubscriptionQuote,
+  type SubscriptionBillingIntent,
+} from '../services/subscription-billing.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -58,7 +64,7 @@ async function initializeFlutterwaveCheckout(input: {
   schoolName: string;
   planLabel: string;
   redirectUrl: string;
-  meta: Record<string, string>;
+  meta: Record<string, string | number>;
 }): Promise<string> {
   const secretKey = process.env.FLUTTERWAVE_SECRET_KEY?.trim();
   if (!secretKey) throw new Error('Flutterwave is not configured for checkout.');
@@ -135,7 +141,16 @@ async function completeSubscription(reference: string, transactionId: string) {
     if (!school) return { status: 404, body: { error: 'School not found for completed payment.' } };
     return {
       status: 200,
-      body: { success: true, school, reference, transaction: { reference, amount: payment.amount, currency: paymentDetails.currency } },
+      body: {
+        success: true,
+        school,
+        reference,
+        subscriptionApplied: paymentDetails.subscriptionApplied !== false,
+        message: paymentDetails.subscriptionApplied === false
+          ? 'Payment was received, but the subscription needs SchoolBase review before access can be updated.'
+          : undefined,
+        transaction: { reference, amount: payment.amount, currency: paymentDetails.currency },
+      },
     };
   }
 
@@ -166,7 +181,15 @@ async function completeSubscription(reference: string, transactionId: string) {
 
   const school = await prisma.school.findUnique({
     where: { id: schoolId },
-    select: { id: true, name: true, slug: true, country: true, currency: true },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      country: true,
+      currency: true,
+      plan: true,
+      subscriptionExpiresAt: true,
+    },
   });
   if (!school) return { status: 404, body: { error: 'School not found for subscription verification.' } };
   const market = getBillingMarket(school.country);
@@ -218,14 +241,52 @@ async function completeSubscription(reference: string, transactionId: string) {
 
   const providerCreatedAt = typeof tx.created_at === 'string' ? new Date(tx.created_at) : null;
   const paymentRecordedAt = providerCreatedAt && !Number.isNaN(providerCreatedAt.getTime()) ? providerCreatedAt : new Date();
-  const subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-  const updatedSchool = await prisma.$transaction(async (txClient) => {
+  const billingIntent: SubscriptionBillingIntent = ['NEW', 'RENEWAL', 'UPGRADE'].includes(String(paymentDetails.billingIntent))
+    ? paymentDetails.billingIntent as SubscriptionBillingIntent
+    : 'NEW';
+  const previousExpiry = typeof paymentDetails.previousExpiry === 'string'
+    ? new Date(paymentDetails.previousExpiry)
+    : null;
+  const hasBillingSnapshot = ['NEW', 'RENEWAL', 'UPGRADE'].includes(String(paymentDetails.billingIntent))
+    && Object.hasOwn(paymentDetails, 'previousExpiry')
+    && Object.hasOwn(paymentDetails, 'schoolPlanAtCheckout');
+  const subscriptionExpiresAt = billingIntent === 'UPGRADE'
+    ? previousExpiry
+    : billingIntent === 'RENEWAL'
+      ? getRenewedExpiry(previousExpiry, paymentRecordedAt)
+      : getRenewedExpiry(null, paymentRecordedAt);
+  const applyResult = await prisma.$transaction(async (txClient) => {
+    const currentSchool = await txClient.school.findUnique({
+      where: { id: school.id },
+      select: { plan: true, subscriptionExpiresAt: true },
+    });
+    if (!currentSchool) return { school: null, reviewRequired: false };
+    const snapshotMatches = !hasBillingSnapshot || (
+      currentSchool.plan === paymentDetails.schoolPlanAtCheckout &&
+      (currentSchool.subscriptionExpiresAt?.getTime() ?? null) === (previousExpiry?.getTime() ?? null)
+    );
+    const currentPlanRanks: Record<string, number> = { STARTER: 1, GROWTH: 2, ENTERPRISE: 3 };
+    const activeAtPayment = Boolean(
+      currentPlanRanks[currentSchool.plan] &&
+      currentSchool.subscriptionExpiresAt &&
+      currentSchool.subscriptionExpiresAt.getTime() > paymentRecordedAt.getTime(),
+    );
+    const intentStillValid = billingIntent === 'NEW'
+      ? !activeAtPayment
+      : billingIntent === 'RENEWAL'
+        ? currentSchool.plan === plan
+        : currentPlanRanks[plan] > currentPlanRanks[currentSchool.plan]
+          && Boolean(currentSchool.subscriptionExpiresAt && currentSchool.subscriptionExpiresAt.getTime() > paymentRecordedAt.getTime());
+    const legacyActivePaymentNeedsReview = !hasBillingSnapshot && activeAtPayment;
+    const reviewRequired = !snapshotMatches || !intentStillValid || legacyActivePaymentNeedsReview;
     const completedDetails = {
       ...paymentDetails,
       paymentStatus: 'COMPLETED',
       status: 'ACTIVE',
       transactionId,
       source: 'flutterwave-subscription-verify',
+      subscriptionApplied: !reviewRequired,
+      subscriptionApplicationStatus: reviewRequired ? 'REVIEW_REQUIRED' : 'APPLIED',
       paymentDateSource: providerCreatedAt && !Number.isNaN(providerCreatedAt.getTime()) ? 'FLUTTERWAVE_CREATED_AT' : 'VERIFIED_AT',
     };
     const claimed = await txClient.platformPayment.updateMany({
@@ -237,14 +298,33 @@ async function completeSubscription(reference: string, transactionId: string) {
         note: JSON.stringify(completedDetails),
       },
     });
-    if (claimed.count !== 1) return null;
+    if (claimed.count !== 1) return { school: null, reviewRequired: false };
+    if (reviewRequired) return { school: null, reviewRequired: true };
 
-    return txClient.school.update({
+    const updated = await txClient.school.update({
       where: { id: school.id },
       data: { status: 'ACTIVE', plan, subscriptionExpiresAt },
       select: { id: true, name: true, slug: true, status: true, plan: true, subscriptionExpiresAt: true },
     });
+    return { school: updated, reviewRequired: false };
   });
+
+  const updatedSchool = applyResult.school;
+  if (!updatedSchool && applyResult.reviewRequired) {
+    return {
+      status: 200,
+      body: {
+        success: true,
+        subscriptionApplied: false,
+        message: 'Payment was received, but the subscription changed or expired during checkout. Contact SchoolBase to apply it.',
+        reference,
+        transaction: { reference, amount: expectedAmountMinor, currency: expectedCurrency },
+      },
+    };
+  }
+  if (!subscriptionExpiresAt) {
+    return { status: 500, body: { error: 'The subscription expiry could not be calculated. Contact SchoolBase support.' } };
+  }
 
   if (!updatedSchool) {
     const latest = await prisma.platformPayment.findUnique({ where: { id: payment.id }, select: { note: true } });
@@ -263,7 +343,16 @@ async function completeSubscription(reference: string, transactionId: string) {
     if (!alreadyUpdatedSchool) return { status: 404, body: { error: 'School not found after payment verification.' } };
     return {
       status: 200,
-      body: { success: true, school: alreadyUpdatedSchool, reference, transaction: { reference, amount: expectedAmountMinor, currency: expectedCurrency } },
+      body: {
+        success: true,
+        school: alreadyUpdatedSchool,
+        reference,
+        subscriptionApplied: latestDetails.subscriptionApplied !== false,
+        message: latestDetails.subscriptionApplied === false
+          ? 'Payment was received, but the subscription needs SchoolBase review before access can be updated.'
+          : undefined,
+        transaction: { reference, amount: expectedAmountMinor, currency: expectedCurrency },
+      },
     };
   }
 
@@ -307,7 +396,15 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
     const [school, catalog] = await Promise.all([
       prisma.school.findUnique({
         where: { id: user.schoolId },
-        select: { id: true, name: true, slug: true, country: true, currency: true },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          country: true,
+          currency: true,
+          plan: true,
+          subscriptionExpiresAt: true,
+        },
       }),
       getBillingMarketCatalog(prisma),
     ]);
@@ -331,6 +428,47 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
     if (!planSetting || planSetting.amountMinor <= 0 || planSetting.amountMinor > 2147483647) {
       return res.status(409).json({ error: 'The selected plan does not have a valid online checkout price.' });
     }
+    const now = new Date();
+    const isPaidPlan = ['STARTER', 'GROWTH', 'ENTERPRISE'].includes(school.plan);
+    const hasActivePaidSubscription = isPaidPlan
+      && school.subscriptionExpiresAt !== null
+      && school.subscriptionExpiresAt.getTime() > now.getTime();
+    const requestedIntent = req.body?.billingIntent;
+    if (
+      requestedIntent !== undefined &&
+      requestedIntent !== 'NEW' &&
+      requestedIntent !== 'RENEWAL' &&
+      requestedIntent !== 'UPGRADE'
+    ) {
+      return res.status(400).json({ error: 'Choose whether this payment is a new subscription, renewal, or upgrade.' });
+    }
+    const billingIntent: SubscriptionBillingIntent | null = requestedIntent || (
+      hasActivePaidSubscription ? null : 'NEW'
+    );
+    if (!billingIntent) {
+      return res.status(400).json({ error: 'Choose explicitly whether to renew the current plan or upgrade.' });
+    }
+    let quote: ReturnType<typeof getSubscriptionQuote>;
+    try {
+      const marketPlans = catalog[market.countryCode].plans;
+      quote = getSubscriptionQuote({
+        intent: billingIntent,
+        currentPlan: school.plan,
+        currentExpiry: school.subscriptionExpiresAt,
+        targetPlan: plan,
+        planPrices: {
+          STARTER: marketPlans.STARTER.amountMinor,
+          GROWTH: marketPlans.GROWTH.amountMinor,
+          ENTERPRISE: marketPlans.ENTERPRISE.amountMinor,
+        },
+        now,
+      });
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to calculate the subscription price.' });
+    }
+    if (!Number.isSafeInteger(req.body?.amountMinor) || req.body.amountMinor !== quote.amountMinor) {
+      return res.status(400).json({ error: 'The subscription price has changed. Refresh the page and review the updated amount before paying.' });
+    }
     const secretKey = process.env.FLUTTERWAVE_SECRET_KEY?.trim();
     const frontendBaseUrl = getFlutterwaveFrontendBaseUrl();
     if (!secretKey || !frontendBaseUrl) {
@@ -341,11 +479,12 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
     }
 
     const reference = `SB-FLW-${randomUUID()}`;
-    const note = JSON.stringify({
+    const note = JSON.stringify(addSubscriptionBillingMetadata({
       schoolId: school.id,
       schoolName: school.name,
       schoolSlug: school.slug,
       plan,
+      schoolPlanAtCheckout: school.plan,
       status: 'PENDING',
       paymentStatus: 'PENDING',
       source: 'flutterwave-subscription-init',
@@ -353,11 +492,11 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
       subscription: true,
       country: market.countryCode,
       currency: market.currency,
-      expectedAmountMinor: planSetting.amountMinor,
-    });
+      expectedAmountMinor: quote.amountMinor,
+    }, quote, school.subscriptionExpiresAt));
     const payment = await prisma.platformPayment.create({
       data: {
-        amount: planSetting.amountMinor,
+        amount: quote.amountMinor,
         method: PaymentMethod.CARD,
         reference,
         recordedBy: school.id,
@@ -373,7 +512,7 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
         headers: { Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tx_ref: reference,
-          amount: planSetting.amountMinor / 100,
+          amount: quote.amountMinor / 100,
           currency: market.currency,
           redirect_url: `${frontendBaseUrl}/admin/subscription-success`,
           customer: {
@@ -388,6 +527,8 @@ router.post('/subscription/init', verifyAuth, requireAdmin, async (req: Request,
             schoolId: school.id,
             plan,
             country: market.countryCode,
+            billingIntent: quote.intent,
+            amountMinor: quote.amountMinor,
           },
         }),
         signal: AbortSignal.timeout(15000),
@@ -461,12 +602,28 @@ router.post('/public-subscription/init', async (req: Request, res: Response) => 
     const [school, catalog] = await Promise.all([
       prisma.school.findFirst({
         where: { slug: schoolSlug },
-        select: { id: true, name: true, slug: true, country: true, currency: true, archivedAt: true },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          country: true,
+          currency: true,
+          plan: true,
+          subscriptionExpiresAt: true,
+          archivedAt: true,
+        },
       }),
       getBillingMarketCatalog(prisma),
     ]);
     if (!school) return res.status(404).json({ error: 'School not found for subscription checkout.' });
     if (school.archivedAt) return res.status(409).json({ error: 'Archived schools cannot start subscription checkout.' });
+    if (
+      ['STARTER', 'GROWTH', 'ENTERPRISE'].includes(school.plan) &&
+      school.subscriptionExpiresAt &&
+      school.subscriptionExpiresAt.getTime() > Date.now()
+    ) {
+      return res.status(409).json({ error: 'An active school must sign in as an administrator to choose renewal or upgrade.' });
+    }
 
     const market = getBillingMarket(school.country);
     if (!market || String(school.currency ?? '').trim().toUpperCase() !== market.currency) {
@@ -487,6 +644,23 @@ router.post('/public-subscription/init', async (req: Request, res: Response) => 
     if (!planSetting || planSetting.amountMinor <= 0 || planSetting.amountMinor > 2147483647) {
       return res.status(409).json({ error: 'The selected plan does not have a valid online checkout price.' });
     }
+    let quote: ReturnType<typeof getSubscriptionQuote>;
+    try {
+      const marketPlans = catalog[market.countryCode].plans;
+      quote = getSubscriptionQuote({
+        intent: 'NEW',
+        currentPlan: school.plan,
+        currentExpiry: school.subscriptionExpiresAt,
+        targetPlan: plan,
+        planPrices: {
+          STARTER: marketPlans.STARTER.amountMinor,
+          GROWTH: marketPlans.GROWTH.amountMinor,
+          ENTERPRISE: marketPlans.ENTERPRISE.amountMinor,
+        },
+      });
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : 'Unable to calculate the subscription price.' });
+    }
 
     const frontendBaseUrl = getFlutterwaveFrontendBaseUrl();
     if (!frontendBaseUrl) {
@@ -494,11 +668,12 @@ router.post('/public-subscription/init', async (req: Request, res: Response) => 
     }
 
     const reference = `SB-FLW-${randomUUID()}`;
-    const note = JSON.stringify({
+    const note = JSON.stringify(addSubscriptionBillingMetadata({
       schoolId: school.id,
       schoolName: school.name,
       schoolSlug: school.slug,
       plan,
+      schoolPlanAtCheckout: school.plan,
       status: 'PENDING',
       paymentStatus: 'PENDING',
       source: 'flutterwave-public-subscription-init',
@@ -506,12 +681,12 @@ router.post('/public-subscription/init', async (req: Request, res: Response) => 
       subscription: true,
       country: market.countryCode,
       currency: market.currency,
-      expectedAmountMinor: planSetting.amountMinor,
+      expectedAmountMinor: quote.amountMinor,
       contactEmail: email,
-    });
+    }, quote, school.subscriptionExpiresAt));
     const payment = await prisma.platformPayment.create({
       data: {
-        amount: planSetting.amountMinor,
+        amount: quote.amountMinor,
         method: PaymentMethod.CARD,
         reference,
         recordedBy: school.id,
@@ -524,7 +699,7 @@ router.post('/public-subscription/init', async (req: Request, res: Response) => 
     try {
       checkoutLink = await initializeFlutterwaveCheckout({
         reference,
-        amountMinor: planSetting.amountMinor,
+        amountMinor: quote.amountMinor,
         currency: market.currency,
         email,
         name,
@@ -535,6 +710,8 @@ router.post('/public-subscription/init', async (req: Request, res: Response) => 
           schoolId: school.id,
           plan,
           country: market.countryCode,
+          billingIntent: quote.intent,
+          amountMinor: quote.amountMinor,
         },
       });
     } catch (error) {

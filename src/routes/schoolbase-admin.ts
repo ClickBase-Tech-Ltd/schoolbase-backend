@@ -1006,6 +1006,12 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
               currency: true,
               plan: true,
               status: true,
+              users: {
+                where: { role: 'SCHOOL_ADMIN', isActive: true },
+                orderBy: { createdAt: 'asc' },
+                take: 1,
+                select: { email: true },
+              },
             },
           });
           school = schoolMatch || null;
@@ -1021,12 +1027,16 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
         schoolId: payment.recordedBy || parsedNote?.schoolId || null,
         schoolName: school?.name || parsedNote?.schoolName || getSchoolNameFromNote(noteText) || 'Unknown school',
         schoolSlug: school?.slug || parsedNote?.schoolSlug || null,
-        schoolEmail: school?.email || parsedNote?.schoolEmail || null,
+        schoolEmail: school?.email || school?.users?.[0]?.email || parsedNote?.schoolEmail || null,
         schoolCountry: school?.country || parsedNote?.schoolCountry || null,
         plan: parsedNote?.plan || school?.plan || null,
         currency: parsedNote?.currency || school?.currency || 'NGN',
         status: school?.status || parsedNote?.status || null,
         paymentStatus: noteStatus || 'COMPLETED',
+        subscriptionApplicationStatus: typeof parsedNote?.subscriptionApplicationStatus === 'string'
+          ? parsedNote.subscriptionApplicationStatus
+          : null,
+        billingIntent: typeof parsedNote?.billingIntent === 'string' ? parsedNote.billingIntent : null,
       };
     }));
 
@@ -1111,6 +1121,11 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
     const requestedPlan = typeof req.body?.plan === 'string' ? req.body.plan.trim().toUpperCase() : 'CUSTOM';
     const plans = ['STARTER', 'GROWTH', 'ENTERPRISE', 'CUSTOM'] as const;
     const plan = plans.find((value) => value === requestedPlan);
+    const requestedBillingAction = typeof req.body?.billingAction === 'string'
+      ? req.body.billingAction.trim().toUpperCase()
+      : 'RECORD_ONLY';
+    const billingActions = ['RECORD_ONLY', 'NEW', 'RENEWAL', 'UPGRADE'] as const;
+    const billingAction = billingActions.find((value) => value === requestedBillingAction);
     const requestedMethod = typeof req.body?.method === 'string' ? req.body.method.trim().toUpperCase() : 'BANK_TRANSFER';
     const paymentMethods = ['BANK_TRANSFER', 'CASH', 'CARD', 'ONLINE', 'OTHER'] as const;
     const method = paymentMethods.find((value) => value === requestedMethod);
@@ -1120,6 +1135,9 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
     }
     if (!plan) {
       return res.status(400).json({ message: 'Select a valid subscription plan.' });
+    }
+    if (!billingAction) {
+      return res.status(400).json({ message: 'Select a valid subscription action.' });
     }
     if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(Math.round(amount * 100)) || Math.round(amount * 100) > 2147483647) {
       return res.status(400).json({ message: 'Enter a valid payment amount.' });
@@ -1139,6 +1157,12 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
     if (!method) {
       return res.status(400).json({ message: 'Select a valid payment method.' });
     }
+    if (billingAction !== 'RECORD_ONLY' && !schoolId) {
+      return res.status(400).json({ message: 'Link an existing school to apply a payment to its subscription.' });
+    }
+    if (billingAction !== 'RECORD_ONLY' && plan === 'CUSTOM') {
+      return res.status(400).json({ message: 'Choose a configured subscription plan before applying this payment.' });
+    }
     if (reference.length > 120) {
       return res.status(400).json({ message: 'Payment reference must be 120 characters or fewer.' });
     }
@@ -1146,13 +1170,58 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
     const school = schoolId
       ? await prisma.school.findUnique({
           where: { id: schoolId },
-          select: { id: true, name: true, slug: true, country: true },
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            country: true,
+            currency: true,
+            email: true,
+            plan: true,
+            status: true,
+            subscriptionExpiresAt: true,
+            users: {
+              where: { role: 'SCHOOL_ADMIN', isActive: true },
+              orderBy: { createdAt: 'asc' },
+              take: 1,
+              select: { email: true },
+            },
+          },
         })
       : null;
     if (schoolId && !school) {
       return res.status(404).json({ message: 'The selected school could not be found.' });
     }
     if (school) schoolName = school.name;
+    if (billingAction !== 'RECORD_ONLY' && school) {
+      const paidPlans = ['STARTER', 'GROWTH', 'ENTERPRISE'];
+      const planRanks: Record<string, number> = { STARTER: 1, GROWTH: 2, ENTERPRISE: 3 };
+      const currentPlan = paidPlans.includes(school.plan) ? school.plan : null;
+      const currentExpiry = school.subscriptionExpiresAt;
+      const paymentTime = paymentDate ? new Date(`${paymentDate}T12:00:00.000Z`) : new Date();
+      const isActivePaid = Boolean(currentPlan && currentExpiry && currentExpiry.getTime() > Date.now());
+      const billingMarket = getBillingMarket(school.country);
+      if (!billingMarket || billingMarket.currency !== currency || String(school.currency ?? '').toUpperCase() !== currency) {
+        return res.status(409).json({ message: 'The payment currency must match the selected school billing market before applying it.' });
+      }
+      if (billingAction === 'NEW' && isActivePaid) {
+        return res.status(409).json({ message: 'This school already has an active paid subscription. Choose renewal or upgrade instead.' });
+      }
+      if (billingAction === 'RENEWAL' && (!currentPlan || plan !== currentPlan)) {
+        return res.status(409).json({ message: 'A renewal must keep the school’s current paid plan. Use upgrade to change plans.' });
+      }
+      if (billingAction === 'UPGRADE' && (
+        !currentPlan ||
+        !currentExpiry ||
+        currentExpiry.getTime() <= Date.now() ||
+        planRanks[plan!] <= planRanks[currentPlan]
+      )) {
+        return res.status(409).json({ message: 'An upgrade requires an active paid subscription and a higher plan.' });
+      }
+      if (paymentTime.getTime() > Date.now()) {
+        return res.status(400).json({ message: 'The payment date cannot be in the future when applying a subscription.' });
+      }
+    }
     if (reference) {
       const existingReference = await prisma.platformPayment.findFirst({
         where: { reference },
@@ -1165,7 +1234,7 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
 
     const amountMinor = Math.round(amount * 100);
     const createdAt = paymentDate ? new Date(`${paymentDate}T12:00:00.000Z`) : new Date();
-    const note = {
+    const noteBase = {
       source: 'manual-subscription-entry',
       paymentStatus: 'COMPLETED',
       status: 'ACTIVE',
@@ -1174,11 +1243,43 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
       schoolName,
       schoolSlug: school?.slug,
       schoolCountry: school?.country,
+      schoolEmail: school?.email || school?.users?.[0]?.email || null,
       currency,
       expectedAmountMinor: amountMinor,
       recordedByPlatformAdminId: session,
     };
-    const payment = await prisma.$transaction(async (transaction) => {
+    const transactionResult = await prisma.$transaction(async (transaction) => {
+      const currentSchool = billingAction !== 'RECORD_ONLY' && school
+        ? await transaction.school.findUnique({
+            where: { id: school.id },
+            select: { plan: true, subscriptionExpiresAt: true },
+          })
+        : null;
+      if (billingAction !== 'RECORD_ONLY' && (
+        !currentSchool ||
+        currentSchool.plan !== school?.plan ||
+        (currentSchool.subscriptionExpiresAt?.getTime() ?? null) !== (school?.subscriptionExpiresAt?.getTime() ?? null)
+      )) {
+        return { conflict: true as const };
+      }
+
+      const subscriptionExpiresAt = billingAction === 'UPGRADE'
+        ? school?.subscriptionExpiresAt ?? null
+        : billingAction === 'RENEWAL'
+          ? getRenewedExpiry(school?.subscriptionExpiresAt ?? null, createdAt)
+          : billingAction === 'NEW'
+            ? getRenewedExpiry(null, createdAt)
+          : null;
+      const note = {
+        ...noteBase,
+        billingIntent: billingAction === 'RECORD_ONLY' ? undefined : billingAction,
+        termDays: billingAction === 'RECORD_ONLY' ? undefined : SUBSCRIPTION_TERM_DAYS,
+        previousPlan: billingAction === 'RECORD_ONLY' ? undefined : school?.plan,
+        previousExpiry: billingAction === 'RECORD_ONLY' ? undefined : school?.subscriptionExpiresAt?.toISOString() ?? null,
+        subscriptionApplied: billingAction !== 'RECORD_ONLY',
+        subscriptionApplicationStatus: billingAction === 'RECORD_ONLY' ? 'RECORD_ONLY' : 'APPLIED',
+        subscriptionExpiresAt: subscriptionExpiresAt?.toISOString() ?? null,
+      };
       const createdPayment = await transaction.platformPayment.create({
         data: {
           amount: amountMinor,
@@ -1199,13 +1300,33 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
           outcome: 'SUCCESS',
           resourceType: 'PLATFORM_PAYMENT',
           resourceId: createdPayment.id,
-          summary: `Recorded ${plan} subscription payment for ${schoolName}`,
+          summary: billingAction === 'RECORD_ONLY'
+            ? `Recorded ${plan} subscription payment for ${schoolName}`
+            : `${billingAction} subscription for ${schoolName} after confirmed payment`,
           actorRole: 'PLATFORM_ADMIN',
-          details: JSON.stringify({ amountMinor, currency, method, reference: reference || null, paymentDate: createdAt.toISOString() }),
+          details: JSON.stringify({
+            amountMinor,
+            currency,
+            method,
+            reference: reference || null,
+            paymentDate: createdAt.toISOString(),
+            billingAction,
+            subscriptionExpiresAt: subscriptionExpiresAt?.toISOString() ?? null,
+          }),
         },
       });
-      return createdPayment;
+      if (billingAction !== 'RECORD_ONLY' && school && subscriptionExpiresAt && plan !== 'CUSTOM') {
+        await transaction.school.update({
+          where: { id: school.id },
+          data: { status: 'ACTIVE', plan, subscriptionExpiresAt },
+        });
+      }
+      return { conflict: false as const, payment: createdPayment, subscriptionExpiresAt };
     });
+    if (transactionResult.conflict) {
+      return res.status(409).json({ message: 'The school subscription changed while this payment was being recorded. Refresh and retry after reviewing the current subscription.' });
+    }
+    const payment = transactionResult.payment;
 
     return res.status(201).json({
       payment: {
@@ -1217,13 +1338,15 @@ router.post('/subscription-payments', async (req: Request, res: Response) => {
         schoolId: school?.id || null,
         schoolName,
         schoolSlug: school?.slug || null,
-        schoolEmail: null,
+        schoolEmail: school?.email || school?.users?.[0]?.email || null,
         schoolCountry: school?.country || null,
         plan,
         currency,
         status: 'ACTIVE',
         paymentStatus: 'COMPLETED',
       },
+      subscriptionApplied: billingAction !== 'RECORD_ONLY',
+      subscriptionExpiresAt: transactionResult.subscriptionExpiresAt,
     });
   } catch (error) {
     console.error('Error recording custom subscription payment:', error);
