@@ -32,7 +32,7 @@ import { buildBulkStudentImportRows, parseCsvText, parseImportDate } from '../se
 import { buildActiveStudentWhere, buildStudentRosterWhere, normalizeStudentEnrollmentStatus } from '../services/student-lifecycle.js';
 import { validateInvoicePaymentAllocation } from '../services/invoice-payment-allocation.js';
 import { reserveNextStaffNumber } from '../services/staff-number.js';
-import { getBillingMarket } from '../services/billing-markets.js';
+import { getBillingMarket, getBillingMarketCatalog } from '../services/billing-markets.js';
 import { buildStaffAttendanceSummary, computeStaffAttendanceStatus, getSchoolLocalDate, isEmployeeExpectedOnDate, isStaffAttendanceWorkday, isValidSchoolDate, parseWorkDays, schoolLocalTimeToUtc } from '../services/staff-attendance.js';
 import { createStaffAttendanceRouter } from './staff-attendance.js';
 import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
@@ -48,6 +48,56 @@ const prisma = new PrismaClient();
 const admissionRetryStore = new AdmissionDeliveryRetryStore(prisma);
 const resultsDomain = new ResultsDomainService(prisma);
 const communicationRulesRegistry = new CommunicationRulesRegistry(DEFAULT_COMMUNICATION_RULES);
+
+class StudentCapacityError extends Error {
+  constructor(
+    public readonly current: number,
+    public readonly limit: number,
+    public readonly requested: number,
+  ) {
+    super('STUDENT_CAPACITY_REACHED');
+  }
+}
+
+async function getConfiguredStudentLimit(schoolId: string): Promise<number | null> {
+  const school = await prisma.school.findUnique({
+    where: { id: schoolId },
+    select: { country: true, plan: true },
+  });
+  if (!school) return null;
+
+  const market = getBillingMarket(school.country);
+  const plan = String(school.plan || '').toUpperCase();
+  if (!market || !['STARTER', 'GROWTH', 'ENTERPRISE'].includes(plan)) return null;
+
+  const catalog = await getBillingMarketCatalog(prisma);
+  return catalog[market.countryCode].plans[plan].studentLimit;
+}
+
+async function assertStudentCapacity(
+  transaction: Prisma.TransactionClient,
+  schoolId: string,
+  studentLimit: number | null,
+  additionalStudents: number,
+): Promise<void> {
+  if (studentLimit === null || additionalStudents <= 0) return;
+
+  const current = await transaction.pupil.count({ where: { schoolId } });
+  if (current + additionalStudents > studentLimit) {
+    throw new StudentCapacityError(current, studentLimit, additionalStudents);
+  }
+}
+
+function respondWithStudentCapacityError(res: Response, error: StudentCapacityError) {
+  return res.status(409).json({
+    code: 'STUDENT_CAPACITY_REACHED',
+    error: `Your plan supports up to ${error.limit} student records. Your school currently has ${error.current}. Upgrade your plan to add more students.`,
+    current: error.current,
+    limit: error.limit,
+    requested: error.requested,
+    subscribeUrl: '/admin/subscribe',
+  });
+}
 
 const sharedDriverManager = new DriverManager({
   EMAIL: new EmailDriver(async ({ recipient, request }) => {
@@ -1285,8 +1335,10 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
 
     if (isAdmissionApprovalStatus(nextStatus)) {
       let result;
+      const studentLimit = await getConfiguredStudentLimit(schoolId);
       try {
         result = await prisma.$transaction(async (transaction) => {
+        await assertStudentCapacity(transaction, schoolId, studentLimit, 1);
         const school = await transaction.school.findUnique({
           where: { id: schoolId },
           select: { name: true, initials: true },
@@ -1370,8 +1422,9 @@ router.patch('/admissions/:id/status', async (req: Request, res: Response) => {
         });
 
           return { application: updated, student };
-        });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
+        if (error instanceof StudentCapacityError) return respondWithStudentCapacityError(res, error);
         if (!(error instanceof Error) || error.message !== 'ADMISSION_APPROVAL_CONFLICT') throw error;
         const completedConversion = await findCompletedAdmissionConversion(prisma, schoolId, application.id);
         if (!completedConversion) throw error;
@@ -5452,6 +5505,19 @@ router.post('/students/import', studentImportUpload.single('file'), async (req: 
       classes,
       existingPupils.map((pupil) => pupil.admissionNo).filter(Boolean) as string[],
     );
+    const importCount = result.validRows.length;
+    const studentLimit = importCount > 0 ? await getConfiguredStudentLimit(schoolId) : null;
+
+    if (importCount > 0) {
+      try {
+        await prisma.$transaction((transaction) =>
+          assertStudentCapacity(transaction, schoolId, studentLimit, importCount),
+        );
+      } catch (error) {
+        if (error instanceof StudentCapacityError) return respondWithStudentCapacityError(res, error);
+        throw error;
+      }
+    }
 
     if (req.query.preview === 'true') {
       const firstAdmissionNo = getNextAdmissionNo({
@@ -5483,6 +5549,7 @@ router.post('/students/import', studentImportUpload.single('file'), async (req: 
     }
 
     const importedCount = await prisma.$transaction(async (transaction) => {
+      await assertStudentCapacity(transaction, schoolId, studentLimit, importCount);
       const firstAdmissionNo = await reserveNextAdmissionNo({
         transaction,
         schoolId,
@@ -5535,7 +5602,7 @@ router.post('/students/import', studentImportUpload.single('file'), async (req: 
         data: { lastSeq: firstSequence + result.validRows.length - 1 },
       });
       return count;
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     await recordActivity({
       event: 'STUDENTS_IMPORTED',
@@ -5545,6 +5612,7 @@ router.post('/students/import', studentImportUpload.single('file'), async (req: 
 
     return res.json({ importedCount, errors: result.errors });
   } catch (error) {
+    if (error instanceof StudentCapacityError) return respondWithStudentCapacityError(res, error);
     console.error('Error importing students:', error);
     return res.status(500).json({ error: 'Failed to import students' });
   }
@@ -5599,6 +5667,10 @@ router.post('/students', upload.single('photo'), async (req: Request, res: Respo
       if (req.file) fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'Student status must be ACTIVE or INACTIVE.' });
     }
+    const studentLimit = await getConfiguredStudentLimit(schoolId);
+    await prisma.$transaction((transaction) =>
+      assertStudentCapacity(transaction, schoolId, studentLimit, 1),
+    );
     const guardianFirst = normalizeField(rawGuardianFirst);
     const guardianLast = normalizeField(rawGuardianLast);
     const normalizedStudentEmail = normalizeField(studentEmail);
@@ -5686,34 +5758,42 @@ router.post('/students', upload.single('photo'), async (req: Request, res: Respo
     }
 
     // Create pupil
-    const pupil = await prisma.pupil.create({
-      data: {
+    const pupil = await prisma.$transaction(async (transaction) => {
+      await assertStudentCapacity(
+        transaction,
         schoolId,
-        firstName,
-        lastName,
-        middleName: normalizeField(middleName),
-        admissionNo: normalizedAdmissionNo,
-        classId: classId || null,
-        status: normalizedStatus,
-        isActive: normalizedStatus === 'ACTIVE',
-        admissionDate: admissionDate ? new Date(admissionDate) : new Date(),
-        gender: normalizeField(gender),
-        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
-        studentEmail: normalizedStudentEmail,
-        studentPhone: normalizedStudentPhone,
-        address: normalizedAddress,
-        bloodGroup: normalizedBloodGroup,
-        genotype: normalizedGenotype,
-        medicalNotes: normalizedMedicalNotes,
-        previousSchool: normalizedPreviousSchool,
-        previousClass: normalizedPreviousClass,
-        photoUrl: req.file ? `/uploads/photos/${req.file.filename}` : null,
-      },
-      include: {
-        class: true,
-        guardians: { include: { guardian: true } },
-      },
-    });
+        studentLimit,
+        1,
+      );
+      return transaction.pupil.create({
+        data: {
+          schoolId,
+          firstName,
+          lastName,
+          middleName: normalizeField(middleName),
+          admissionNo: normalizedAdmissionNo,
+          classId: classId || null,
+          status: normalizedStatus,
+          isActive: normalizedStatus === 'ACTIVE',
+          admissionDate: admissionDate ? new Date(admissionDate) : new Date(),
+          gender: normalizeField(gender),
+          dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+          studentEmail: normalizedStudentEmail,
+          studentPhone: normalizedStudentPhone,
+          address: normalizedAddress,
+          bloodGroup: normalizedBloodGroup,
+          genotype: normalizedGenotype,
+          medicalNotes: normalizedMedicalNotes,
+          previousSchool: normalizedPreviousSchool,
+          previousClass: normalizedPreviousClass,
+          photoUrl: req.file ? `/uploads/photos/${req.file.filename}` : null,
+        },
+        include: {
+          class: true,
+          guardians: { include: { guardian: true } },
+        },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     await recordActivity({
       event: 'STUDENT_REGISTERED',
@@ -5864,6 +5944,7 @@ No password is required. Please save this link for future access. If you need he
       });
     }
 
+    if (error instanceof StudentCapacityError) return respondWithStudentCapacityError(res, error);
     console.error('Error creating student:', error);
     res.status(500).json({ error: 'Failed to create student' });
   }
