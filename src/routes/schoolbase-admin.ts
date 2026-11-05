@@ -13,6 +13,7 @@ import {
   getBillingMarketCatalog,
   getFlutterwaveFrontendBaseUrl,
   getFlutterwaveWebhookSecret,
+  getBillingMarket,
   getMarketPricing,
   isFlutterwaveSubscriptionConfigured,
   isValidBillingMarketCatalog,
@@ -930,20 +931,22 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
     const paymentRecords = payments
       .map((payment: any) => {
         const parsedNote = parseNote(payment.note);
+        const isManualSubscription = parsedNote?.source === 'manual-subscription-entry';
         const noteStatus = parsedNote?.paymentStatus?.toUpperCase() || parsedNote?.status?.toUpperCase();
         const noteText = typeof payment.note === 'string' ? payment.note : null;
         const reference = (payment.reference || '').toUpperCase();
-        const isTrialLike =
+        const isTrialLike = !isManualSubscription && (
           reference.startsWith('TRIAL-') ||
           /\btrial\b/i.test(noteText || '') ||
           payment.amount === 0 ||
-          payment.method === 'OTHER';
+          payment.method === 'OTHER'
+        );
         const hasSuccessfulStatus = noteStatus ? ['COMPLETED', 'SUCCESSFUL', 'SUCCESS', 'PAID', 'ACTIVE'].includes(noteStatus) : false;
-        const isPaystackCheckoutEntry =
-          parsedNote?.source === 'paystack-init' ||
-          parsedNote?.source === 'paystack-verify' ||
-          (payment.amount > 0 && payment.method === 'CARD' && Boolean(payment.reference));
-        const isRelevantSubscriptionPayment = !isTrialLike && (hasSuccessfulStatus || isPaystackCheckoutEntry);
+        const isRelevantSubscriptionPayment = isManualSubscription || (
+          !isTrialLike &&
+          parsedNote?.subscription !== false &&
+          hasSuccessfulStatus
+        );
 
         return {
           payment,
@@ -971,6 +974,7 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
             slug: true,
             email: true,
             country: true,
+            currency: true,
             plan: true,
             status: true,
           },
@@ -999,6 +1003,7 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
               slug: true,
               email: true,
               country: true,
+              currency: true,
               plan: true,
               status: true,
             },
@@ -1018,11 +1023,48 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
         schoolSlug: school?.slug || parsedNote?.schoolSlug || null,
         schoolEmail: school?.email || parsedNote?.schoolEmail || null,
         schoolCountry: school?.country || parsedNote?.schoolCountry || null,
-        plan: school?.plan || parsedNote?.plan || null,
+        plan: parsedNote?.plan || school?.plan || null,
+        currency: parsedNote?.currency || school?.currency || 'NGN',
         status: school?.status || parsedNote?.status || null,
         paymentStatus: noteStatus || 'COMPLETED',
       };
     }));
+
+    const subscriptionSchools = await prisma.school.findMany({
+      where: {
+        archivedAt: null,
+        plan: { in: ['STARTER', 'GROWTH', 'ENTERPRISE'] },
+      },
+      orderBy: [{ subscriptionExpiresAt: 'asc' }, { name: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        email: true,
+        country: true,
+        currency: true,
+        plan: true,
+        status: true,
+        createdAt: true,
+        subscriptionExpiresAt: true,
+      },
+    });
+    const billingCatalog = await getBillingMarketCatalog(prisma);
+    const subscriptionSchoolIds = subscriptionSchools.map((school) => school.id);
+    const planAssignmentLogs = subscriptionSchoolIds.length
+      ? await prisma.platformAuditLog.findMany({
+          where: {
+            schoolId: { in: subscriptionSchoolIds },
+            action: { in: ['SETPLAN', 'PLAN_ASSIGNED'] },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { schoolId: true, createdAt: true },
+        })
+      : [];
+    const planAssignedAt = new Map<string, Date>();
+    for (const log of planAssignmentLogs) {
+      if (log.schoolId && !planAssignedAt.has(log.schoolId)) planAssignedAt.set(log.schoolId, log.createdAt);
+    }
 
     const total = formattedPayments.length;
     const startIndex = (page - 1) * limit;
@@ -1030,6 +1072,17 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
 
     res.json({
       payments: formattedPayments,
+      subscriptions: subscriptionSchools.map((school) => ({
+        ...school,
+        planAssignedAt: planAssignedAt.get(school.id) || null,
+        planListPriceMinor: getBillingMarket(school.country)
+          ? billingCatalog[getBillingMarket(school.country)!.countryCode].plans[school.plan as 'STARTER' | 'GROWTH' | 'ENTERPRISE'].amountMinor
+          : null,
+        planPriceCurrency: getBillingMarket(school.country)?.currency || school.currency,
+        subscriptionState: school.subscriptionExpiresAt && school.subscriptionExpiresAt < new Date()
+          ? 'EXPIRED'
+          : school.status,
+      })),
       pagination: {
         page,
         limit,
@@ -1040,6 +1093,141 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching subscription payments:', error);
     res.status(500).json({ message: (error as Error).message || 'Failed to fetch subscription payments' });
+  }
+});
+
+// POST /schoolbase-admin/api/subscription-payments - Record a confirmed custom subscription payment
+router.post('/subscription-payments', async (req: Request, res: Response) => {
+  const session = await requirePlatformAdminSession(req, res);
+  if (!session) return;
+
+  try {
+    let schoolName = typeof req.body?.schoolName === 'string' ? req.body.schoolName.trim() : '';
+    const amount = Number(req.body?.amount);
+    const currency = typeof req.body?.currency === 'string' ? req.body.currency.trim().toUpperCase() : '';
+    const paymentDate = typeof req.body?.paymentDate === 'string' ? req.body.paymentDate.trim() : '';
+    const reference = typeof req.body?.reference === 'string' ? req.body.reference.trim() : '';
+    const schoolId = typeof req.body?.schoolId === 'string' ? req.body.schoolId.trim() : '';
+    const requestedPlan = typeof req.body?.plan === 'string' ? req.body.plan.trim().toUpperCase() : 'CUSTOM';
+    const plans = ['STARTER', 'GROWTH', 'ENTERPRISE', 'CUSTOM'] as const;
+    const plan = plans.find((value) => value === requestedPlan);
+    const requestedMethod = typeof req.body?.method === 'string' ? req.body.method.trim().toUpperCase() : 'BANK_TRANSFER';
+    const paymentMethods = ['BANK_TRANSFER', 'CASH', 'CARD', 'ONLINE', 'OTHER'] as const;
+    const method = paymentMethods.find((value) => value === requestedMethod);
+
+    if (!schoolName || schoolName.length > 160) {
+      return res.status(400).json({ message: 'Enter a school name of 160 characters or fewer.' });
+    }
+    if (!plan) {
+      return res.status(400).json({ message: 'Select a valid subscription plan.' });
+    }
+    if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(Math.round(amount * 100)) || Math.round(amount * 100) > 2147483647) {
+      return res.status(400).json({ message: 'Enter a valid payment amount.' });
+    }
+    if (!/^[A-Z]{3}$/.test(currency)) {
+      return res.status(400).json({ message: 'Enter a valid three-letter currency code.' });
+    }
+    if (paymentDate && !/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) {
+      return res.status(400).json({ message: 'Enter a valid payment date.' });
+    }
+    if (paymentDate) {
+      const parsedPaymentDate = new Date(`${paymentDate}T12:00:00.000Z`);
+      if (Number.isNaN(parsedPaymentDate.getTime()) || parsedPaymentDate.toISOString().slice(0, 10) !== paymentDate) {
+        return res.status(400).json({ message: 'Enter a valid payment date.' });
+      }
+    }
+    if (!method) {
+      return res.status(400).json({ message: 'Select a valid payment method.' });
+    }
+    if (reference.length > 120) {
+      return res.status(400).json({ message: 'Payment reference must be 120 characters or fewer.' });
+    }
+
+    const school = schoolId
+      ? await prisma.school.findUnique({
+          where: { id: schoolId },
+          select: { id: true, name: true, slug: true, country: true },
+        })
+      : null;
+    if (schoolId && !school) {
+      return res.status(404).json({ message: 'The selected school could not be found.' });
+    }
+    if (school) schoolName = school.name;
+    if (reference) {
+      const existingReference = await prisma.platformPayment.findFirst({
+        where: { reference },
+        select: { id: true },
+      });
+      if (existingReference) {
+        return res.status(409).json({ message: 'This payment reference is already recorded.' });
+      }
+    }
+
+    const amountMinor = Math.round(amount * 100);
+    const createdAt = paymentDate ? new Date(`${paymentDate}T12:00:00.000Z`) : new Date();
+    const note = {
+      source: 'manual-subscription-entry',
+      paymentStatus: 'COMPLETED',
+      status: 'ACTIVE',
+      plan,
+      schoolId: school?.id,
+      schoolName,
+      schoolSlug: school?.slug,
+      schoolCountry: school?.country,
+      currency,
+      expectedAmountMinor: amountMinor,
+      recordedByPlatformAdminId: session,
+    };
+    const payment = await prisma.$transaction(async (transaction) => {
+      const createdPayment = await transaction.platformPayment.create({
+        data: {
+          amount: amountMinor,
+          method,
+          reference: reference || null,
+          createdAt,
+          recordedBy: school?.id || null,
+          note: JSON.stringify(note),
+        },
+      });
+      await transaction.platformAuditLog.create({
+        data: {
+          userId: session,
+          schoolId: school?.id || null,
+          event: 'SUBSCRIPTION_PAYMENT_RECORDED',
+          category: 'BILLING',
+          action: 'RECORD_PAYMENT',
+          outcome: 'SUCCESS',
+          resourceType: 'PLATFORM_PAYMENT',
+          resourceId: createdPayment.id,
+          summary: `Recorded ${plan} subscription payment for ${schoolName}`,
+          actorRole: 'PLATFORM_ADMIN',
+          details: JSON.stringify({ amountMinor, currency, method, reference: reference || null, paymentDate: createdAt.toISOString() }),
+        },
+      });
+      return createdPayment;
+    });
+
+    return res.status(201).json({
+      payment: {
+        id: payment.id,
+        amount: payment.amount,
+        method: payment.method,
+        reference: payment.reference,
+        createdAt: payment.createdAt,
+        schoolId: school?.id || null,
+        schoolName,
+        schoolSlug: school?.slug || null,
+        schoolEmail: null,
+        schoolCountry: school?.country || null,
+        plan,
+        currency,
+        status: 'ACTIVE',
+        paymentStatus: 'COMPLETED',
+      },
+    });
+  } catch (error) {
+    console.error('Error recording custom subscription payment:', error);
+    return res.status(500).json({ message: 'Failed to record the custom subscription payment.' });
   }
 });
 
@@ -2314,13 +2502,40 @@ router.patch('/schools', async (req: Request, res: Response) => {
         return res.status(400).json({ message: 'Invalid action.' });
     }
 
-    const updated = await prisma.school.update({
-      where: { id: schoolId },
-      data: updateData,
+    const updated = await prisma.$transaction(async (transaction) => {
+      const changedSchool = await transaction.school.update({
+        where: { id: schoolId },
+        data: updateData,
+      });
+      if (action === 'setPlan' && plan && plan !== 'FREE' && plan !== school.plan) {
+        await transaction.platformAuditLog.create({
+          data: {
+            userId: session,
+            schoolId,
+            event: 'SCHOOL_SUBSCRIPTION_PLAN_ASSIGNED',
+            category: 'BILLING',
+            action: 'PLAN_ASSIGNED',
+            outcome: 'SUCCESS',
+            resourceType: 'SCHOOL_SUBSCRIPTION',
+            resourceId: schoolId,
+            summary: `Assigned ${plan} plan to ${school.name}`,
+            actorRole: 'PLATFORM_ADMIN',
+            details: JSON.stringify({
+              source: 'PLATFORM_ADMIN_ASSIGNMENT',
+              previousPlan: school.plan,
+              assignedPlan: plan,
+              assignedAt: new Date().toISOString(),
+              paymentRecorded: false,
+            }),
+          },
+        });
+      }
+      return changedSchool;
     });
 
     // Record audit log
     try {
+      if (action !== 'setPlan') {
       await (prisma as any).platformAuditLog.create({
         data: {
           action: action.toUpperCase(),
@@ -2328,6 +2543,7 @@ router.patch('/schools', async (req: Request, res: Response) => {
           schoolId,
         },
       });
+      }
     } catch (err) {
       // Ignore audit log errors
     }

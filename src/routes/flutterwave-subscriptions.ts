@@ -216,6 +216,8 @@ async function completeSubscription(reference: string, transactionId: string) {
     return { status: 400, body: { error: 'The verified payment does not match the reference, amount, and billing currency.' } };
   }
 
+  const providerCreatedAt = typeof tx.created_at === 'string' ? new Date(tx.created_at) : null;
+  const paymentRecordedAt = providerCreatedAt && !Number.isNaN(providerCreatedAt.getTime()) ? providerCreatedAt : new Date();
   const subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   const updatedSchool = await prisma.$transaction(async (txClient) => {
     const completedDetails = {
@@ -224,10 +226,12 @@ async function completeSubscription(reference: string, transactionId: string) {
       status: 'ACTIVE',
       transactionId,
       source: 'flutterwave-subscription-verify',
+      paymentDateSource: providerCreatedAt && !Number.isNaN(providerCreatedAt.getTime()) ? 'FLUTTERWAVE_CREATED_AT' : 'VERIFIED_AT',
     };
     const claimed = await txClient.platformPayment.updateMany({
       where: { id: payment.id, note: payment.note },
       data: {
+        createdAt: paymentRecordedAt,
         method: PaymentMethod.CARD,
         recordedBy: school.id,
         note: JSON.stringify(completedDetails),

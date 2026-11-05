@@ -261,6 +261,8 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
     ) {
       return res.status(400).json({ error: 'Payment not completed' });
     }
+    const providerPaidAt = typeof transaction.paid_at === 'string' ? new Date(transaction.paid_at) : null;
+    const paymentRecordedAt = providerPaidAt && !Number.isNaN(providerPaidAt.getTime()) ? providerPaidAt : new Date();
 
     const schoolId = paymentDetails.schoolId || payment.recordedBy;
     if (!schoolId) return res.status(400).json({ error: 'The payment is not linked to a school.' });
@@ -329,10 +331,12 @@ router.post('/verify-subscription', async (req: Request, res: Response) => {
         status: 'ACTIVE',
         paymentStatus: 'COMPLETED',
         source: 'paystack-verify',
+        paymentDateSource: providerPaidAt && !Number.isNaN(providerPaidAt.getTime()) ? 'PAYSTACK_PAID_AT' : 'VERIFIED_AT',
       };
       const claimed = await tx.platformPayment.updateMany({
         where: { id: payment.id, note: payment.note },
         data: {
+          createdAt: paymentRecordedAt,
           method: 'CARD',
           recordedBy: school.id,
           note: JSON.stringify(completedDetails),
