@@ -1019,6 +1019,82 @@ export async function sendPasswordResetEmail(email: string, resetLink: string, u
   }
 }
 
+export async function sendCountryAdminInviteEmail(
+  email: string,
+  setupLink: string,
+  userName: string,
+  countryName: string,
+) {
+  try {
+    if (!isValidEmail(email)) {
+      throw new Error(`Invalid email address: ${email}`);
+    }
+
+    const textBody = [
+      `Hello ${userName},`,
+      '',
+      `You have been invited to join SchoolBase as a ${countryName} Country Administrator.`,
+      `Your workspace is limited to school support and onboarding information for ${countryName}.`,
+      '',
+      'To activate your account, set a password using this secure link:',
+      setupLink,
+      '',
+      'The link expires in 1 hour. After setup, sign in from the standard School Login page at https://schoolbase.live/login.',
+      'If you were not expecting this invitation, you can ignore this email or contact support@schoolbase.live.',
+      '',
+      'SchoolBase will never ask you to share your password.',
+    ].join('\n');
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+      to: email,
+      subject: `You're invited to SchoolBase | ${countryName} Country Administrator`,
+      text: textBody,
+      html: `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <style>${EMAIL_STYLES}</style>
+          </head>
+          <body>
+            <div class="email-container">
+              <div class="header">
+                <img src="${DEFAULT_EMAIL_LOGO}" alt="SchoolBase Logo" class="logo" />
+                <h1>Your SchoolBase invitation</h1>
+                <p class="header-subtitle">${escapeEmailHtml(countryName)} Country Administrator</p>
+              </div>
+              <div class="content">
+                <p>Hello ${escapeEmailHtml(userName)},</p>
+                <p>You have been invited to join SchoolBase as a <strong>${escapeEmailHtml(countryName)} Country Administrator</strong>.</p>
+                <p>Your workspace is limited to school support and onboarding information for ${escapeEmailHtml(countryName)}. Your account does not provide access to other countries' school data or platform administration.</p>
+                <p>To activate your account, set a password using the secure button below. This invitation link expires in one hour.</p>
+                <div class="button-container">
+                  <a href="${escapeEmailHtml(setupLink)}" class="button">Set up your account</a>
+                </div>
+                <p style="font-size: 13px; color: ${BRAND.textMuted};">After setup, sign in from the standard <a href="https://schoolbase.live/login" style="color: ${BRAND.primary};">School Login page</a>.</p>
+                <p style="font-size: 13px; color: ${BRAND.textMuted};">If you were not expecting this invitation, you can ignore this email or contact <a href="mailto:support@schoolbase.live" style="color: ${BRAND.primary};">SchoolBase Support</a>.</p>
+                <div class="warning-box">
+                  <p><strong>Security reminder:</strong> SchoolBase will never ask you to share your password. Keep your sign-in details private.</p>
+                </div>
+              </div>
+              <div class="footer">
+                <p class="footer-text">&copy; 2026 SchoolBase. All rights reserved.</p>
+                <p class="footer-text">Questions? Contact <a href="mailto:support@schoolbase.live">support@schoolbase.live</a></p>
+              </div>
+            </div>
+          </body>
+        </html>
+      `,
+    });
+
+    return true;
+  } catch (error) {
+    console.error('Failed to send country administrator invitation email:', error);
+    throw error;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TEMPLATE 4: FEE REMINDER EMAIL (PARENTS)
 // ═══════════════════════════════════════════════════════════════════════════════

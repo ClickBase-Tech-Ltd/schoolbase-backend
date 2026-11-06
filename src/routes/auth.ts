@@ -7,6 +7,7 @@ import { sendSignupOtpEmail } from '../services/email.js';
 import { allowSignupOtpRequest, verifyClientIpAssertion } from '../services/signup-rate-limit.js';
 import { recordActivity } from '../middleware/activityAudit.js';
 import { getSessionSecret } from '../services/security-config.js';
+import { billingMarkets } from '../services/billing-markets.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -148,6 +149,7 @@ async function handleSchoolLogin(req: Request, res: Response) {
         role: true,
         passwordHash: true,
         schoolId: true,
+        countryCode: true,
         isActive: true,
       },
     });
@@ -200,9 +202,15 @@ async function handleSchoolLogin(req: Request, res: Response) {
       });
     }
 
-    // ALLOW: PLATFORM_ADMIN can login through this endpoint (they just have no schoolId)
-    // REQUIRED: School users MUST have a schoolId
-    if (user.role !== 'PLATFORM_ADMIN' && !user.schoolId) {
+    const isCountryRepresentative = user.role === 'COUNTRY_REP';
+    const hasPlatformRole = user.role === 'PLATFORM_ADMIN';
+    if (isCountryRepresentative && (!user.countryCode || !Object.hasOwn(billingMarkets, user.countryCode) || user.schoolId)) {
+      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: country assignment missing or invalid'), userId: user.id }).catch(() => {});
+      return res.status(403).json({ error: 'This country representative account is not configured. Contact SchoolBase support.' });
+    }
+
+    // Platform and country operations roles do not belong to an individual school.
+    if (!hasPlatformRole && !isCountryRepresentative && !user.schoolId) {
       await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: school assignment missing'), userId: user.id }).catch(() => {});
       console.error(`[AUTH] School user has no schoolId: ${email} (${user.role})`);
       return res.status(403).json({
@@ -217,6 +225,7 @@ async function handleSchoolLogin(req: Request, res: Response) {
       email: user.email,
       name: user.name,
       schoolId: user.schoolId || null,
+      ...(isCountryRepresentative ? { countryCode: user.countryCode } : {}),
     })
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
@@ -243,6 +252,7 @@ async function handleSchoolLogin(req: Request, res: Response) {
       name: user.name,
       email: user.email,
       schoolId: user.schoolId,
+      ...(isCountryRepresentative ? { countryCode: user.countryCode } : {}),
     });
   } catch (error) {
     console.error('[AUTH] School login error:', error);
@@ -286,7 +296,7 @@ async function verifySessionRoute(req: Request, res: Response) {
 
     const activeUser = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, schoolId: true, role: true, isActive: true },
+      select: { id: true, schoolId: true, role: true, countryCode: true, isActive: true },
     });
     const effectiveSchoolId = payload.sessionPurpose === 'SCHOOL_IMPERSONATION' && typeof payload.schoolId === 'string'
       ? payload.schoolId
@@ -300,7 +310,7 @@ async function verifySessionRoute(req: Request, res: Response) {
       && activeUser.isActive
       && typeof payload.schoolId === 'string'
       && await prisma.school.findUnique({ where: { id: payload.schoolId }, select: { id: true } });
-    if (!activeUser || !activeUser.isActive || schoolArchived || (!isSchoolImpersonation && (activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null)))) {
+    if (!activeUser || !activeUser.isActive || schoolArchived || (!isSchoolImpersonation && (activeUser.role !== payload.role || (activeUser.schoolId || null) !== (typeof payload.schoolId === 'string' ? payload.schoolId : null) || (activeUser.role === 'COUNTRY_REP' && activeUser.countryCode !== payload.countryCode)))) {
       return res.status(401).json({ authenticated: false, error: 'Session is no longer active' });
     }
 

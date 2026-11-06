@@ -156,6 +156,8 @@ async function loadRoutes() {
     console.log('✓ Loaded whatsapp routes');
     const { default: schoolbaseAdminRoutes } = await import('./routes/schoolbase-admin.js');
     console.log('✓ Loaded schoolbase-admin routes');
+    const { default: countryAdminRoutes, countryRepresentativeAdmin } = await import('./routes/country-admin.js');
+    console.log('✓ Loaded country-admin routes');
     const { default: idCardStudioRoutes } = await import('./routes/id-card-studio.js');
     console.log('✓ Loaded ID-card studio routes');
     const { default: schoolbaseAdminIdCardRoutes } = await import('./routes/schoolbase-admin-id-cards.js');
@@ -234,6 +236,8 @@ async function loadRoutes() {
     app.use('/schoolbase-admin/api/support-chat', platformSupportChatRouter);
     app.use('/api/auth', authRoutes);
     app.use('/schoolbase-admin/api/whatsapp', platformWhatsAppRoutes);
+    app.use('/country-admin/api', countryAdminRoutes);
+    app.use('/schoolbase-admin/api/country-representatives', countryRepresentativeAdmin);
     app.use('/schoolbase-admin/api', schoolbaseAdminRoutes);
     app.use('/schoolbase-admin/api', schoolbaseAdminIdCardRoutes);
     

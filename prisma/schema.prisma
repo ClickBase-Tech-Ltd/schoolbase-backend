@@ -521,6 +521,7 @@ model GuardianPupil {
 model User {
   id                String                @id @default(cuid())
   schoolId          String?
+  countryCode       String? @db.VarChar(2)
   email             String                @unique
   name              String
   role              UserRole
@@ -561,6 +562,7 @@ model User {
   competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
 
   @@index([schoolId], map: "User_schoolId_fkey")
+  @@index([countryCode, role, isActive])
 }
 
 model EmployeeProfile {
@@ -3220,6 +3222,7 @@ enum SupportMessageSenderRole {
 
 enum UserRole {
   PLATFORM_ADMIN
+  COUNTRY_REP
   PARTNER_ADMIN
   SCHOOL_ADMIN
   BURSAR
