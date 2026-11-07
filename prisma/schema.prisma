@@ -230,6 +230,9 @@ model SchoolOnPhase {
   phase    SchoolPhase
   school   School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
+  @@id([schoolId, phase])
+}
+
 model CountryAdminConversation {
   id                    String                         @id @default(cuid())
   representativeUserId  String
@@ -305,9 +308,6 @@ model CountryAdminAnnouncementAcknowledgement {
 
   @@unique([announcementId, representativeUserId], map: "CAAck_announcement_rep_key")
   @@index([representativeUserId, acknowledgedAt], map: "CAAck_rep_ack_idx")
-}
-
-  @@id([schoolId, phase])
 }
 
 model AcademicYear {
@@ -3592,15 +3592,15 @@ enum EmailType {
 
 enum EmailStatus {
   SENT
-enum CountryAdminConversationStatus {
-  OPEN
-  RESOLVED
-}
-
   FAILED
   BOUNCED
   OPENED
   CLICKED
+}
+
+enum CountryAdminConversationStatus {
+  OPEN
+  RESOLVED
 }
 
 enum TransactionType {
