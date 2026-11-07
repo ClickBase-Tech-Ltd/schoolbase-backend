@@ -122,6 +122,7 @@ model School {
   supportRequests               SupportRequest[]
   platformSupportRequests       PlatformSupportRequest[]
   auditLogs                     PlatformAuditLog[]
+  countryFollowUp               CountrySchoolFollowUp?
   emailLogs                     EmailLog[]
   accountCategories             AccountCategory[]
   accountingAccounts            AccountingAccount[]
@@ -177,6 +178,36 @@ model School {
   scheduledActivities            ScheduledActivity[]
 
   @@index([partnerId], map: "School_partnerId_fkey")
+}
+
+model CountrySchoolFollowUp {
+  id            String                       @id @default(cuid())
+  schoolId      String                       @unique
+  stage         CountrySchoolFollowUpStage   @default(NEW)
+  ownerUserId   String?
+  nextContactAt DateTime?                    @db.Date
+  createdAt     DateTime                     @default(now()) @db.DateTime(0)
+  updatedAt     DateTime                     @updatedAt @db.DateTime(0)
+  school        School                       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  owner         User?                        @relation("CountrySchoolFollowUpOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  events        CountrySchoolFollowUpEvent[]
+
+  @@index([stage, nextContactAt])
+  @@index([ownerUserId])
+}
+
+model CountrySchoolFollowUpEvent {
+  id          String               @id @default(cuid())
+  followUpId  String
+  actorUserId String
+  actorName   String               @db.VarChar(191)
+  changes     Json?
+  note        String?              @db.Text
+  createdAt   DateTime             @default(now()) @db.DateTime(0)
+  followUp    CountrySchoolFollowUp @relation(fields: [followUpId], references: [id], onDelete: Cascade)
+
+  @@index([followUpId, createdAt])
+  @@index([actorUserId, createdAt])
 }
 
 /// Nursery / Primary / Secondary toggles (MySQL-friendly; one row per phase)
@@ -560,6 +591,7 @@ model User {
   competitionAccount    CompetitionPupilAccount?  @relation("CompetitionPupilAccountUser")
   competitionAccountsLinked CompetitionPupilAccount[] @relation("CompetitionPupilAccountLinkedBy")
   competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
+  countryFollowUpsOwned CountrySchoolFollowUp[] @relation("CountrySchoolFollowUpOwner")
 
   @@index([schoolId], map: "User_schoolId_fkey")
   @@index([countryCode, role, isActive])
@@ -3230,6 +3262,14 @@ enum UserRole {
   PARENT
   STUDENT
   STAFF
+}
+
+enum CountrySchoolFollowUpStage {
+  NEW
+  CONTACTED
+  ONBOARDING
+  BLOCKED
+  OPERATIONAL
 }
 
 enum CompetitionPupilAccountStatus {

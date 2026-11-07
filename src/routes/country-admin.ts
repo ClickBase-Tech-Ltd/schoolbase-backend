@@ -10,6 +10,7 @@ import { sendCountryAdminInviteEmail, sendSupportStatusUpdateNotification } from
 const prisma = new PrismaClient();
 const countryAdmin = Router();
 const countryRepresentativeAdmin = Router();
+const countryFollowUpStages = ['NEW', 'CONTACTED', 'ONBOARDING', 'BLOCKED', 'OPERATIONAL'] as const;
 
 type CountryRepRequest = Request & {
   countryRepresentative?: { userId: string; countryCode: BillingMarketCode; name: string; email: string };
@@ -175,19 +176,59 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
   const limit = Number.parseInt(String(req.query.limit || '25'), 10);
   const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
   const status = typeof req.query.status === 'string' ? req.query.status : '';
+  const followUpStage = typeof req.query.followUpStage === 'string' ? req.query.followUpStage : '';
+  const followUpFilter = typeof req.query.followUpFilter === 'string' ? req.query.followUpFilter : '';
   if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
     return res.status(400).json({ error: 'Invalid page or page size.' });
   }
   if (status && !['PENDING', 'TRIAL', 'ACTIVE', 'SUSPENDED', 'CANCELLED'].includes(status)) {
     return res.status(400).json({ error: 'Invalid school status filter.' });
   }
+  if (followUpStage && !countryFollowUpStages.includes(followUpStage as typeof countryFollowUpStages[number])) {
+    return res.status(400).json({ error: 'Invalid follow-up stage filter.' });
+  }
+  if (followUpFilter && !['OVERDUE', 'TODAY', 'UPCOMING', 'NO_DATE', 'BLOCKED'].includes(followUpFilter)) {
+    return res.status(400).json({ error: 'Invalid follow-up filter.' });
+  }
 
   const baseWhere = schoolWhere(representative.countryCode);
   const listWhere = schoolWhere(representative.countryCode, search);
   if (status) listWhere.status = status as Prisma.EnumSchoolStatusFilter['equals'];
+  const listFilters: Prisma.SchoolWhereInput[] = [];
+  if (followUpStage === 'NEW') {
+    listFilters.push({
+      OR: [
+        { countryFollowUp: { is: null } },
+        { countryFollowUp: { is: { stage: 'NEW' } } },
+      ],
+    });
+  } else if (followUpStage) {
+    listFilters.push({ countryFollowUp: { is: { stage: followUpStage as typeof countryFollowUpStages[number] } } });
+  }
+  const startOfToday = new Date();
+  startOfToday.setUTCHours(0, 0, 0, 0);
+  const startOfTomorrow = new Date(startOfToday);
+  startOfTomorrow.setUTCDate(startOfTomorrow.getUTCDate() + 1);
+  if (followUpFilter === 'OVERDUE') {
+    listFilters.push({ countryFollowUp: { is: { nextContactAt: { lt: startOfToday } } } });
+  } else if (followUpFilter === 'TODAY') {
+    listFilters.push({ countryFollowUp: { is: { nextContactAt: { gte: startOfToday, lt: startOfTomorrow } } } });
+  } else if (followUpFilter === 'UPCOMING') {
+    listFilters.push({ countryFollowUp: { is: { nextContactAt: { gte: startOfTomorrow } } } });
+  } else if (followUpFilter === 'NO_DATE') {
+    listFilters.push({
+      OR: [
+        { countryFollowUp: { is: null } },
+        { countryFollowUp: { is: { nextContactAt: null } } },
+      ],
+    });
+  } else if (followUpFilter === 'BLOCKED') {
+    listFilters.push({ countryFollowUp: { is: { stage: 'BLOCKED' } } });
+  }
+  if (listFilters.length) listWhere.AND = listFilters;
 
   try {
-    const [schools, total, activeCount, trialCount, openSupportCount] = await Promise.all([
+    const [schools, total, activeCount, trialCount, openSupportCount, overdueFollowUps, blockedSchools, followUpOwners] = await Promise.all([
       prisma.school.findMany({
         where: listWhere,
         select: {
@@ -201,6 +242,20 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
           plan: true,
           createdAt: true,
           trialEndsAt: true,
+          countryFollowUp: {
+            select: {
+              stage: true,
+              ownerUserId: true,
+              owner: { select: { id: true, name: true } },
+              nextContactAt: true,
+              events: {
+                where: { note: { not: null } },
+                orderBy: { createdAt: 'desc' },
+                take: 1,
+                select: { note: true },
+              },
+            },
+          },
           ...schoolSetupSelect,
         },
         orderBy: { createdAt: 'desc' },
@@ -213,12 +268,31 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
       prisma.supportRequest.count({
         where: { status: { notIn: ['CLOSED', 'RESOLVED'] }, school: { country: representative.countryCode } },
       }),
+      prisma.countrySchoolFollowUp.count({
+        where: { school: baseWhere, nextContactAt: { lt: startOfToday } },
+      }),
+      prisma.countrySchoolFollowUp.count({
+        where: { school: baseWhere, stage: 'BLOCKED' },
+      }),
+      prisma.user.findMany({
+        where: { role: 'COUNTRY_REP', countryCode: representative.countryCode, isActive: true, schoolId: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
     ]);
 
     return res.json({
       country: billingMarkets[representative.countryCode],
       representative: { name: representative.name, email: representative.email },
-      summary: { schools: total, active: activeCount, trials: trialCount, openSupport: openSupportCount },
+      summary: {
+        schools: total,
+        active: activeCount,
+        trials: trialCount,
+        openSupport: openSupportCount,
+        overdueFollowUps,
+        blockedSchools,
+      },
+      followUpOwners,
       schools: schools.map((school) => {
         const setup = setupStatusForSchool(school);
         return {
@@ -235,6 +309,13 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
           setupProgress: setup.completionPercentage,
           setupComplete: setup.isComplete,
           incompleteItems: setup.incompleteItems,
+          followUp: school.countryFollowUp ? {
+            stage: school.countryFollowUp.stage,
+            ownerUserId: school.countryFollowUp.ownerUserId,
+            owner: school.countryFollowUp.owner,
+            nextContactAt: school.countryFollowUp.nextContactAt,
+            latestNote: school.countryFollowUp.events[0]?.note ?? null,
+          } : null,
         };
       }),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
@@ -242,6 +323,208 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
   } catch (error) {
     console.error('[country-admin] overview failed:', error);
     return res.status(500).json({ error: 'Unable to load the country dashboard.' });
+  }
+});
+
+countryAdmin.get('/schools/:schoolId/follow-up', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  try {
+    const school = await prisma.school.findFirst({
+      where: { id: req.params.schoolId, ...schoolWhere(representative.countryCode) },
+      select: {
+        id: true,
+        name: true,
+        countryFollowUp: {
+          select: {
+            id: true,
+            stage: true,
+            ownerUserId: true,
+            owner: { select: { id: true, name: true } },
+            nextContactAt: true,
+            events: {
+              orderBy: { createdAt: 'desc' },
+              take: 50,
+              select: {
+                id: true,
+                actorName: true,
+                changes: true,
+                note: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found in your assigned country.' });
+
+    const followUpOwners = await prisma.user.findMany({
+      where: { role: 'COUNTRY_REP', countryCode: representative.countryCode, isActive: true, schoolId: null },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
+    return res.json({
+      school: { id: school.id, name: school.name },
+      followUp: school.countryFollowUp ? {
+        ...school.countryFollowUp,
+        stage: school.countryFollowUp.stage,
+      } : {
+        id: null,
+        stage: 'NEW',
+        ownerUserId: null,
+        owner: null,
+        nextContactAt: null,
+        events: [],
+      },
+      followUpOwners,
+    });
+  } catch (error) {
+    console.error('[country-admin] school follow-up history failed:', error);
+    return res.status(500).json({ error: 'Unable to load this school follow-up history.' });
+  }
+});
+
+countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  const body = req.body as Record<string, unknown> | null;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({ error: 'A follow-up update is required.' });
+  }
+
+  const hasStage = Object.hasOwn(body, 'stage');
+  const hasOwner = Object.hasOwn(body, 'ownerUserId');
+  const hasNextContact = Object.hasOwn(body, 'nextContactAt');
+  const hasNote = Object.hasOwn(body, 'note');
+  if (!hasStage && !hasOwner && !hasNextContact && !hasNote) {
+    return res.status(400).json({ error: 'Choose at least one follow-up update.' });
+  }
+
+  let stage: typeof countryFollowUpStages[number] | undefined;
+  if (hasStage) {
+    if (typeof body.stage !== 'string' || !countryFollowUpStages.includes(body.stage as typeof countryFollowUpStages[number])) {
+      return res.status(400).json({ error: 'Select a valid follow-up stage.' });
+    }
+    stage = body.stage as typeof countryFollowUpStages[number];
+  }
+
+  let ownerUserId: string | null | undefined;
+  if (hasOwner) {
+    if (body.ownerUserId !== null && typeof body.ownerUserId !== 'string') {
+      return res.status(400).json({ error: 'Select a valid follow-up owner.' });
+    }
+    ownerUserId = body.ownerUserId as string | null;
+  }
+
+  let nextContactAt: Date | null | undefined;
+  if (hasNextContact) {
+    if (body.nextContactAt === null) {
+      nextContactAt = null;
+    } else if (typeof body.nextContactAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.nextContactAt)) {
+      const parsed = new Date(`${body.nextContactAt}T00:00:00.000Z`);
+      if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== body.nextContactAt) {
+        return res.status(400).json({ error: 'Enter a valid next-contact date.' });
+      }
+      nextContactAt = parsed;
+    } else {
+      return res.status(400).json({ error: 'Enter a valid next-contact date.' });
+    }
+  }
+
+  let note: string | null = null;
+  if (hasNote) {
+    if (typeof body.note !== 'string' || body.note.length > 2000) {
+      return res.status(400).json({ error: 'Follow-up notes must be 2,000 characters or fewer.' });
+    }
+    note = body.note.trim() || null;
+  }
+
+  try {
+    const school = await prisma.school.findFirst({
+      where: { id: req.params.schoolId, ...schoolWhere(representative.countryCode) },
+      select: { id: true, name: true },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found in your assigned country.' });
+
+    let owner: { id: string; name: string } | null = null;
+    if (ownerUserId) {
+      owner = await prisma.user.findFirst({
+        where: {
+          id: ownerUserId,
+          role: 'COUNTRY_REP',
+          countryCode: representative.countryCode,
+          isActive: true,
+          schoolId: null,
+        },
+        select: { id: true, name: true },
+      });
+      if (!owner) return res.status(400).json({ error: 'The selected owner is not an active representative for your country.' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = await tx.countrySchoolFollowUp.findUnique({
+        where: { schoolId: school.id },
+        select: {
+          id: true,
+          stage: true,
+          ownerUserId: true,
+          owner: { select: { id: true, name: true } },
+          nextContactAt: true,
+        },
+      });
+      const nextStage = stage ?? existing?.stage ?? 'NEW';
+      const nextOwnerUserId = hasOwner ? ownerUserId! : existing?.ownerUserId ?? null;
+      const nextDate = hasNextContact ? nextContactAt! : existing?.nextContactAt ?? null;
+      const dateString = (value: Date | null) => value?.toISOString().slice(0, 10) ?? null;
+      const changes: Record<string, Prisma.InputJsonValue | null> = {};
+
+      if ((existing?.stage ?? 'NEW') !== nextStage) {
+        changes.stage = { from: existing?.stage ?? 'NEW', to: nextStage };
+      }
+      if ((existing?.ownerUserId ?? null) !== nextOwnerUserId) {
+        changes.owner = {
+          from: existing?.owner ? { id: existing.owner.id, name: existing.owner.name } : null,
+          to: owner ? { id: owner.id, name: owner.name } : null,
+        };
+      }
+      if (dateString(existing?.nextContactAt ?? null) !== dateString(nextDate)) {
+        changes.nextContactAt = {
+          from: dateString(existing?.nextContactAt ?? null),
+          to: dateString(nextDate),
+        };
+      }
+      if (Object.keys(changes).length === 0 && !note) return { unchanged: true as const };
+
+      const followUp = await tx.countrySchoolFollowUp.upsert({
+        where: { schoolId: school.id },
+        update: {
+          ...(stage !== undefined ? { stage } : {}),
+          ...(hasOwner ? { ownerUserId } : {}),
+          ...(hasNextContact ? { nextContactAt } : {}),
+        },
+        create: {
+          schoolId: school.id,
+          stage: nextStage,
+          ownerUserId: nextOwnerUserId,
+          nextContactAt: nextDate,
+        },
+        select: { id: true },
+      });
+      await tx.countrySchoolFollowUpEvent.create({
+        data: {
+          followUpId: followUp.id,
+          actorUserId: representative.userId,
+          actorName: representative.name,
+          ...(Object.keys(changes).length ? { changes } : {}),
+          note,
+        },
+      });
+      return { unchanged: false as const };
+    });
+
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[country-admin] school follow-up update failed:', error);
+    return res.status(500).json({ error: 'Unable to save this school follow-up.' });
   }
 });
 
