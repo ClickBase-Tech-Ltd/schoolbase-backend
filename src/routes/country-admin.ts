@@ -13,6 +13,7 @@ const countryAdmin = Router();
 const countryRepresentativeAdmin = Router();
 const countryFollowUpStages = ['NEW', 'CONTACTED', 'ONBOARDING', 'BLOCKED', 'OPERATIONAL'] as const;
 
+type PlatformAdminRequest = Request & { platformAdminUserId?: string };
 type CountryRepRequest = Request & {
   countryRepresentative?: {
     userId: string;
@@ -102,10 +103,43 @@ async function authenticatePlatformAdmin(req: Request, res: Response, next: Next
       select: { id: true },
     });
     if (!user) return res.status(403).json({ error: 'Platform administrator access required.' });
+    (req as PlatformAdminRequest).platformAdminUserId = user.id;
     return next();
   } catch (error) {
     return next(error);
   }
+}
+
+async function writeCountryOperationsAudit(
+  tx: Prisma.TransactionClient,
+  event: {
+    userId?: string;
+    actorRole: string;
+    schoolId?: string;
+    countryCode: string | null;
+    action: string;
+    event: string;
+    resourceType: string;
+    resourceId: string;
+    summary: string;
+    details?: Record<string, unknown>;
+  },
+) {
+  await tx.platformAuditLog.create({
+    data: {
+      userId: event.userId,
+      schoolId: event.schoolId,
+      event: event.event,
+      category: 'COUNTRY_OPERATIONS',
+      action: event.action,
+      outcome: 'SUCCESS',
+      resourceType: event.resourceType,
+      resourceId: event.resourceId,
+      summary: event.summary,
+      actorRole: event.actorRole,
+      details: JSON.stringify({ countryCode: event.countryCode, ...event.details }),
+    },
+  });
 }
 
 function setupStatusForSchool(school: {
@@ -538,6 +572,18 @@ countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest
           note,
         },
       });
+      await writeCountryOperationsAudit(tx, {
+        userId: representative.userId,
+        actorRole: 'COUNTRY_REP',
+        schoolId: school.id,
+        countryCode: representative.countryCode,
+        action: 'country.follow_up.updated',
+        event: 'COUNTRY_FOLLOW_UP_UPDATED',
+        resourceType: 'School follow-up',
+        resourceId: followUp.id,
+        summary: 'Updated a country school follow-up',
+        details: { changes, noteAdded: Boolean(note) },
+      });
       return { unchanged: false as const };
     });
 
@@ -729,6 +775,18 @@ countryAdmin.post('/support/:requestId/reply', async (req: CountryRepRequest, re
         where: { id: request.id },
         data: { response: body, status: 'WAITING_FOR_CUSTOMER', lastMessageAt: message.createdAt },
       });
+      await writeCountryOperationsAudit(tx, {
+        userId: representative.userId,
+        actorRole: 'COUNTRY_REP',
+        schoolId: request.schoolId,
+        countryCode: representative.countryCode,
+        action: 'country.support.reply_sent',
+        event: 'COUNTRY_SUPPORT_REPLY_SENT',
+        resourceType: 'Support request',
+        resourceId: request.id,
+        summary: 'Replied to a country support request',
+        details: { statusFrom: request.status, statusTo: 'WAITING_FOR_CUSTOMER' },
+      });
       return tx.supportRequest.findUniqueOrThrow({
         where: { id: request.id },
         select: {
@@ -765,14 +823,33 @@ countryAdmin.patch('/support/:requestId/status', async (req: CountryRepRequest, 
   }
 
   try {
-    const result = await prisma.supportRequest.updateMany({
-      where: {
-        id: req.params.requestId,
-        school: { country: representative.countryCode },
-      },
-      data: { status: status as SupportStatus },
+    const result = await prisma.$transaction(async (tx) => {
+      const request = await tx.supportRequest.findFirst({
+        where: { id: req.params.requestId, school: { country: representative.countryCode } },
+        select: { id: true, schoolId: true, status: true, subject: true },
+      });
+      if (!request) return null;
+      await tx.supportRequest.update({
+        where: { id: request.id },
+        data: { status: status as SupportStatus },
+      });
+      if (request.status !== status) {
+        await writeCountryOperationsAudit(tx, {
+          userId: representative.userId,
+          actorRole: 'COUNTRY_REP',
+          schoolId: request.schoolId,
+          countryCode: representative.countryCode,
+          action: 'country.support.status_updated',
+          event: 'COUNTRY_SUPPORT_STATUS_UPDATED',
+          resourceType: 'Support request',
+          resourceId: request.id,
+          summary: 'Updated a country support request status',
+          details: { statusFrom: request.status, statusTo: status },
+        });
+      }
+      return true;
     });
-    if (!result.count) return res.status(404).json({ error: 'Support request not found.' });
+    if (!result) return res.status(404).json({ error: 'Support request not found.' });
     return res.json({ success: true, status });
   } catch (error) {
     console.error('[country-admin] support status update failed:', error);
@@ -780,7 +857,654 @@ countryAdmin.patch('/support/:requestId/status', async (req: CountryRepRequest, 
   }
 });
 
+countryAdmin.get('/communications/unread-count', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  try {
+    const [conversations, unacknowledgedAnnouncements] = await Promise.all([
+      prisma.countryAdminConversation.findMany({
+        where: { representativeUserId: representative.userId },
+        select: {
+          lastMessageAt: true,
+          messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, select: { id: true } },
+          reads: { where: { userId: representative.userId }, select: { lastReadMessageId: true }, take: 1 },
+        },
+      }),
+      prisma.countryAdminAnnouncement.count({
+        where: {
+          OR: [{ countryCode: null }, { countryCode: representative.countryCode }],
+          acknowledgements: { none: { representativeUserId: representative.userId } },
+        },
+      }),
+    ]);
+    const unreadThreads = conversations.filter((conversation) =>
+      Boolean(conversation.messages[0] && conversation.messages[0].id !== conversation.reads[0]?.lastReadMessageId),
+    ).length;
+    return res.json({ unreadCount: unreadThreads + unacknowledgedAnnouncements });
+  } catch (error) {
+    console.error('[country-admin] communications unread count failed:', error);
+    return res.status(500).json({ error: 'Unable to load message notifications.' });
+  }
+});
+
+countryAdmin.get('/communications', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  try {
+    const [threads, announcements] = await Promise.all([
+      prisma.countryAdminConversation.findMany({
+        where: { representativeUserId: representative.userId },
+        orderBy: [{ status: 'asc' }, { lastMessageAt: 'desc' }],
+        take: 100,
+        include: {
+          platformAdminOwner: { select: { id: true, name: true, email: true } },
+          messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { sender: { select: { name: true, role: true } } } },
+          reads: { where: { userId: representative.userId }, select: { lastReadMessageId: true }, take: 1 },
+        },
+      }),
+      prisma.countryAdminAnnouncement.findMany({
+        where: { OR: [{ countryCode: null }, { countryCode: representative.countryCode }] },
+        orderBy: [{ isImportant: 'desc' }, { publishedAt: 'desc' }],
+        take: 100,
+        include: {
+          createdBy: { select: { name: true } },
+          acknowledgements: {
+            where: { representativeUserId: representative.userId },
+            select: { acknowledgedAt: true },
+            take: 1,
+          },
+        },
+      }),
+    ]);
+    return res.json({
+      threads: threads.map(({ reads, ...thread }) => ({
+        ...thread,
+        unread: Boolean(thread.messages[0] && thread.messages[0].id !== reads[0]?.lastReadMessageId),
+      })),
+      announcements: announcements.map(({ acknowledgements, ...announcement }) => ({
+        ...announcement,
+        acknowledgedAt: acknowledgements[0]?.acknowledgedAt ?? null,
+      })),
+    });
+  } catch (error) {
+    console.error('[country-admin] communications list failed:', error);
+    return res.status(500).json({ error: 'Unable to load country communications.' });
+  }
+});
+
+countryAdmin.post('/communications/threads', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  const subject = typeof req.body?.subject === 'string' ? req.body.subject.trim() : '';
+  const body = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!subject || subject.length > 160 || !body || body.length > 5000) {
+    return res.status(400).json({ error: 'Enter a subject and message (up to 5,000 characters).' });
+  }
+
+  try {
+    const platformAdmin = await prisma.user.findFirst({
+      where: { role: 'PLATFORM_ADMIN', isActive: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true },
+    });
+    const conversation = await prisma.$transaction(async (tx) => {
+      const created = await tx.countryAdminConversation.create({
+        data: {
+          representativeUserId: representative.userId,
+          platformAdminOwnerId: platformAdmin?.id ?? null,
+          createdByUserId: representative.userId,
+          subject,
+          messages: { create: { senderUserId: representative.userId, body } },
+        },
+        select: { id: true, lastMessageAt: true, messages: { select: { id: true } } },
+      });
+      await tx.countryAdminConversationRead.create({
+        data: {
+          conversationId: created.id,
+          userId: representative.userId,
+          lastReadAt: created.lastMessageAt,
+          lastReadMessageId: created.messages[0]?.id ?? null,
+        },
+      });
+      await writeCountryOperationsAudit(tx, {
+        userId: representative.userId,
+        actorRole: 'COUNTRY_REP',
+        countryCode: representative.countryCode,
+        action: 'country.communication.thread_created',
+        event: 'COUNTRY_COMMUNICATION_THREAD_CREATED',
+        resourceType: 'Country admin conversation',
+        resourceId: created.id,
+        summary: 'Started a private conversation with the platform team',
+      });
+      return created;
+    });
+    return res.status(201).json({ thread: conversation });
+  } catch (error) {
+    console.error('[country-admin] conversation creation failed:', error);
+    return res.status(500).json({ error: 'Unable to start a conversation with the platform team.' });
+  }
+});
+
+countryAdmin.get('/communications/threads/:threadId', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  try {
+    const thread = await prisma.countryAdminConversation.findFirst({
+      where: { id: req.params.threadId, representativeUserId: representative.userId },
+      include: {
+        representative: { select: { id: true, name: true, email: true, countryCode: true } },
+        platformAdminOwner: { select: { id: true, name: true, email: true } },
+        messages: {
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          include: { sender: { select: { id: true, name: true, role: true } } },
+        },
+      },
+    });
+    if (!thread) return res.status(404).json({ error: 'Conversation not found.' });
+    await prisma.countryAdminConversationRead.upsert({
+      where: { conversationId_userId: { conversationId: thread.id, userId: representative.userId } },
+      create: {
+        conversationId: thread.id,
+        userId: representative.userId,
+        lastReadAt: thread.lastMessageAt,
+        lastReadMessageId: thread.messages.at(-1)?.id ?? null,
+      },
+      update: {
+        lastReadAt: thread.lastMessageAt,
+        lastReadMessageId: thread.messages.at(-1)?.id ?? null,
+      },
+    });
+    return res.json({ thread });
+  } catch (error) {
+    console.error('[country-admin] conversation detail failed:', error);
+    return res.status(500).json({ error: 'Unable to open this conversation.' });
+  }
+});
+
+countryAdmin.post('/communications/threads/:threadId/messages', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  const body = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!body || body.length > 5000) return res.status(400).json({ error: 'Enter a message of up to 5,000 characters.' });
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const thread = await tx.countryAdminConversation.findFirst({
+        where: { id: req.params.threadId, representativeUserId: representative.userId },
+        select: { id: true, status: true },
+      });
+      if (!thread) return { notFound: true as const };
+      if (thread.status === 'RESOLVED') return { resolved: true as const };
+      const message = await tx.countryAdminMessage.create({
+        data: { conversationId: thread.id, senderUserId: representative.userId, body },
+        include: { sender: { select: { id: true, name: true, role: true } } },
+      });
+      await tx.countryAdminConversation.update({
+        where: { id: thread.id },
+        data: { lastMessageAt: message.createdAt },
+      });
+      await tx.countryAdminConversationRead.upsert({
+        where: { conversationId_userId: { conversationId: thread.id, userId: representative.userId } },
+        create: {
+          conversationId: thread.id,
+          userId: representative.userId,
+          lastReadAt: message.createdAt,
+          lastReadMessageId: message.id,
+        },
+        update: { lastReadAt: message.createdAt, lastReadMessageId: message.id },
+      });
+      await writeCountryOperationsAudit(tx, {
+        userId: representative.userId,
+        actorRole: 'COUNTRY_REP',
+        countryCode: representative.countryCode,
+        action: 'country.communication.message_sent',
+        event: 'COUNTRY_COMMUNICATION_MESSAGE_SENT',
+        resourceType: 'Country admin conversation',
+        resourceId: thread.id,
+        summary: 'Sent a message to the platform team',
+      });
+      return { message };
+    });
+    if ('notFound' in result) return res.status(404).json({ error: 'Conversation not found.' });
+    if ('resolved' in result) return res.status(409).json({ error: 'This conversation is resolved. Reopen it before replying.' });
+    return res.status(201).json({ message: result.message });
+  } catch (error) {
+    console.error('[country-admin] conversation reply failed:', error);
+    return res.status(500).json({ error: 'Unable to send your message.' });
+  }
+});
+
+countryAdmin.patch('/communications/threads/:threadId', async (req: CountryRepRequest, res: Response) => {
+  const status = req.body?.status;
+  if (status !== 'OPEN' && status !== 'RESOLVED') {
+    return res.status(400).json({ error: 'Select a valid conversation status.' });
+  }
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const thread = await tx.countryAdminConversation.findFirst({
+        where: { id: req.params.threadId, representativeUserId: req.countryRepresentative!.userId },
+        select: { id: true, status: true },
+      });
+      if (!thread) return null;
+      if (thread.status !== status) {
+        await tx.countryAdminConversation.update({ where: { id: thread.id }, data: { status } });
+        await writeCountryOperationsAudit(tx, {
+          userId: req.countryRepresentative!.userId,
+          actorRole: 'COUNTRY_REP',
+          countryCode: req.countryRepresentative!.countryCode,
+          action: 'country.communication.status_updated',
+          event: 'COUNTRY_COMMUNICATION_STATUS_UPDATED',
+          resourceType: 'Country admin conversation',
+          resourceId: thread.id,
+          summary: status === 'RESOLVED' ? 'Resolved a platform communication thread' : 'Reopened a platform communication thread',
+          details: { statusFrom: thread.status, statusTo: status },
+        });
+      }
+      return true;
+    });
+    if (!result) return res.status(404).json({ error: 'Conversation not found.' });
+    return res.json({ success: true, status });
+  } catch (error) {
+    console.error('[country-admin] conversation status update failed:', error);
+    return res.status(500).json({ error: 'Unable to update conversation status.' });
+  }
+});
+
+countryAdmin.post('/communications/announcements/:announcementId/acknowledge', async (req: CountryRepRequest, res: Response) => {
+  const representative = req.countryRepresentative!;
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const announcement = await tx.countryAdminAnnouncement.findFirst({
+        where: {
+          id: req.params.announcementId,
+          OR: [{ countryCode: null }, { countryCode: representative.countryCode }],
+        },
+        select: { id: true },
+      });
+      if (!announcement) return false;
+      const acknowledgementKey = {
+        announcementId_representativeUserId: {
+          announcementId: announcement.id,
+          representativeUserId: representative.userId,
+        },
+      };
+      const priorAcknowledgement = await tx.countryAdminAnnouncementAcknowledgement.findUnique({
+        where: acknowledgementKey,
+        select: { acknowledgedAt: true },
+      });
+      const acknowledgement = await tx.countryAdminAnnouncementAcknowledgement.upsert({
+        where: acknowledgementKey,
+        create: { announcementId: announcement.id, representativeUserId: representative.userId },
+        update: {},
+        select: { acknowledgedAt: true },
+      });
+      if (!priorAcknowledgement) {
+        await writeCountryOperationsAudit(tx, {
+          userId: representative.userId,
+          actorRole: 'COUNTRY_REP',
+          countryCode: representative.countryCode,
+          action: 'country.announcement.acknowledged',
+          event: 'COUNTRY_ANNOUNCEMENT_ACKNOWLEDGED',
+          resourceType: 'Country admin announcement',
+          resourceId: announcement.id,
+          summary: 'Acknowledged a platform announcement',
+        });
+      }
+      return acknowledgement;
+    });
+    if (!result) return res.status(404).json({ error: 'Announcement not found.' });
+    return res.json({ acknowledgedAt: result.acknowledgedAt });
+  } catch (error) {
+    console.error('[country-admin] announcement acknowledgement failed:', error);
+    return res.status(500).json({ error: 'Unable to acknowledge this announcement.' });
+  }
+});
+
 countryRepresentativeAdmin.use(authenticatePlatformAdmin);
+
+countryRepresentativeAdmin.get('/communications/unread-count', async (req: PlatformAdminRequest, res: Response) => {
+  const userId = req.platformAdminUserId!;
+  try {
+    const conversations = await prisma.countryAdminConversation.findMany({
+      select: {
+        lastMessageAt: true,
+        messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, select: { id: true } },
+        reads: { where: { userId }, select: { lastReadMessageId: true }, take: 1 },
+      },
+    });
+    const unreadCount = conversations.filter((conversation) =>
+      Boolean(conversation.messages[0] && conversation.messages[0].id !== conversation.reads[0]?.lastReadMessageId),
+    ).length;
+    return res.json({ unreadCount });
+  } catch (error) {
+    console.error('[country-admin] platform communications unread count failed:', error);
+    return res.status(500).json({ error: 'Unable to load message notifications.' });
+  }
+});
+
+countryRepresentativeAdmin.get('/communications', async (req: PlatformAdminRequest, res: Response) => {
+  const country = typeof req.query.country === 'string' ? req.query.country.trim().toUpperCase() : '';
+  if (country && !Object.hasOwn(billingMarkets, country)) {
+    return res.status(400).json({ error: 'Select a supported country.' });
+  }
+  try {
+    const [representatives, platformAdmins, threads, announcements] = await Promise.all([
+      prisma.user.findMany({
+        where: { role: 'COUNTRY_REP', isActive: true, ...(country ? { countryCode: country } : {}) },
+        orderBy: [{ countryCode: 'asc' }, { name: 'asc' }],
+        select: { id: true, name: true, email: true, countryCode: true },
+      }),
+      prisma.user.findMany({
+        where: { role: 'PLATFORM_ADMIN', isActive: true },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        select: { id: true, name: true, email: true },
+      }),
+      prisma.countryAdminConversation.findMany({
+        where: country ? { representative: { countryCode: country } } : {},
+        orderBy: [{ status: 'asc' }, { lastMessageAt: 'desc' }],
+        take: 250,
+        include: {
+          representative: { select: { id: true, name: true, email: true, countryCode: true } },
+          platformAdminOwner: { select: { id: true, name: true, email: true } },
+          messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { sender: { select: { name: true, role: true } } } },
+          reads: { where: { userId: req.platformAdminUserId! }, select: { lastReadMessageId: true }, take: 1 },
+        },
+      }),
+      prisma.countryAdminAnnouncement.findMany({
+        where: country ? { OR: [{ countryCode: null }, { countryCode: country }] } : {},
+        orderBy: { publishedAt: 'desc' },
+        take: 100,
+        include: {
+          createdBy: { select: { name: true } },
+          acknowledgements: {
+            where: {
+              representative: {
+                isActive: true,
+                ...(country ? { countryCode: country } : {}),
+              },
+            },
+            select: { representative: { select: { id: true, name: true, email: true, countryCode: true } } },
+          },
+        },
+      }),
+    ]);
+    const activeAudienceCount = (announcementCountryCode: string | null) => representatives.filter((representative) =>
+      !announcementCountryCode || representative.countryCode === announcementCountryCode,
+    ).length;
+
+    return res.json({
+      representatives,
+      platformAdmins,
+      threads: threads.map(({ reads, ...thread }) => ({
+        ...thread,
+        unread: Boolean(thread.messages[0] && thread.messages[0].id !== reads[0]?.lastReadMessageId),
+      })),
+      announcements: announcements.map(({ acknowledgements, ...announcement }) => ({
+        ...announcement,
+        audienceCount: activeAudienceCount(announcement.countryCode),
+        acknowledgementCount: acknowledgements.length,
+        acknowledgedBy: acknowledgements.map(({ representative }) => representative),
+      })),
+    });
+  } catch (error) {
+    console.error('[country-admin] platform communications list failed:', error);
+    return res.status(500).json({ error: 'Unable to load country communications.' });
+  }
+});
+
+countryRepresentativeAdmin.post('/communications/threads', async (req: PlatformAdminRequest, res: Response) => {
+  const subject = typeof req.body?.subject === 'string' ? req.body.subject.trim() : '';
+  const body = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const representativeUserId = typeof req.body?.representativeUserId === 'string' ? req.body.representativeUserId : '';
+  if (!subject || subject.length > 160 || !body || body.length > 5000 || !representativeUserId) {
+    return res.status(400).json({ error: 'Select a representative and enter a subject and message (up to 5,000 characters).' });
+  }
+
+  try {
+    const representative = await prisma.user.findFirst({
+      where: { id: representativeUserId, role: 'COUNTRY_REP', isActive: true, countryCode: { not: null } },
+      select: { id: true, countryCode: true },
+    });
+    if (!representative?.countryCode || !Object.hasOwn(billingMarkets, representative.countryCode)) {
+      return res.status(404).json({ error: 'Active country representative not found.' });
+    }
+
+    const conversation = await prisma.$transaction(async (tx) => {
+      const created = await tx.countryAdminConversation.create({
+        data: {
+          representativeUserId: representative.id,
+          platformAdminOwnerId: req.platformAdminUserId!,
+          createdByUserId: req.platformAdminUserId!,
+          subject,
+          messages: { create: { senderUserId: req.platformAdminUserId!, body } },
+        },
+        select: { id: true, lastMessageAt: true, messages: { select: { id: true } } },
+      });
+      await tx.countryAdminConversationRead.create({
+        data: {
+          conversationId: created.id,
+          userId: req.platformAdminUserId!,
+          lastReadAt: created.lastMessageAt,
+          lastReadMessageId: created.messages[0]?.id ?? null,
+        },
+      });
+      await writeCountryOperationsAudit(tx, {
+        userId: req.platformAdminUserId,
+        actorRole: 'PLATFORM_ADMIN',
+        countryCode: representative.countryCode,
+        action: 'country.communication.thread_created',
+        event: 'COUNTRY_COMMUNICATION_THREAD_CREATED',
+        resourceType: 'Country admin conversation',
+        resourceId: created.id,
+        summary: 'Started a private conversation with a country representative',
+      });
+      return created;
+    });
+    return res.status(201).json({ thread: conversation });
+  } catch (error) {
+    console.error('[country-admin] platform conversation creation failed:', error);
+    return res.status(500).json({ error: 'Unable to start a conversation.' });
+  }
+});
+
+countryRepresentativeAdmin.get('/communications/threads/:threadId', async (req: PlatformAdminRequest, res: Response) => {
+  try {
+    const thread = await prisma.countryAdminConversation.findUnique({
+      where: { id: req.params.threadId },
+      include: {
+        representative: { select: { id: true, name: true, email: true, countryCode: true } },
+        platformAdminOwner: { select: { id: true, name: true, email: true } },
+        messages: {
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          include: { sender: { select: { id: true, name: true, role: true } } },
+        },
+      },
+    });
+    if (!thread) return res.status(404).json({ error: 'Conversation not found.' });
+    await prisma.countryAdminConversationRead.upsert({
+      where: { conversationId_userId: { conversationId: thread.id, userId: req.platformAdminUserId! } },
+      create: {
+        conversationId: thread.id,
+        userId: req.platformAdminUserId!,
+        lastReadAt: thread.lastMessageAt,
+        lastReadMessageId: thread.messages.at(-1)?.id ?? null,
+      },
+      update: { lastReadAt: thread.lastMessageAt, lastReadMessageId: thread.messages.at(-1)?.id ?? null },
+    });
+    return res.json({ thread });
+  } catch (error) {
+    console.error('[country-admin] platform conversation detail failed:', error);
+    return res.status(500).json({ error: 'Unable to open this conversation.' });
+  }
+});
+
+countryRepresentativeAdmin.post('/communications/threads/:threadId/messages', async (req: PlatformAdminRequest, res: Response) => {
+  const body = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!body || body.length > 5000) return res.status(400).json({ error: 'Enter a message of up to 5,000 characters.' });
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const thread = await tx.countryAdminConversation.findUnique({
+        where: { id: req.params.threadId },
+        select: { id: true, status: true, representative: { select: { countryCode: true } } },
+      });
+      if (!thread) return null;
+      if (thread.status === 'RESOLVED') return { resolved: true as const };
+      const message = await tx.countryAdminMessage.create({
+        data: { conversationId: thread.id, senderUserId: req.platformAdminUserId!, body },
+        include: { sender: { select: { id: true, name: true, role: true } } },
+      });
+      await tx.countryAdminConversation.update({
+        where: { id: thread.id },
+        data: { lastMessageAt: message.createdAt },
+      });
+      await tx.countryAdminConversationRead.upsert({
+        where: { conversationId_userId: { conversationId: thread.id, userId: req.platformAdminUserId! } },
+        create: {
+          conversationId: thread.id,
+          userId: req.platformAdminUserId!,
+          lastReadAt: message.createdAt,
+          lastReadMessageId: message.id,
+        },
+        update: { lastReadAt: message.createdAt, lastReadMessageId: message.id },
+      });
+      await writeCountryOperationsAudit(tx, {
+        userId: req.platformAdminUserId,
+        actorRole: 'PLATFORM_ADMIN',
+        countryCode: thread.representative.countryCode,
+        action: 'country.communication.message_sent',
+        event: 'COUNTRY_COMMUNICATION_MESSAGE_SENT',
+        resourceType: 'Country admin conversation',
+        resourceId: thread.id,
+        summary: 'Sent a message to a country representative',
+      });
+      return { message };
+    });
+    if (!result) return res.status(404).json({ error: 'Conversation not found.' });
+    if ('resolved' in result) return res.status(409).json({ error: 'This conversation is resolved. Reopen it before replying.' });
+    return res.status(201).json({ message: result.message });
+  } catch (error) {
+    console.error('[country-admin] platform conversation reply failed:', error);
+    return res.status(500).json({ error: 'Unable to send your message.' });
+  }
+});
+
+countryRepresentativeAdmin.patch('/communications/threads/:threadId', async (req: PlatformAdminRequest, res: Response) => {
+  const status = req.body?.status;
+  const dueAt = req.body?.dueAt;
+  const platformAdminOwnerId = req.body?.platformAdminOwnerId;
+  const parsedDueAt = typeof dueAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dueAt)
+    ? new Date(`${dueAt}T00:00:00.000Z`)
+    : null;
+  const dueAtToSave = dueAt === null ? null : parsedDueAt;
+  if (
+    (status !== undefined && status !== 'OPEN' && status !== 'RESOLVED') ||
+    (dueAt !== undefined && dueAt !== null && (!parsedDueAt || Number.isNaN(parsedDueAt.getTime()) || parsedDueAt.toISOString().slice(0, 10) !== dueAt)) ||
+    (platformAdminOwnerId !== undefined && platformAdminOwnerId !== null && typeof platformAdminOwnerId !== 'string')
+  ) {
+    return res.status(400).json({ error: 'Provide a valid status, due date, or platform-admin owner.' });
+  }
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = await tx.countryAdminConversation.findUnique({
+        where: { id: req.params.threadId },
+        select: {
+          id: true,
+          status: true,
+          dueAt: true,
+          platformAdminOwnerId: true,
+          representative: { select: { countryCode: true } },
+        },
+      });
+      if (!existing) return null;
+      if (typeof platformAdminOwnerId === 'string') {
+        const owner = await tx.user.findFirst({
+          where: { id: platformAdminOwnerId, role: 'PLATFORM_ADMIN', isActive: true },
+          select: { id: true },
+        });
+        if (!owner) throw new Error('PLATFORM_ADMIN_OWNER_INVALID');
+      }
+
+      const updated = await tx.countryAdminConversation.update({
+        where: { id: existing.id },
+        data: {
+          ...(status !== undefined ? { status } : {}),
+          ...(dueAt !== undefined ? { dueAt: dueAtToSave } : {}),
+          ...(platformAdminOwnerId !== undefined ? { platformAdminOwnerId } : {}),
+        },
+        select: { id: true, status: true, dueAt: true, platformAdminOwnerId: true },
+      });
+      const details: Record<string, unknown> = {};
+      if (status !== undefined && existing.status !== updated.status) details.status = { from: existing.status, to: updated.status };
+      if (dueAt !== undefined && existing.dueAt?.toISOString().slice(0, 10) !== updated.dueAt?.toISOString().slice(0, 10)) {
+        details.dueAt = { from: existing.dueAt?.toISOString().slice(0, 10) ?? null, to: updated.dueAt?.toISOString().slice(0, 10) ?? null };
+      }
+      if (platformAdminOwnerId !== undefined && existing.platformAdminOwnerId !== updated.platformAdminOwnerId) {
+        details.platformAdminOwnerId = { from: existing.platformAdminOwnerId, to: updated.platformAdminOwnerId };
+      }
+      if (Object.keys(details).length) {
+        await writeCountryOperationsAudit(tx, {
+          userId: req.platformAdminUserId,
+          actorRole: 'PLATFORM_ADMIN',
+          countryCode: existing.representative.countryCode,
+          action: 'country.communication.thread_updated',
+          event: 'COUNTRY_COMMUNICATION_THREAD_UPDATED',
+          resourceType: 'Country admin conversation',
+          resourceId: existing.id,
+          summary: 'Updated a country communication thread',
+          details,
+        });
+      }
+      return updated;
+    });
+    if (!result) return res.status(404).json({ error: 'Conversation not found.' });
+    return res.json({ thread: result });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'PLATFORM_ADMIN_OWNER_INVALID') {
+      return res.status(400).json({ error: 'Select an active platform administrator as the owner.' });
+    }
+    console.error('[country-admin] platform conversation update failed:', error);
+    return res.status(500).json({ error: 'Unable to update this conversation.' });
+  }
+});
+
+countryRepresentativeAdmin.post('/communications/announcements', async (req: PlatformAdminRequest, res: Response) => {
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+  const requestedCountry = req.body?.countryCode;
+  const countryCode = typeof requestedCountry === 'string' && requestedCountry.trim()
+    ? requestedCountry.trim().toUpperCase()
+    : null;
+  const isImportant = req.body?.isImportant === true;
+  if (
+    !title || title.length > 160 || !body || body.length > 10000 ||
+    (requestedCountry !== undefined && requestedCountry !== null && typeof requestedCountry !== 'string') ||
+    (req.body?.isImportant !== undefined && typeof req.body.isImportant !== 'boolean') ||
+    (countryCode !== null && !Object.hasOwn(billingMarkets, countryCode))
+  ) {
+    return res.status(400).json({ error: 'Enter a title and announcement (up to 10,000 characters) and choose a supported audience.' });
+  }
+  try {
+    const announcement = await prisma.$transaction(async (tx) => {
+      const created = await tx.countryAdminAnnouncement.create({
+        data: { createdByUserId: req.platformAdminUserId!, countryCode, title, body, isImportant },
+        select: { id: true, title: true, countryCode: true, isImportant: true, publishedAt: true },
+      });
+      await writeCountryOperationsAudit(tx, {
+        userId: req.platformAdminUserId,
+        actorRole: 'PLATFORM_ADMIN',
+        countryCode,
+        action: 'country.announcement.published',
+        event: 'COUNTRY_ANNOUNCEMENT_PUBLISHED',
+        resourceType: 'Country admin announcement',
+        resourceId: created.id,
+        summary: countryCode ? 'Published a country-specific representative announcement' : 'Published a representative announcement to all countries',
+        details: { isImportant },
+      });
+      return created;
+    });
+    return res.status(201).json({ announcement });
+  } catch (error) {
+    console.error('[country-admin] announcement publishing failed:', error);
+    return res.status(500).json({ error: 'Unable to publish this announcement.' });
+  }
+});
 
 async function createInvite(user: { id: string; email: string; name: string; countryCode: string | null }) {
   const market = Object.values(billingMarkets).find(({ countryCode }) => countryCode === user.countryCode);
@@ -824,7 +1548,7 @@ countryRepresentativeAdmin.get('/', async (_req: Request, res: Response) => {
   }
 });
 
-countryRepresentativeAdmin.post('/', async (req: Request, res: Response) => {
+countryRepresentativeAdmin.post('/', async (req: PlatformAdminRequest, res: Response) => {
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
   const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const countryCode = typeof req.body?.countryCode === 'string' ? req.body.countryCode.trim().toUpperCase() : '';
@@ -836,17 +1560,30 @@ countryRepresentativeAdmin.post('/', async (req: Request, res: Response) => {
     const existing = await prisma.user.findUnique({ where: { email }, select: { id: true } });
     if (existing) return res.status(409).json({ error: 'An account already uses this email address.' });
 
-    const representative = await prisma.user.create({
-      data: {
-        name,
-        email,
-        role: 'COUNTRY_REP',
+    const representative = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          name,
+          email,
+          role: 'COUNTRY_REP',
+          countryCode,
+          schoolId: null,
+          passwordHash: null,
+          isActive: true,
+        },
+        select: { id: true, name: true, email: true, countryCode: true, isActive: true, createdAt: true },
+      });
+      await writeCountryOperationsAudit(tx, {
+        userId: req.platformAdminUserId,
+        actorRole: 'PLATFORM_ADMIN',
         countryCode,
-        schoolId: null,
-        passwordHash: null,
-        isActive: true,
-      },
-      select: { id: true, name: true, email: true, countryCode: true, isActive: true, createdAt: true },
+        action: 'country.representative.created',
+        event: 'COUNTRY_REPRESENTATIVE_CREATED',
+        resourceType: 'Country representative',
+        resourceId: created.id,
+        summary: 'Created a country representative account',
+      });
+      return created;
     });
     try {
       await createInvite(representative);
@@ -880,7 +1617,7 @@ countryRepresentativeAdmin.post('/:userId/invite', async (req: Request, res: Res
   }
 });
 
-countryRepresentativeAdmin.patch('/:userId', async (req: Request, res: Response) => {
+countryRepresentativeAdmin.patch('/:userId', async (req: PlatformAdminRequest, res: Response) => {
   const countryCode = req.body?.countryCode;
   const isActive = req.body?.isActive;
   if (
@@ -892,18 +1629,43 @@ countryRepresentativeAdmin.patch('/:userId', async (req: Request, res: Response)
   }
 
   try {
-    const result = await prisma.user.updateMany({
-      where: { id: req.params.userId, role: 'COUNTRY_REP' },
-      data: {
-        ...(typeof countryCode === 'string' ? { countryCode: countryCode.toUpperCase() } : {}),
-        ...(typeof isActive === 'boolean' ? { isActive } : {}),
-      },
+    const representative = await prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findFirst({
+        where: { id: req.params.userId, role: 'COUNTRY_REP' },
+        select: { id: true, countryCode: true, isActive: true },
+      });
+      if (!existing) return null;
+      const updated = await tx.user.update({
+        where: { id: existing.id },
+        data: {
+          ...(typeof countryCode === 'string' ? { countryCode: countryCode.toUpperCase() } : {}),
+          ...(typeof isActive === 'boolean' ? { isActive } : {}),
+        },
+        select: { id: true, name: true, email: true, countryCode: true, isActive: true, createdAt: true },
+      });
+      const details: Record<string, unknown> = {};
+      if (existing.countryCode !== updated.countryCode) {
+        details.countryCode = { from: existing.countryCode, to: updated.countryCode };
+      }
+      if (existing.isActive !== updated.isActive) {
+        details.isActive = { from: existing.isActive, to: updated.isActive };
+      }
+      if (Object.keys(details).length) {
+        await writeCountryOperationsAudit(tx, {
+          userId: req.platformAdminUserId,
+          actorRole: 'PLATFORM_ADMIN',
+          countryCode: updated.countryCode ?? existing.countryCode,
+          action: 'country.representative.updated',
+          event: 'COUNTRY_REPRESENTATIVE_UPDATED',
+          resourceType: 'Country representative',
+          resourceId: updated.id,
+          summary: 'Updated country representative access or assignment',
+          details,
+        });
+      }
+      return updated;
     });
-    if (!result.count) return res.status(404).json({ error: 'Country representative not found.' });
-    const representative = await prisma.user.findUnique({
-      where: { id: req.params.userId },
-      select: { id: true, name: true, email: true, countryCode: true, isActive: true, createdAt: true },
-    });
+    if (!representative) return res.status(404).json({ error: 'Country representative not found.' });
     return res.json({ representative });
   } catch (error) {
     console.error('[country-admin] representative update failed:', error);

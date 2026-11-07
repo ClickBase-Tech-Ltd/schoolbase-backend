@@ -143,7 +143,7 @@ export async function reconcileUnassignedCountryWork(prisma: PrismaClient) {
             { ownerUserId: { notIn: representatives.map(({ id }) => id) } },
           ],
         },
-        select: { id: true, ownerUserId: true, owner: { select: { name: true } } },
+        select: { id: true, schoolId: true, ownerUserId: true, owner: { select: { name: true } } },
         orderBy: { createdAt: 'asc' },
         take: 200,
       });
@@ -170,6 +170,24 @@ export async function reconcileUnassignedCountryWork(prisma: PrismaClient) {
             },
           },
         });
+        await tx.platformAuditLog.create({
+          data: {
+            schoolId: followUp.schoolId,
+            event: 'COUNTRY_FOLLOW_UP_AUTO_ASSIGNED',
+            category: 'COUNTRY_OPERATIONS',
+            action: 'country.follow_up.auto_assigned',
+            outcome: 'SUCCESS',
+            resourceType: 'School follow-up',
+            resourceId: followUp.id,
+            summary: 'Automatically assigned a country school follow-up',
+            actorRole: 'SYSTEM',
+            details: JSON.stringify({
+              countryCode,
+              ownerFrom: followUp.ownerUserId,
+              ownerTo: owner.id,
+            }),
+          },
+        });
         followUpWorkload.set(owner.id, (followUpWorkload.get(owner.id) ?? 0) + 1);
         followUpsAssigned++;
       }
@@ -184,7 +202,7 @@ export async function reconcileUnassignedCountryWork(prisma: PrismaClient) {
             { assignedCountryRepId: { notIn: representatives.map(({ id }) => id) } },
           ],
         },
-        select: { id: true, assignedCountryRepId: true },
+        select: { id: true, schoolId: true, assignedCountryRepId: true },
         orderBy: { createdAt: 'asc' },
         take: 200,
       });
@@ -198,6 +216,24 @@ export async function reconcileUnassignedCountryWork(prisma: PrismaClient) {
           data: { assignedCountryRepId: owner.id },
         });
         if (!updated.count) continue;
+        await tx.platformAuditLog.create({
+          data: {
+            schoolId: request.schoolId,
+            event: 'COUNTRY_SUPPORT_AUTO_ASSIGNED',
+            category: 'COUNTRY_OPERATIONS',
+            action: 'country.support.auto_assigned',
+            outcome: 'SUCCESS',
+            resourceType: 'Support request',
+            resourceId: request.id,
+            summary: 'Automatically assigned a country support request',
+            actorRole: 'SYSTEM',
+            details: JSON.stringify({
+              countryCode,
+              ownerFrom: request.assignedCountryRepId,
+              ownerTo: owner.id,
+            }),
+          },
+        });
         supportWorkload.set(owner.id, (supportWorkload.get(owner.id) ?? 0) + 1);
         supportRequestsAssigned++;
       }

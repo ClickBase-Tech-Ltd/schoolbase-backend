@@ -1807,10 +1807,25 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
     const category = String(req.query.category || '').trim().toUpperCase();
     const outcome = String(req.query.outcome || '').trim().toUpperCase();
     const actor = String(req.query.actor || '').trim();
+    const actorRole = String(req.query.actorRole || '').trim().toUpperCase();
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (country && !Object.hasOwn(billingMarkets, country)) {
+      return res.status(400).json({ message: 'A supported country code is required.' });
+    }
 
     const where: any = {
       createdAt: { gte: fromDate ?? since, ...(toDate ? { lt: toDate } : {}) },
     };
+    if (actorRole) where.actorRole = actorRole;
+    if (country) {
+      where.AND = [...(where.AND ?? []), {
+        OR: [
+          { user: { is: { countryCode: country } } },
+          { school: { is: { country } } },
+          { details: { contains: `"countryCode":"${country}"` } },
+        ],
+      }];
+    }
     if (schoolId) where.schoolId = schoolId;
     if (action) where.action = action;
     if (events.length) where.event = { in: events };

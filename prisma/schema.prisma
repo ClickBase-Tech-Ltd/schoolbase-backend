@@ -230,6 +230,83 @@ model SchoolOnPhase {
   phase    SchoolPhase
   school   School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
+model CountryAdminConversation {
+  id                    String                         @id @default(cuid())
+  representativeUserId  String
+  platformAdminOwnerId  String?
+  createdByUserId       String
+  subject               String                         @db.VarChar(160)
+  status                CountryAdminConversationStatus @default(OPEN)
+  dueAt                 DateTime?                      @db.Date
+  lastMessageAt         DateTime                       @default(now()) @db.DateTime(0)
+  createdAt             DateTime                       @default(now()) @db.DateTime(0)
+  updatedAt             DateTime                       @updatedAt @db.DateTime(0)
+  representative        User                           @relation("CountryAdminConversationRepresentative", fields: [representativeUserId], references: [id], onDelete: Cascade, map: "CAConv_rep_fkey")
+  platformAdminOwner    User?                          @relation("CountryAdminConversationOwner", fields: [platformAdminOwnerId], references: [id], onDelete: SetNull, map: "CAConv_owner_fkey")
+  createdBy             User                           @relation("CountryAdminConversationCreator", fields: [createdByUserId], references: [id], onDelete: Cascade, map: "CAConv_creator_fkey")
+  messages              CountryAdminMessage[]
+  reads                 CountryAdminConversationRead[]
+
+  @@index([representativeUserId, status, lastMessageAt], map: "CAConv_rep_status_last_idx")
+  @@index([platformAdminOwnerId, status, lastMessageAt], map: "CAConv_owner_status_last_idx")
+  @@index([status, dueAt], map: "CAConv_status_due_idx")
+}
+
+model CountryAdminMessage {
+  id             String                   @id @default(cuid())
+  conversationId String
+  senderUserId   String
+  body           String                   @db.LongText
+  createdAt      DateTime                 @default(now()) @db.DateTime(0)
+  conversation   CountryAdminConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade, map: "CAMsg_conv_fkey")
+  sender         User                     @relation(fields: [senderUserId], references: [id], onDelete: Cascade, map: "CAMsg_sender_fkey")
+
+  @@index([conversationId, createdAt], map: "CAMsg_conversation_created_idx")
+  @@index([senderUserId, createdAt], map: "CAMsg_sender_created_idx")
+}
+
+model CountryAdminConversationRead {
+  id             String                   @id @default(cuid())
+  conversationId String
+  userId         String
+  lastReadAt     DateTime                 @default(now()) @db.DateTime(0)
+  lastReadMessageId String?
+  conversation   CountryAdminConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade, map: "CARead_conv_fkey")
+  user           User                     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "CARead_user_fkey")
+
+  @@unique([conversationId, userId], map: "CARead_conversation_user_key")
+  @@index([userId, lastReadAt], map: "CARead_user_read_idx")
+}
+
+model CountryAdminAnnouncement {
+  id            String                                      @id @default(cuid())
+  createdByUserId String
+  countryCode   String?                                     @db.VarChar(2)
+  title         String                                      @db.VarChar(160)
+  body          String                                      @db.LongText
+  isImportant   Boolean                                     @default(false)
+  publishedAt   DateTime                                    @default(now()) @db.DateTime(0)
+  createdAt     DateTime                                    @default(now()) @db.DateTime(0)
+  updatedAt     DateTime                                    @updatedAt @db.DateTime(0)
+  createdBy     User                                        @relation("CountryAdminAnnouncementAuthor", fields: [createdByUserId], references: [id], onDelete: Cascade, map: "CAAnn_creator_fkey")
+  acknowledgements CountryAdminAnnouncementAcknowledgement[]
+
+  @@index([countryCode, publishedAt], map: "CAAnn_country_pub_idx")
+  @@index([publishedAt], map: "CAAnn_published_idx")
+}
+
+model CountryAdminAnnouncementAcknowledgement {
+  id               String                  @id @default(cuid())
+  announcementId   String
+  representativeUserId String
+  acknowledgedAt   DateTime                @default(now()) @db.DateTime(0)
+  announcement     CountryAdminAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade, map: "CAAck_announcement_fkey")
+  representative   User                    @relation(fields: [representativeUserId], references: [id], onDelete: Cascade, map: "CAAck_rep_fkey")
+
+  @@unique([announcementId, representativeUserId], map: "CAAck_announcement_rep_key")
+  @@index([representativeUserId, acknowledgedAt], map: "CAAck_rep_ack_idx")
+}
+
   @@id([schoolId, phase])
 }
 
@@ -609,6 +686,13 @@ model User {
   competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
   countryFollowUpsOwned CountrySchoolFollowUp[] @relation("CountrySchoolFollowUpOwner")
   countryFollowUpDigests CountryFollowUpDigest[]
+  countryAdminConversationsAsRepresentative CountryAdminConversation[] @relation("CountryAdminConversationRepresentative")
+  countryAdminConversationsAsOwner CountryAdminConversation[] @relation("CountryAdminConversationOwner")
+  countryAdminConversationsCreated CountryAdminConversation[] @relation("CountryAdminConversationCreator")
+  countryAdminMessagesSent      CountryAdminMessage[]
+  countryAdminConversationReads CountryAdminConversationRead[]
+  countryAdminAnnouncementsCreated CountryAdminAnnouncement[] @relation("CountryAdminAnnouncementAuthor")
+  countryAdminAnnouncementAcknowledgements CountryAdminAnnouncementAcknowledgement[]
 
   @@index([schoolId], map: "User_schoolId_fkey")
   @@index([countryCode, role, isActive])
@@ -3508,6 +3592,11 @@ enum EmailType {
 
 enum EmailStatus {
   SENT
+enum CountryAdminConversationStatus {
+  OPEN
+  RESOLVED
+}
+
   FAILED
   BOUNCED
   OPENED

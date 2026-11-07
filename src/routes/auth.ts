@@ -23,6 +23,31 @@ function loginDetails(email: unknown, result: string) {
   return `Login ${result} for ${String(email ?? '').trim().toLowerCase() || 'unknown account'}`;
 }
 
+async function recordCountryRepresentativeLogin(
+  user: { id: string; role: string; countryCode: string | null },
+  outcome: 'SUCCESS' | 'FAILED',
+  details: string,
+) {
+  if (user.role !== 'COUNTRY_REP') return false;
+  try {
+    await recordActivity({
+      event: `COUNTRY_REP_LOGIN_${outcome}`,
+      details: JSON.stringify({ countryCode: user.countryCode, result: details }),
+      userId: user.id,
+      category: 'COUNTRY_OPERATIONS',
+      action: `country.representative.login.${outcome.toLowerCase()}`,
+      outcome,
+      resourceType: 'Session',
+      resourceId: user.id,
+      summary: outcome === 'SUCCESS' ? 'Country representative signed in' : 'Country representative sign-in failed',
+      actorRole: 'COUNTRY_REP',
+    });
+  } catch (error) {
+    console.error('[AUTH] Country representative login audit failed:', error);
+  }
+  return true;
+}
+
 // ============================================
 // POST /api/auth/platform-login
 // Platform admin login ONLY
@@ -46,6 +71,7 @@ router.post('/platform-login', async (req: Request, res: Response) => {
         role: true,
         passwordHash: true,
         schoolId: true,
+        countryCode: true,
         isActive: true,
       },
     });
@@ -59,7 +85,10 @@ router.post('/platform-login', async (req: Request, res: Response) => {
     }
 
     if (!user.isActive) {
-      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
+      const countryRepAudit = await recordCountryRepresentativeLogin(user, 'FAILED', 'account inactive');
+      if (!countryRepAudit) {
+        await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
+      }
       return res.status(403).json({ error: 'This account is inactive. Contact your school administrator.' });
     }
 
@@ -71,8 +100,11 @@ router.post('/platform-login', async (req: Request, res: Response) => {
     // Password invalid
     const valid = await bcrypt.compare(String(password), user.passwordHash);
     if (!valid) {
-      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: invalid password') }).catch(() => {});
-      return res.status(401).json({ 
+      const countryRepAudit = await recordCountryRepresentativeLogin(user, 'FAILED', 'invalid password');
+      if (!countryRepAudit) {
+        await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: invalid password') }).catch(() => {});
+      }
+      return res.status(401).json({
         error: 'Invalid email or password.' 
       });
     }
@@ -189,14 +221,20 @@ async function handleSchoolLogin(req: Request, res: Response) {
     }
 
     if (!user.isActive) {
-      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
+      const countryRepAudit = await recordCountryRepresentativeLogin(user, 'FAILED', 'account inactive');
+      if (!countryRepAudit) {
+        await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: account inactive'), userId: user.id, schoolId: user.schoolId || undefined }).catch(() => {});
+      }
       return res.status(403).json({ error: 'This account is inactive. Contact your school administrator.' });
     }
 
     // Password invalid
     const valid = await bcrypt.compare(String(password), user.passwordHash);
     if (!valid) {
-      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: invalid password') }).catch(() => {});
+      const countryRepAudit = await recordCountryRepresentativeLogin(user, 'FAILED', 'invalid password');
+      if (!countryRepAudit) {
+        await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: invalid password') }).catch(() => {});
+      }
       return res.status(401).json({
         error: 'Invalid email or password.',
       });
@@ -205,7 +243,7 @@ async function handleSchoolLogin(req: Request, res: Response) {
     const isCountryRepresentative = user.role === 'COUNTRY_REP';
     const hasPlatformRole = user.role === 'PLATFORM_ADMIN';
     if (isCountryRepresentative && (!user.countryCode || !Object.hasOwn(billingMarkets, user.countryCode) || user.schoolId)) {
-      await recordActivity({ event: 'LOGIN_FAILED', details: loginDetails(email, 'failed: country assignment missing or invalid'), userId: user.id }).catch(() => {});
+      await recordCountryRepresentativeLogin(user, 'FAILED', 'country assignment missing or invalid');
       return res.status(403).json({ error: 'This country representative account is not configured. Contact SchoolBase support.' });
     }
 
@@ -242,7 +280,10 @@ async function handleSchoolLogin(req: Request, res: Response) {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    await recordActivity({ event: 'LOGIN_SUCCESS', details: loginDetails(user.email, 'succeeded'), userId: user.id, schoolId: user.schoolId || undefined });
+    const countryRepAudit = await recordCountryRepresentativeLogin(user, 'SUCCESS', 'succeeded');
+    if (!countryRepAudit) {
+      await recordActivity({ event: 'LOGIN_SUCCESS', details: loginDetails(user.email, 'succeeded'), userId: user.id, schoolId: user.schoolId || undefined });
+    }
 
     return res.json({
       success: true,
