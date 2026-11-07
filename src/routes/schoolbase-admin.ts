@@ -36,6 +36,7 @@ import os from 'node:os';
 import { URL } from 'node:url';
 import { compactAuditEventFilters, inferPlatformAuditOutcome, normalizeLegacyPlatformAuditEvent, sanitizeLegacyAuditDetails } from '../services/platform-audit-events.js';
 import { isSelfHostedVideoUrl, normalizeYouTubeVideoUrl, removeSelfHostedVideoFile } from '../services/video-tutorial-media.js';
+import { chooseCountryRepresentativeForSchool } from '../services/country-work-assignment.js';
 
 const router = Router();
 type PlatformAdminRequest = Request & { platformAdminUserId?: string };
@@ -3048,9 +3049,11 @@ router.post('/support/requests', async (req: Request, res: Response) => {
     if (!school) return res.status(404).json({ message: 'School not found.' });
 
     const request = await prisma.$transaction(async (tx) => {
+      const countryRepresentative = await chooseCountryRepresentativeForSchool(tx, school.id, 'support');
       const created = await tx.supportRequest.create({
         data: {
           schoolId: school.id,
+          assignedCountryRepId: countryRepresentative?.id ?? null,
           createdByUserId: session,
           requesterName: 'SchoolBase Support',
           requesterEmail: null,

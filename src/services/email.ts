@@ -1095,6 +1095,99 @@ export async function sendCountryAdminInviteEmail(
   }
 }
 
+export async function sendCountryFollowUpDigestEmail(input: {
+  email: string;
+  representativeName: string;
+  countryName: string;
+  schools: Array<{ name: string; city: string | null; nextContactAt: Date; overdue: boolean }>;
+}) {
+  try {
+    if (!isValidEmail(input.email)) {
+      throw new Error(`Invalid email address: ${input.email}`);
+    }
+
+    const formatDate = (date: Date) => date.toLocaleDateString('en', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    const schoolsUrl = `${(process.env.FRONTEND_URL || 'https://schoolbase.live').replace(/\/+$/, '')}/country-admin/schools`;
+    const overdueCount = input.schools.filter((school) => school.overdue).length;
+    const textBody = [
+      `Hello ${input.representativeName},`,
+      '',
+      `Here is your ${input.countryName} school follow-up digest.`,
+      `${input.schools.length} assigned follow-up${input.schools.length === 1 ? '' : 's'} are due today or overdue.`,
+      '',
+      ...input.schools.map((school) =>
+        `- ${school.name}${school.city ? ` (${school.city})` : ''} — ${school.overdue ? 'Overdue' : 'Due today'} (${formatDate(school.nextContactAt)})`
+      ),
+      '',
+      `Review your assigned school follow-ups: ${schoolsUrl}`,
+      '',
+      'You can turn these daily reminders off from your Country Admin dashboard.',
+    ].join('\n');
+
+    const schoolRows = input.schools.map((school) => `
+      <tr>
+        <td style="padding: 12px; border-bottom: 1px solid #e5e7eb;">
+          <strong>${escapeEmailHtml(school.name)}</strong>
+          ${school.city ? `<div style="font-size: 13px; color: ${BRAND.textMuted};">${escapeEmailHtml(school.city)}</div>` : ''}
+        </td>
+        <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
+          <strong style="color: ${school.overdue ? '#b91c1c' : BRAND.primary};">${school.overdue ? 'Overdue' : 'Due today'}</strong>
+          <div style="font-size: 13px; color: ${BRAND.textMuted};">${formatDate(school.nextContactAt)}</div>
+        </td>
+      </tr>
+    `).join('');
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+      to: input.email,
+      subject: `${overdueCount ? `${overdueCount} overdue · ` : ''}${input.schools.length} follow-up${input.schools.length === 1 ? '' : 's'} due | SchoolBase`,
+      text: textBody,
+      html: `
+        <!DOCTYPE html>
+        <html>
+          <head><meta charset="utf-8"><style>${EMAIL_STYLES}</style></head>
+          <body>
+            <div class="email-container">
+              <div class="header">
+                <img src="${DEFAULT_EMAIL_LOGO}" alt="SchoolBase Logo" class="logo" />
+                <h1>Your daily follow-up digest</h1>
+                <p class="header-subtitle">${escapeEmailHtml(input.countryName)} Country Admin</p>
+              </div>
+              <div class="content">
+                <p>Hello ${escapeEmailHtml(input.representativeName)},</p>
+                <p>You have <strong>${input.schools.length}</strong> assigned school follow-up${input.schools.length === 1 ? '' : 's'} due today or overdue.</p>
+                <table style="width: 100%; border-collapse: collapse;">
+                  <thead><tr>
+                    <th align="left" style="padding: 10px 12px; border-bottom: 2px solid #d1d5db;">School</th>
+                    <th align="left" style="padding: 10px 12px; border-bottom: 2px solid #d1d5db;">Next contact</th>
+                  </tr></thead>
+                  <tbody>${schoolRows}</tbody>
+                </table>
+                <div class="button-container">
+                  <a href="${escapeEmailHtml(schoolsUrl)}" class="button">Review follow-ups</a>
+                </div>
+                <p style="font-size: 13px; color: ${BRAND.textMuted};">This digest includes only schools assigned to you in ${escapeEmailHtml(input.countryName)}. You can turn daily reminders off from your Country Admin dashboard.</p>
+              </div>
+              <div class="footer">
+                <p class="footer-text">&copy; 2026 SchoolBase. All rights reserved.</p>
+                <p class="footer-text">Questions? Contact <a href="mailto:support@schoolbase.live">support@schoolbase.live</a></p>
+              </div>
+            </div>
+          </body>
+        </html>
+      `,
+    });
+  } catch (error) {
+    console.error('Failed to send country follow-up digest email:', error);
+    throw error;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TEMPLATE 4: FEE REMINDER EMAIL (PARENTS)
 // ═══════════════════════════════════════════════════════════════════════════════

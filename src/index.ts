@@ -8,6 +8,11 @@ import { PrismaClient } from '@prisma/client';
 import { initializeSubscriptionExpiryJob, stopSubscriptionExpiryJob } from './jobs/checkSubscriptionExpiry.js';
 import { initializeSubscriptionEmailJob, stopSubscriptionEmailJob } from './jobs/subscriptionEmails.js';
 import { initializeSignupRetentionJob } from './jobs/signupRetention.js';
+import {
+  initializeCountryFollowUpReminderJob,
+  initializeCountryWorkAssignmentJob,
+  stopCountryFollowUpReminderJob,
+} from './jobs/country-follow-up-reminders.js';
 import { ensurePlatformPaymentPlans } from './services/platform-settings.js';
 import { activityAuditMiddleware } from './middleware/activityAudit.js';
 import baileysSessionManager from './communications/whatsapp-baileys.js';
@@ -28,6 +33,8 @@ const PORT = process.env.API_PORT || 3006;
 let subscriptionExpiryTask: any = null;
 let subscriptionEmailTask: any = null;
 let signupRetentionTask: any = null;
+let countryFollowUpReminderTask: any = null;
+let countryWorkAssignmentTask: any = null;
 
 async function ensureDefaultAdPlacements() {
   const placements = [
@@ -283,6 +290,18 @@ async function start() {
       console.error('Warning: Failed to initialize signup retention job:', error);
     }
 
+    try {
+      countryFollowUpReminderTask = initializeCountryFollowUpReminderJob();
+    } catch (error) {
+      console.error('Warning: Failed to initialize country follow-up reminder job:', error);
+    }
+
+    try {
+      countryWorkAssignmentTask = initializeCountryWorkAssignmentJob();
+    } catch (error) {
+      console.error('Warning: Failed to initialize country work assignment reconciliation:', error);
+    }
+
     const whatsappDeliveryWorker = new WhatsAppDeliveryWorker(
       prisma,
       new SchoolWhatsAppRateLimiter({
@@ -347,6 +366,8 @@ process.on('SIGTERM', async () => {
     stopSubscriptionEmailJob(subscriptionEmailTask);
   }
   signupRetentionTask?.stop();
+  stopCountryFollowUpReminderJob(countryFollowUpReminderTask);
+  stopCountryFollowUpReminderJob(countryWorkAssignmentTask);
   await prisma.$disconnect();
   process.exit(0);
 });

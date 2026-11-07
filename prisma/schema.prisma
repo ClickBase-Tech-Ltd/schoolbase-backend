@@ -196,10 +196,24 @@ model CountrySchoolFollowUp {
   @@index([ownerUserId])
 }
 
+model CountryFollowUpDigest {
+  id         String                       @id @default(cuid())
+  userId     String
+  digestDate DateTime                     @db.Date
+  status     CountryFollowUpDigestStatus  @default(PROCESSING)
+  claimedAt  DateTime                     @default(now()) @db.DateTime(0)
+  sentAt     DateTime?                    @db.DateTime(0)
+  error      String?                      @db.Text
+  user       User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, digestDate])
+  @@index([status, claimedAt])
+}
+
 model CountrySchoolFollowUpEvent {
   id          String               @id @default(cuid())
   followUpId  String
-  actorUserId String
+  actorUserId String?
   actorName   String               @db.VarChar(191)
   changes     Json?
   note        String?              @db.Text
@@ -553,6 +567,7 @@ model User {
   id                String                @id @default(cuid())
   schoolId          String?
   countryCode       String? @db.VarChar(2)
+  countryFollowUpRemindersEnabled Boolean @default(true)
   email             String                @unique
   name              String
   role              UserRole
@@ -567,6 +582,7 @@ model User {
   platformAuditLogs PlatformAuditLog[]
   supportNotes      SupportInternalNote[] @relation("SupportNoteAuthor")
   createdSupportRequests SupportRequest[] @relation("SupportRequestCreator")
+  assignedCountryRequests SupportRequest[] @relation("CountrySupportRequestAssignee")
   supportMessages       SupportRequestMessage[] @relation("SupportMessageSender")
   createdTasks      SupportTeamTask[]     @relation("SupportTaskCreator")
   assignedTasks     SupportTeamTask[]     @relation("SupportTaskAssignee")
@@ -592,6 +608,7 @@ model User {
   competitionAccountsLinked CompetitionPupilAccount[] @relation("CompetitionPupilAccountLinkedBy")
   competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
   countryFollowUpsOwned CountrySchoolFollowUp[] @relation("CountrySchoolFollowUpOwner")
+  countryFollowUpDigests CountryFollowUpDigest[]
 
   @@index([schoolId], map: "User_schoolId_fkey")
   @@index([countryCode, role, isActive])
@@ -1402,6 +1419,7 @@ model SupportRequest {
   schoolId           String
   createdByUserId    String?
   createdByGuardianId String?
+  assignedCountryRepId String?
   requesterName      String?
   requesterEmail     String?
   requesterRole      String?
@@ -1416,6 +1434,7 @@ model SupportRequest {
   school             School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   createdByUser      User?                   @relation("SupportRequestCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   createdByGuardian  Guardian?               @relation("SupportRequestGuardian", fields: [createdByGuardianId], references: [id], onDelete: SetNull)
+  assignedCountryRep User?                    @relation("CountrySupportRequestAssignee", fields: [assignedCountryRepId], references: [id], onDelete: SetNull)
   messages           SupportRequestMessage[]
   attachments        SupportAttachment[]
   internalNotes      SupportInternalNote[]
@@ -1424,6 +1443,7 @@ model SupportRequest {
   @@index([status, lastMessageAt])
   @@index([createdByUserId])
   @@index([createdByGuardianId])
+  @@index([assignedCountryRepId, status])
 }
 
 model SupportRequestMessage {
@@ -3270,6 +3290,12 @@ enum CountrySchoolFollowUpStage {
   ONBOARDING
   BLOCKED
   OPERATIONAL
+}
+
+enum CountryFollowUpDigestStatus {
+  PROCESSING
+  SENT
+  FAILED
 }
 
 enum CompetitionPupilAccountStatus {

@@ -42,6 +42,7 @@ import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmiss
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 import { resolveStoredAssessmentTotal } from '../services/result-score-calculation.js';
 import { buildSubscriptionReceiptPdf, getSubscriptionReceiptData, listSchoolSubscriptionReceipts } from '../services/subscription-receipts.js';
+import { chooseCountryRepresentativeForSchool } from '../services/country-work-assignment.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -7766,9 +7767,11 @@ router.post('/support', async (req: Request, res: Response) => {
     const school = await prisma.school.findUnique({ where: { id: schoolId }, select: { id: true, name: true, country: true, email: true } });
 
     const supportRequest = await prisma.$transaction(async (tx) => {
+      const countryRepresentative = await chooseCountryRepresentativeForSchool(tx, schoolId, 'support');
       const createdRequest = await tx.supportRequest.create({
         data: {
           schoolId,
+          assignedCountryRepId: countryRepresentative?.id ?? null,
           subject,
           message,
           priority,

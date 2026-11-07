@@ -6,6 +6,7 @@ import path from 'node:path';
 import multer from 'multer';
 import { getSessionSecret } from '../services/security-config.js';
 import { jwtVerify } from 'jose';
+import { chooseCountryRepresentativeForSchool } from '../services/country-work-assignment.js';
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -266,9 +267,11 @@ router.post('/conversations', authenticate, sendChatMessage, async (req: ChatReq
     persisted = await persistAttachments(files);
 
     const request = await prisma.$transaction(async (tx) => {
+      const countryRepresentative = await chooseCountryRepresentativeForSchool(tx, actor.schoolId, 'support');
       const created = await tx.supportRequest.create({
         data: {
           schoolId: actor.schoolId,
+          assignedCountryRepId: countryRepresentative?.id ?? null,
           createdByUserId: actor.userId || null,
           createdByGuardianId: actor.guardianId || null,
           requesterName: actor.name || 'School user',

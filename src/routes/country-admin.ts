@@ -6,6 +6,7 @@ import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { billingMarkets, type BillingMarketCode } from '../services/billing-markets.js';
 import { sendCountryAdminInviteEmail, sendSupportStatusUpdateNotification } from '../services/email.js';
+import { chooseCountryRepresentative } from '../services/country-work-assignment.js';
 
 const prisma = new PrismaClient();
 const countryAdmin = Router();
@@ -13,7 +14,13 @@ const countryRepresentativeAdmin = Router();
 const countryFollowUpStages = ['NEW', 'CONTACTED', 'ONBOARDING', 'BLOCKED', 'OPERATIONAL'] as const;
 
 type CountryRepRequest = Request & {
-  countryRepresentative?: { userId: string; countryCode: BillingMarketCode; name: string; email: string };
+  countryRepresentative?: {
+    userId: string;
+    countryCode: BillingMarketCode;
+    name: string;
+    email: string;
+    countryFollowUpRemindersEnabled: boolean;
+  };
 };
 
 function sessionSecret() {
@@ -38,7 +45,16 @@ async function authenticateCountryRepresentative(req: CountryRepRequest, res: Re
   try {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, name: true, email: true, role: true, countryCode: true, schoolId: true, isActive: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        countryCode: true,
+        schoolId: true,
+        isActive: true,
+        countryFollowUpRemindersEnabled: true,
+      },
     });
     if (
       !user ||
@@ -57,6 +73,7 @@ async function authenticateCountryRepresentative(req: CountryRepRequest, res: Re
       countryCode: user.countryCode as BillingMarketCode,
       name: user.name,
       email: user.email,
+      countryFollowUpRemindersEnabled: user.countryFollowUpRemindersEnabled,
     };
     return next();
   } catch (error) {
@@ -170,6 +187,24 @@ const schoolWhere = (countryCode: BillingMarketCode, search = ''): Prisma.School
 
 countryAdmin.use(authenticateCountryRepresentative);
 
+countryAdmin.patch('/reminder-preferences', async (req: CountryRepRequest, res: Response) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Reminder preference must be enabled or disabled.' });
+  }
+
+  try {
+    await prisma.user.update({
+      where: { id: req.countryRepresentative!.userId },
+      data: { countryFollowUpRemindersEnabled: enabled },
+    });
+    return res.json({ success: true, enabled });
+  } catch (error) {
+    console.error('[country-admin] reminder preference update failed:', error);
+    return res.status(500).json({ error: 'Unable to update your reminder preference.' });
+  }
+});
+
 countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
   const representative = req.countryRepresentative!;
   const page = Number.parseInt(String(req.query.page || '1'), 10);
@@ -228,7 +263,7 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
   if (listFilters.length) listWhere.AND = listFilters;
 
   try {
-    const [schools, total, activeCount, trialCount, openSupportCount, overdueFollowUps, blockedSchools, followUpOwners] = await Promise.all([
+    const [schools, total, activeCount, trialCount, openSupportCount, overdueFollowUps, blockedSchools] = await Promise.all([
       prisma.school.findMany({
         where: listWhere,
         select: {
@@ -274,16 +309,15 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
       prisma.countrySchoolFollowUp.count({
         where: { school: baseWhere, stage: 'BLOCKED' },
       }),
-      prisma.user.findMany({
-        where: { role: 'COUNTRY_REP', countryCode: representative.countryCode, isActive: true, schoolId: null },
-        select: { id: true, name: true },
-        orderBy: { name: 'asc' },
-      }),
     ]);
 
     return res.json({
       country: billingMarkets[representative.countryCode],
-      representative: { name: representative.name, email: representative.email },
+      representative: {
+        name: representative.name,
+        email: representative.email,
+        followUpRemindersEnabled: representative.countryFollowUpRemindersEnabled,
+      },
       summary: {
         schools: total,
         active: activeCount,
@@ -292,7 +326,6 @@ countryAdmin.get('/overview', async (req: CountryRepRequest, res: Response) => {
         overdueFollowUps,
         blockedSchools,
       },
-      followUpOwners,
       schools: schools.map((school) => {
         const setup = setupStatusForSchool(school);
         return {
@@ -358,11 +391,6 @@ countryAdmin.get('/schools/:schoolId/follow-up', async (req: CountryRepRequest, 
     });
     if (!school) return res.status(404).json({ error: 'School not found in your assigned country.' });
 
-    const followUpOwners = await prisma.user.findMany({
-      where: { role: 'COUNTRY_REP', countryCode: representative.countryCode, isActive: true, schoolId: null },
-      select: { id: true, name: true },
-      orderBy: { name: 'asc' },
-    });
     return res.json({
       school: { id: school.id, name: school.name },
       followUp: school.countryFollowUp ? {
@@ -376,7 +404,6 @@ countryAdmin.get('/schools/:schoolId/follow-up', async (req: CountryRepRequest, 
         nextContactAt: null,
         events: [],
       },
-      followUpOwners,
     });
   } catch (error) {
     console.error('[country-admin] school follow-up history failed:', error);
@@ -392,10 +419,12 @@ countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest
   }
 
   const hasStage = Object.hasOwn(body, 'stage');
-  const hasOwner = Object.hasOwn(body, 'ownerUserId');
   const hasNextContact = Object.hasOwn(body, 'nextContactAt');
   const hasNote = Object.hasOwn(body, 'note');
-  if (!hasStage && !hasOwner && !hasNextContact && !hasNote) {
+  if (Object.hasOwn(body, 'ownerUserId')) {
+    return res.status(400).json({ error: 'Follow-up ownership is assigned automatically.' });
+  }
+  if (!hasStage && !hasNextContact && !hasNote) {
     return res.status(400).json({ error: 'Choose at least one follow-up update.' });
   }
 
@@ -405,14 +434,6 @@ countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest
       return res.status(400).json({ error: 'Select a valid follow-up stage.' });
     }
     stage = body.stage as typeof countryFollowUpStages[number];
-  }
-
-  let ownerUserId: string | null | undefined;
-  if (hasOwner) {
-    if (body.ownerUserId !== null && typeof body.ownerUserId !== 'string') {
-      return res.status(400).json({ error: 'Select a valid follow-up owner.' });
-    }
-    ownerUserId = body.ownerUserId as string | null;
   }
 
   let nextContactAt: Date | null | undefined;
@@ -445,22 +466,8 @@ countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest
     });
     if (!school) return res.status(404).json({ error: 'School not found in your assigned country.' });
 
-    let owner: { id: string; name: string } | null = null;
-    if (ownerUserId) {
-      owner = await prisma.user.findFirst({
-        where: {
-          id: ownerUserId,
-          role: 'COUNTRY_REP',
-          countryCode: representative.countryCode,
-          isActive: true,
-          schoolId: null,
-        },
-        select: { id: true, name: true },
-      });
-      if (!owner) return res.status(400).json({ error: 'The selected owner is not an active representative for your country.' });
-    }
-
     const result = await prisma.$transaction(async (tx) => {
+      const automaticOwner = await chooseCountryRepresentative(tx, representative.countryCode, 'followUp');
       const existing = await tx.countrySchoolFollowUp.findUnique({
         where: { schoolId: school.id },
         select: {
@@ -472,7 +479,20 @@ countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest
         },
       });
       const nextStage = stage ?? existing?.stage ?? 'NEW';
-      const nextOwnerUserId = hasOwner ? ownerUserId! : existing?.ownerUserId ?? null;
+      const existingOwnerIsActive = existing?.ownerUserId
+        ? await tx.user.findFirst({
+          where: {
+            id: existing.ownerUserId,
+            role: 'COUNTRY_REP',
+            countryCode: representative.countryCode,
+            isActive: true,
+            schoolId: null,
+          },
+          select: { id: true, name: true },
+        })
+        : null;
+      const owner = existingOwnerIsActive ?? automaticOwner;
+      const nextOwnerUserId = owner?.id ?? null;
       const nextDate = hasNextContact ? nextContactAt! : existing?.nextContactAt ?? null;
       const dateString = (value: Date | null) => value?.toISOString().slice(0, 10) ?? null;
       const changes: Record<string, Prisma.InputJsonValue | null> = {};
@@ -498,7 +518,7 @@ countryAdmin.patch('/schools/:schoolId/follow-up', async (req: CountryRepRequest
         where: { schoolId: school.id },
         update: {
           ...(stage !== undefined ? { stage } : {}),
-          ...(hasOwner ? { ownerUserId } : {}),
+          ownerUserId: nextOwnerUserId,
           ...(hasNextContact ? { nextContactAt } : {}),
         },
         create: {
@@ -612,6 +632,7 @@ countryAdmin.get('/support', async (req: CountryRepRequest, res: Response) => {
           requesterEmail: true,
           lastMessageAt: true,
           school: { select: { id: true, name: true } },
+          assignedCountryRep: { select: { id: true, name: true } },
           messages: {
             orderBy: { createdAt: 'desc' },
             take: 1,
@@ -657,6 +678,7 @@ countryAdmin.get('/support/:requestId', async (req: CountryRepRequest, res: Resp
         createdAt: true,
         lastMessageAt: true,
         school: { select: { id: true, name: true, email: true } },
+        assignedCountryRep: { select: { id: true, name: true } },
         messages: {
           orderBy: { createdAt: 'asc' },
           take: 200,
