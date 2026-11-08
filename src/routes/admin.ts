@@ -38,6 +38,7 @@ import { createStaffAttendanceRouter } from './staff-attendance.js';
 import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
 import { buildFeeInvoiceIssuanceKey, normalizeFeeScheduleName } from '../services/fee-invoice-issuance.js';
 import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
+import { sumOutstandingInvoiceBalance } from '../services/invoice-balance.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 import { resolveStoredAssessmentTotal } from '../services/result-score-calculation.js';
@@ -956,6 +957,42 @@ router.get('/admissions/reports', async (req: Request, res: Response) => {
 });
 
 router.get('/admissions/reviewers', async (req: Request, res: Response) => {
+router.get('/admissions/assistant/summary', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School ID required' });
+    if (!(await isSchoolAdmissionAdmin(req, schoolId))) {
+      return res.status(403).json({ error: 'SCHOOL_ADMIN_REQUIRED' });
+    }
+
+    const statusCounts = await prisma.admissionApplication.groupBy({
+      by: ['status'],
+      where: { schoolId },
+      _count: { _all: true },
+    });
+    const countFor = (status: string) => statusCounts.find((entry) => entry.status === status)?._count._all ?? 0;
+    const pendingReview = countFor('SUBMITTED') + countFor('UNDER_REVIEW');
+    const awaitingFamily = countFor('NEEDS_INFORMATION');
+    const approved = countFor('APPROVED');
+    const rejected = countFor('REJECTED');
+    const withdrawn = countFor('WITHDRAWN');
+
+    return res.json({
+      kind: 'admission_summary',
+      total: statusCounts.reduce((total, entry) => total + entry._count._all, 0),
+      pendingReview,
+      awaitingFamily,
+      openTotal: pendingReview + awaitingFamily,
+      approved,
+      rejected,
+      withdrawn,
+    });
+  } catch (error) {
+    console.error('Error fetching assistant admissions summary:', error);
+    return res.status(500).json({ error: 'Unable to retrieve admissions summary.' });
+  }
+});
+
   try {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) return res.status(401).json({ error: 'School ID required' });
@@ -2701,6 +2738,394 @@ router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Resp
         amount: true,
         termId: true,
         classId: true,
+router.get('/fees/assistant/query', requireAccountingAccess, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School admin session required' });
+
+    const intent = typeof req.query.intent === 'string' ? req.query.intent : '';
+    const rawClassName = typeof req.query.className === 'string' ? req.query.className.trim().replace(/\s+/g, ' ') : '';
+    if (rawClassName.length > 100) return res.status(400).json({ error: 'Class name must be 100 characters or fewer.' });
+    let classFilter: Prisma.PupilWhereInput = {};
+    let displayClassName = rawClassName || null;
+    if (rawClassName) {
+      const normalizedClassName = rawClassName.toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+      const phase = /^(early years?|pre primary|preschool)$/.test(normalizedClassName)
+        ? 'EARLY_YEARS'
+        : /^(primary|elementary)$/.test(normalizedClassName)
+          ? 'PRIMARY'
+          : /^(secondary|high school)$/.test(normalizedClassName)
+            ? 'SECONDARY'
+            : null;
+      const phaseLevelMatch = normalizedClassName.match(/^(early years?|nursery|kindergarten|primary|elementary|basic|grade|secondary|high school|jss|sss|junior secondary|senior secondary)\s+(\d+)$/);
+      const requestedPhase = phaseLevelMatch
+        ? /^(early years?|nursery|kindergarten)$/.test(phaseLevelMatch[1])
+          ? 'EARLY_YEARS'
+          : /^(primary|elementary|basic|grade)$/.test(phaseLevelMatch[1])
+            ? 'PRIMARY'
+            : 'SECONDARY'
+        : null;
+
+      if (phaseLevelMatch && requestedPhase) {
+        const phaseClasses = await prisma.class.findMany({
+          where: { schoolId, phase: requestedPhase },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        const requestedLevel = phaseLevelMatch[1];
+        const levelPrefixPattern = /^(jss|junior secondary)$/.test(requestedLevel)
+          ? /^(jss|junior secondary)\b/i
+          : /^(sss|senior secondary)$/.test(requestedLevel)
+            ? /^(sss|senior secondary)\b/i
+            : /^(nursery|kindergarten|early years?)$/.test(requestedLevel)
+              ? /^(nursery|kindergarten|early years?)\b/i
+              : /^(primary|elementary|basic|grade)$/.test(requestedLevel)
+                ? /^(primary|elementary|basic|grade)\b/i
+                : null;
+        const levelMatches = phaseClasses.filter((classItem) =>
+          (!levelPrefixPattern || levelPrefixPattern.test(classItem.name.trim()))
+          && new RegExp(`(?:^|\\D)${phaseLevelMatch[2]}$`).test(classItem.name.trim()));
+        const distinctNames = [...new Set(levelMatches.map((classItem) => classItem.name))];
+        if (distinctNames.length !== 1) {
+          return res.json({
+            kind: distinctNames.length > 1 ? 'class_match_required' : 'class_not_found',
+            requestedClass: rawClassName,
+            availableClasses: (distinctNames.length > 1
+              ? distinctNames
+              : [...new Set(phaseClasses.map((classItem) => classItem.name))]).slice(0, 20),
+          });
+        }
+        classFilter = { classId: { in: levelMatches.map((classItem) => classItem.id) } };
+        displayClassName = distinctNames[0];
+      } else if (phase) {
+        classFilter = { class: { phase } };
+        displayClassName = phase === 'EARLY_YEARS' ? 'Early Years' : phase === 'PRIMARY' ? 'Primary' : 'Secondary';
+      } else {
+        const classes = await prisma.class.findMany({
+          where: { schoolId },
+          select: { id: true, name: true, arm: true },
+          orderBy: { name: 'asc' },
+        });
+        const normalizeClass = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const exactMatches = classes.filter((classItem) => normalizeClass(classItem.name) === normalizeClass(rawClassName));
+        const groupPrefix = /^(nursery|kindergarten)$/.exec(normalizedClassName)?.[1];
+        const groupedMatches = groupPrefix
+          ? classes.filter((classItem) => normalizeClass(classItem.name).startsWith(groupPrefix))
+          : [];
+        const ordinal = normalizedClassName.match(/\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|seventh|7th|eighth|8th|ninth|9th|tenth|10th)\b/)?.[1];
+        const ordinalNumbers: Record<string, string> = {
+          first: '1', '1st': '1', second: '2', '2nd': '2', third: '3', '3rd': '3',
+          fourth: '4', '4th': '4', fifth: '5', '5th': '5', sixth: '6', '6th': '6',
+          seventh: '7', '7th': '7', eighth: '8', '8th': '8', ninth: '9', '9th': '9',
+          tenth: '10', '10th': '10',
+        };
+        const ordinalNumber = ordinal ? ordinalNumbers[ordinal] : null;
+        const levelMatches = !exactMatches.length && ordinalNumber && /\byear\b/.test(normalizedClassName)
+          ? classes.filter((classItem) => new RegExp(`(?:^|\\D)${ordinalNumber}$`).test(classItem.name.trim()))
+          : [];
+        const matches = groupedMatches.length
+          ? groupedMatches
+          : exactMatches.length
+            ? exactMatches
+            : levelMatches;
+        const distinctNames = [...new Set(matches.map((classItem) => classItem.name))];
+        if (groupedMatches.length) {
+          classFilter = { classId: { in: groupedMatches.map((classItem) => classItem.id) } };
+          displayClassName = groupPrefix === 'nursery' ? 'Nursery' : 'Kindergarten';
+        } else if (distinctNames.length !== 1) {
+          return res.json({
+            kind: distinctNames.length > 1 ? 'class_match_required' : 'class_not_found',
+            requestedClass: rawClassName,
+            availableClasses: (distinctNames.length > 1 ? distinctNames : [...new Set(classes.map((classItem) => classItem.name))]).slice(0, 20),
+          });
+        } else {
+          classFilter = { classId: { in: matches.map((classItem) => classItem.id) } };
+          displayClassName = distinctNames[0];
+        }
+      }
+    }
+
+    if (intent === 'active_student_count') {
+      const count = await prisma.pupil.count({
+        where: { ...buildActiveStudentWhere(schoolId), ...classFilter },
+      });
+      return res.json({
+        kind: 'active_student_count',
+        count,
+        className: displayClassName,
+        scope: 'Active student records in this school.',
+      });
+    }
+
+    if (!['outstanding_summary', 'outstanding_students', 'payment_summary'].includes(intent)) {
+      return res.status(400).json({ error: 'Unsupported assistant query.' });
+    }
+
+    if (intent === 'payment_summary') {
+      const academicYear = await prisma.academicYear.findFirst({
+        where: { schoolId, isCurrent: true },
+        orderBy: { createdAt: 'desc' },
+        include: { terms: { orderBy: { sortOrder: 'asc' } } },
+      });
+      if (!academicYear) {
+        return res.status(409).json({ error: 'There is no current academic year configured, so I cannot determine the fee reporting period.' });
+      }
+      const now = new Date();
+      const currentTerm = academicYear.terms
+        .filter((term) => (!term.startsOn || term.startsOn <= now) && (!term.endsOn || term.endsOn >= now))
+        .sort((a, b) => b.sortOrder - a.sortOrder)[0]
+        || academicYear.terms
+          .filter((term) => !term.startsOn || term.startsOn <= now)
+          .sort((a, b) => b.sortOrder - a.sortOrder)[0]
+        || academicYear.terms[0];
+      if (!currentTerm) {
+        return res.status(409).json({ error: `No term is configured for the current academic year (${academicYear.name}), so I cannot determine the fee reporting period.` });
+      }
+      const paymentWhere = {
+        invoice: {
+          schoolId,
+          status: { not: 'VOIDED' as const },
+          feeSchedule: { termId: currentTerm.id },
+          pupil: { ...buildActiveStudentWhere(schoolId), ...classFilter },
+        },
+      };
+      const [school, totals, recentPayments] = await Promise.all([
+        prisma.school.findUnique({ where: { id: schoolId }, select: { currency: true } }),
+        prisma.payment.aggregate({
+          where: paymentWhere,
+          _sum: { amount: true },
+          _count: { _all: true },
+        }),
+        prisma.payment.findMany({
+          where: paymentWhere,
+          select: {
+            id: true,
+            amount: true,
+            method: true,
+            paidAt: true,
+            invoice: {
+              select: {
+                invoiceNo: true,
+                pupil: { select: { firstName: true, lastName: true } },
+              },
+            },
+          },
+          orderBy: { paidAt: 'desc' },
+          take: 5,
+        }),
+      ]);
+      return res.json({
+        kind: 'payment_summary',
+        currency: school?.currency || 'NGN',
+        period: { academicYear: academicYear.name, term: currentTerm.name },
+        className: displayClassName,
+        totalCollected: totals._sum.amount || 0,
+        paymentCount: totals._count._all,
+        recentPayments: recentPayments.map((payment) => ({
+          ...payment,
+          paidAt: payment.paidAt.toISOString(),
+        })),
+      });
+    }
+
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        schoolId,
+        status: { in: ['SENT', 'PART_PAID', 'OVERDUE', 'PAID'] },
+        pupil: { ...buildActiveStudentWhere(schoolId), ...classFilter },
+      },
+      select: {
+        pupilId: true,
+        amountDue: true,
+        amountPaid: true,
+        status: true,
+        pupil: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            admissionNo: true,
+            class: { select: { name: true, arm: true } },
+          },
+        },
+      },
+    });
+
+    const studentsById = new Map<string, {
+      student: (typeof invoices)[number]['pupil'];
+      invoices: Array<{ status: string; amountDue: number; amountPaid: number }>;
+    }>();
+    for (const invoice of invoices) {
+      const group = studentsById.get(invoice.pupilId) ?? { student: invoice.pupil, invoices: [] };
+      group.invoices.push(invoice);
+      studentsById.set(invoice.pupilId, group);
+    }
+
+    const studentSummaries = Array.from(studentsById.values()).map(({ student, invoices: studentInvoices }) => {
+      const balance = sumOutstandingInvoiceBalance(studentInvoices);
+      const amountPaid = studentInvoices.reduce((total, invoice) => total + invoice.amountPaid, 0);
+      return { ...student, balance, amountPaid };
+    });
+    const owingStudents = studentSummaries
+      .filter((student) => student.balance > 0)
+      .sort((a, b) => b.balance - a.balance || a.lastName.localeCompare(b.lastName));
+    const school = await prisma.school.findUnique({ where: { id: schoolId }, select: { currency: true } });
+
+    return res.json({
+      kind: intent,
+      currency: school?.currency || 'NGN',
+      period: null,
+      className: displayClassName,
+      totalOutstanding: sumOutstandingInvoiceBalance(invoices),
+      studentsWithInvoices: studentSummaries.length,
+      studentsOwing: owingStudents.length,
+      studentsPartiallyPaid: owingStudents.filter((student) => student.amountPaid > 0).length,
+      studentsWithNoRecordedPayment: owingStudents.filter((student) => student.amountPaid === 0).length,
+      studentsFullyPaid: studentSummaries.filter((student) => student.balance === 0).length,
+      students: owingStudents.slice(0, 100),
+      hasMoreStudents: owingStudents.length > 100,
+    });
+  } catch (error) {
+    console.error('Error running assistant school-data query:', error);
+    return res.status(500).json({ error: 'Unable to retrieve the requested school information.' });
+  }
+});
+
+router.get('/fees/assistant/lookup', requireAccountingAccess, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(401).json({ error: 'School admin session required' });
+
+    const rawSearch = req.query.search;
+    const search = typeof rawSearch === 'string' ? rawSearch.trim().replace(/\s+/g, ' ') : '';
+    if (search.length < 2 || search.length > 100) {
+      return res.status(400).json({ error: 'Enter a student name or admission number between 2 and 100 characters.' });
+    }
+
+    const searchTerms = search.split(' ').filter(Boolean);
+    const students = await prisma.pupil.findMany({
+      where: {
+        AND: [
+          buildActiveStudentWhere(schoolId),
+          ...searchTerms.map((term) => ({
+            OR: [
+              { firstName: { contains: term } },
+              { lastName: { contains: term } },
+              { admissionNo: { contains: term } },
+            ],
+          })),
+        ],
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        admissionNo: true,
+        class: { select: { name: true, arm: true } },
+      },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+      take: 11,
+    });
+
+    if (students.length === 0) return res.json({ kind: 'not_found' });
+    if (students.length > 1) {
+      return res.json({
+        kind: 'matches',
+        hasMore: students.length > 10,
+        students: students.slice(0, 10),
+      });
+    }
+
+    const student = students[0];
+    const invoiceWhere = {
+      schoolId,
+      pupilId: student.id,
+      status: { in: ['SENT', 'PART_PAID', 'OVERDUE', 'PAID'] as const },
+    };
+    const [school, totals, invoiceAmounts, invoices, paymentHistory] = await Promise.all([
+      prisma.school.findUnique({ where: { id: schoolId }, select: { currency: true } }),
+      prisma.invoice.aggregate({
+        where: invoiceWhere,
+        _count: { _all: true },
+      }),
+      prisma.invoice.findMany({
+        where: invoiceWhere,
+        select: { amountDue: true, amountPaid: true, status: true },
+      }),
+      prisma.invoice.findMany({
+        where: invoiceWhere,
+        select: {
+          id: true,
+          invoiceNo: true,
+          amountDue: true,
+          amountPaid: true,
+          status: true,
+          dueDate: true,
+          feeSchedule: {
+            select: {
+              name: true,
+              term: { select: { name: true, academicYear: { select: { name: true } } } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.payment.findMany({
+        where: {
+          invoice: {
+            schoolId,
+            pupilId: student.id,
+            status: { in: ['SENT', 'PART_PAID', 'OVERDUE', 'PAID'] },
+          },
+        },
+        select: {
+          id: true,
+          amount: true,
+          method: true,
+          paidAt: true,
+          invoice: {
+            select: {
+              invoiceNo: true,
+              feeSchedule: {
+                select: {
+                  name: true,
+                  term: { select: { name: true, academicYear: { select: { name: true } } } },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { paidAt: 'desc' },
+        take: 26,
+      }),
+    ]);
+
+    return res.json({
+      kind: 'student',
+      student,
+      currency: school?.currency || 'NGN',
+      totalDue: invoiceAmounts.reduce((sum, invoice) => sum + invoice.amountDue, 0),
+      totalPaid: invoiceAmounts.reduce((sum, invoice) => sum + invoice.amountPaid, 0),
+      totalBalance: sumOutstandingInvoiceBalance(invoiceAmounts),
+      hasMoreInvoices: totals._count._all > invoices.length,
+      invoices: invoices.map((invoice) => ({
+        ...invoice,
+        dueDate: invoice.dueDate?.toISOString() ?? null,
+        balance: Math.max(0, invoice.amountDue - invoice.amountPaid),
+      })),
+      paymentHistory: paymentHistory.slice(0, 25).map((payment) => ({
+        ...payment,
+        paidAt: payment.paidAt.toISOString(),
+      })),
+      hasMorePayments: paymentHistory.length > 25,
+    });
+  } catch (error) {
+    console.error('Error fetching assistant fee lookup:', error);
+    return res.status(500).json({ error: 'Unable to retrieve student fee information.' });
+  }
+});
+
         phase: true,
         class: { select: { id: true, name: true, arm: true, phase: true } },
         items: { select: { id: true, name: true, amount: true, isRequired: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
