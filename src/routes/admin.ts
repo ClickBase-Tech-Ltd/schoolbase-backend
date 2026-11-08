@@ -2575,169 +2575,6 @@ router.get('/dashboard', async (req: Request, res: Response) => {
 });
 
 // GET /api/admin/fees/data - Get fees page data
-router.get('/fees/data', async (req: Request, res: Response) => {
-  try {
-    const schoolId = await resolveSchoolId(req);
-    if (!schoolId) {
-      return res.status(400).json({ error: 'School ID required' });
-    }
-
-    const school = await prisma.school.findUnique({
-      where: { id: schoolId },
-      select: { currency: true },
-    });
-
-    const currentAcademicYear = await prisma.academicYear.findFirst({
-      where: { schoolId, isCurrent: true },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    const terms = currentAcademicYear
-      ? await prisma.term.findMany({
-          where: { academicYearId: currentAcademicYear.id },
-          orderBy: { sortOrder: 'asc' },
-        })
-      : [];
-
-    const invoices = await prisma.invoice.findMany({
-      where: { schoolId },
-      include: {
-        pupil: { include: { class: true, guardians: { include: { guardian: true } } } },
-        payments: { orderBy: { paidAt: 'desc' }, take: 1 },
-        feeSchedule: {
-          include: {
-            term: { include: { academicYear: true } },
-            class: { select: { id: true, name: true, arm: true, phase: true } },
-          },
-        },
-        items: {
-          include: {
-            allocations: { select: { amount: true } },
-          },
-          orderBy: { createdAt: 'asc' },
-        },
-      },
-      orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
-    });
-
-    const outstanding = invoices.reduce(
-      (s, i) => s + (i.status === 'VOIDED' ? 0 : Math.max(0, i.amountDue - i.amountPaid)),
-      0,
-    );
-
-    const mappedInvoices = invoices.map((inv) => ({
-      ...inv,
-      dueDate: inv.dueDate ? inv.dueDate.toISOString() : null,
-      academicYear: inv.feeSchedule?.term?.academicYear
-        ? {
-            id: inv.feeSchedule.term.academicYear.id,
-            name: inv.feeSchedule.term.academicYear.name,
-            isCurrent: inv.feeSchedule.term.academicYear.isCurrent,
-          }
-        : null,
-    }));
-
-    res.json({
-      invoices: mappedInvoices,
-      outstanding,
-      currency: school?.currency || 'NGN',
-      terms,
-    });
-  } catch (error) {
-    console.error('Error fetching fees data:', error);
-    res.status(500).json({ error: 'Failed to fetch fees data' });
-  }
-});
-
-router.get('/fees/invoices/students', async (req: Request, res: Response) => {
-  try {
-    const schoolId = await resolveSchoolId(req);
-    const rawSearch = req.query.search;
-    const search = typeof rawSearch === 'string'
-      ? rawSearch.trim()
-      : new URL(req.originalUrl, 'http://localhost').searchParams.get('search')?.trim() || '';
-    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
-    if (search.length < 2) return res.status(400).json({ error: 'Enter at least two characters to search.' });
-
-    const [students, academicYears] = await Promise.all([
-      prisma.pupil.findMany({
-        where: {
-          AND: [
-            buildActiveStudentWhere(schoolId),
-            { OR: [
-              { firstName: { contains: search } },
-              { lastName: { contains: search } },
-              { admissionNo: { contains: search } },
-            ] },
-          ],
-        },
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          admissionNo: true,
-          class: { select: { id: true, name: true, arm: true } },
-        },
-        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-        take: 25,
-      }),
-      prisma.academicYear.findMany({
-        where: { schoolId },
-        select: {
-          id: true,
-          name: true,
-          isCurrent: true,
-          terms: { select: { id: true, name: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } },
-        },
-        orderBy: [{ isCurrent: 'desc' }, { createdAt: 'desc' }],
-      }),
-    ]);
-
-    return res.json({ students, academicYears });
-  } catch (error) {
-    console.error('Error searching finance students:', error);
-    return res.status(500).json({ error: 'Failed to search students' });
-  }
-});
-
-router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Response) => {
-  try {
-    const schoolId = await resolveSchoolId(req);
-    const termId = typeof req.query.termId === 'string' ? req.query.termId : '';
-    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
-    if (!termId) return res.status(400).json({ error: 'Term ID required' });
-
-    const pupil = await prisma.pupil.findFirst({
-      where: { ...buildActiveStudentWhere(schoolId), id: req.params.id },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        admissionNo: true,
-        class: { select: { id: true, name: true, arm: true, phase: true } },
-      },
-    });
-    if (!pupil) return res.status(404).json({ error: 'Active student not found' });
-
-    const schedules = await prisma.feeSchedule.findMany({
-      where: {
-        schoolId,
-        termId,
-        OR: [
-          { classId: null, phase: null },
-          ...(pupil.class?.id ? [{
-            classId: pupil.class.id,
-            OR: [{ phase: null }, ...(pupil.class.phase ? [{ phase: pupil.class.phase }] : [])],
-          }] : []),
-          ...(pupil.class?.phase ? [{ classId: null, phase: pupil.class.phase }] : []),
-        ],
-      },
-      select: {
-        id: true,
-        name: true,
-        amount: true,
-        termId: true,
-        classId: true,
 router.get('/fees/assistant/query', requireAccountingAccess, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);
@@ -3126,6 +2963,169 @@ router.get('/fees/assistant/lookup', requireAccountingAccess, async (req: Authen
   }
 });
 
+router.get('/fees/data', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) {
+      return res.status(400).json({ error: 'School ID required' });
+    }
+
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: { currency: true },
+    });
+
+    const currentAcademicYear = await prisma.academicYear.findFirst({
+      where: { schoolId, isCurrent: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const terms = currentAcademicYear
+      ? await prisma.term.findMany({
+          where: { academicYearId: currentAcademicYear.id },
+          orderBy: { sortOrder: 'asc' },
+        })
+      : [];
+
+    const invoices = await prisma.invoice.findMany({
+      where: { schoolId },
+      include: {
+        pupil: { include: { class: true, guardians: { include: { guardian: true } } } },
+        payments: { orderBy: { paidAt: 'desc' }, take: 1 },
+        feeSchedule: {
+          include: {
+            term: { include: { academicYear: true } },
+            class: { select: { id: true, name: true, arm: true, phase: true } },
+          },
+        },
+        items: {
+          include: {
+            allocations: { select: { amount: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+    });
+
+    const outstanding = invoices.reduce(
+      (s, i) => s + (i.status === 'VOIDED' ? 0 : Math.max(0, i.amountDue - i.amountPaid)),
+      0,
+    );
+
+    const mappedInvoices = invoices.map((inv) => ({
+      ...inv,
+      dueDate: inv.dueDate ? inv.dueDate.toISOString() : null,
+      academicYear: inv.feeSchedule?.term?.academicYear
+        ? {
+            id: inv.feeSchedule.term.academicYear.id,
+            name: inv.feeSchedule.term.academicYear.name,
+            isCurrent: inv.feeSchedule.term.academicYear.isCurrent,
+          }
+        : null,
+    }));
+
+    res.json({
+      invoices: mappedInvoices,
+      outstanding,
+      currency: school?.currency || 'NGN',
+      terms,
+    });
+  } catch (error) {
+    console.error('Error fetching fees data:', error);
+    res.status(500).json({ error: 'Failed to fetch fees data' });
+  }
+});
+
+router.get('/fees/invoices/students', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    const rawSearch = req.query.search;
+    const search = typeof rawSearch === 'string'
+      ? rawSearch.trim()
+      : new URL(req.originalUrl, 'http://localhost').searchParams.get('search')?.trim() || '';
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+    if (search.length < 2) return res.status(400).json({ error: 'Enter at least two characters to search.' });
+
+    const [students, academicYears] = await Promise.all([
+      prisma.pupil.findMany({
+        where: {
+          AND: [
+            buildActiveStudentWhere(schoolId),
+            { OR: [
+              { firstName: { contains: search } },
+              { lastName: { contains: search } },
+              { admissionNo: { contains: search } },
+            ] },
+          ],
+        },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          admissionNo: true,
+          class: { select: { id: true, name: true, arm: true } },
+        },
+        orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+        take: 25,
+      }),
+      prisma.academicYear.findMany({
+        where: { schoolId },
+        select: {
+          id: true,
+          name: true,
+          isCurrent: true,
+          terms: { select: { id: true, name: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } },
+        },
+        orderBy: [{ isCurrent: 'desc' }, { createdAt: 'desc' }],
+      }),
+    ]);
+
+    return res.json({ students, academicYears });
+  } catch (error) {
+    console.error('Error searching finance students:', error);
+    return res.status(500).json({ error: 'Failed to search students' });
+  }
+});
+
+router.get('/fees/invoices/students/:id/preview', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    const termId = typeof req.query.termId === 'string' ? req.query.termId : '';
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+    if (!termId) return res.status(400).json({ error: 'Term ID required' });
+
+    const pupil = await prisma.pupil.findFirst({
+      where: { ...buildActiveStudentWhere(schoolId), id: req.params.id },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        admissionNo: true,
+        class: { select: { id: true, name: true, arm: true, phase: true } },
+      },
+    });
+    if (!pupil) return res.status(404).json({ error: 'Active student not found' });
+
+    const schedules = await prisma.feeSchedule.findMany({
+      where: {
+        schoolId,
+        termId,
+        OR: [
+          { classId: null, phase: null },
+          ...(pupil.class?.id ? [{
+            classId: pupil.class.id,
+            OR: [{ phase: null }, ...(pupil.class.phase ? [{ phase: pupil.class.phase }] : [])],
+          }] : []),
+          ...(pupil.class?.phase ? [{ classId: null, phase: pupil.class.phase }] : []),
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        amount: true,
+        termId: true,
+        classId: true,
         phase: true,
         class: { select: { id: true, name: true, arm: true, phase: true } },
         items: { select: { id: true, name: true, amount: true, isRequired: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] },
