@@ -4287,7 +4287,7 @@ router.post('/fees/invoices/issue-bills', requireSubscription, async (req: Reque
 });
 
 // POST /api/admin/fees/invoices/send-reminders - Send reminders for outstanding invoices
-router.post('/fees/invoices/send-reminders', requireSubscription, async (req: Request, res: Response) => {
+router.post('/fees/invoices/send-reminders', requireAccountingAccess, requireSubscription, async (req: Request, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) {
