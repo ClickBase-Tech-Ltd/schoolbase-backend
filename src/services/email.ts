@@ -681,6 +681,49 @@ function buildSchoolBaseEmailTemplate({
     </html>`;
 }
 
+export async function sendCountryCommunicationsNotificationEmail(input: {
+  email: string;
+  recipientName: string;
+  notificationType: 'private-message' | 'announcement';
+  workspacePath: '/country-admin/messages' | '/schoolbase-admin/country-communications';
+}) {
+  if (!isValidEmail(input.email)) {
+    throw new Error('Invalid country communications notification email address.');
+  }
+
+  const isAnnouncement = input.notificationType === 'announcement';
+  const frontendBaseUrl = (process.env.FRONTEND_URL || 'https://www.schoolbase.live').split(',')[0].trim();
+  const workspaceUrl = new URL(input.workspacePath, frontendBaseUrl).toString();
+  const notificationLabel = isAnnouncement ? 'a new country announcement' : 'a new private message';
+  const subject = isAnnouncement
+    ? 'New country announcement | SchoolBase'
+    : 'New private message | SchoolBase';
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || 'noreply@schoolbase.live',
+    to: input.email,
+    subject,
+    text: [
+      `Hello ${input.recipientName},`,
+      '',
+      `You have ${notificationLabel} in SchoolBase.`,
+      'For privacy, the update is not included in this email.',
+      '',
+      `Sign in to review it: ${workspaceUrl}`,
+      '',
+      'The SchoolBase Team',
+    ].join('\n'),
+    html: buildSchoolBaseEmailTemplate({
+      title: isAnnouncement ? 'New country announcement' : 'New private message',
+      subtitle: 'Country communications',
+      introHtml: `<p>Hello ${escapeEmailHtml(input.recipientName)},</p><p>You have ${isAnnouncement ? 'a new country announcement' : 'a new private message'} in SchoolBase. For privacy, the update is not included in this email.</p>`,
+      actionText: 'Sign in to review',
+      actionUrl: workspaceUrl,
+      footerText: 'This email is only a notification. Sign in to view the update securely.',
+    }),
+  });
+}
+
 export async function sendAdvertiserApplicationNotification(input: {
   companyName: string;
   contactName: string;

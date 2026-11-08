@@ -5,13 +5,45 @@ import { jwtVerify } from 'jose';
 import { getSessionSecret } from '../services/security-config.js';
 import { buildSchoolSetupStatus } from '../services/onboarding.js';
 import { billingMarkets, type BillingMarketCode } from '../services/billing-markets.js';
-import { sendCountryAdminInviteEmail, sendSupportStatusUpdateNotification } from '../services/email.js';
+import {
+  sendCountryAdminInviteEmail,
+  sendCountryCommunicationsNotificationEmail,
+  sendSupportStatusUpdateNotification,
+} from '../services/email.js';
 import { chooseCountryRepresentative } from '../services/country-work-assignment.js';
 
 const prisma = new PrismaClient();
 const countryAdmin = Router();
 const countryRepresentativeAdmin = Router();
 const countryFollowUpStages = ['NEW', 'CONTACTED', 'ONBOARDING', 'BLOCKED', 'OPERATIONAL'] as const;
+
+type CountryCommunicationRecipient = { email: string; name: string };
+type CountryCommunicationNotificationType = 'private-message' | 'announcement';
+
+function notifyCountryCommunicationRecipients(
+  recipients: CountryCommunicationRecipient[],
+  notificationType: CountryCommunicationNotificationType,
+  workspacePath: '/country-admin/messages' | '/schoolbase-admin/country-communications',
+) {
+  const deliveries = recipients
+    .filter((recipient) => recipient.email.trim())
+    .map((recipient) => sendCountryCommunicationsNotificationEmail({
+      email: recipient.email,
+      recipientName: recipient.name,
+      notificationType,
+      workspacePath,
+    }));
+
+  void Promise.allSettled(deliveries).then((results) => {
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length > 0) {
+      console.error(
+        `[country-admin] ${notificationType} email notifications failed for ${failures.length} of ${results.length} recipients:`,
+        failures.map((result) => result.status === 'rejected' ? result.reason : undefined),
+      );
+    }
+  });
+}
 
 type PlatformAdminRequest = Request & { platformAdminUserId?: string };
 type CountryRepRequest = Request & {
@@ -939,11 +971,12 @@ countryAdmin.post('/communications/threads', async (req: CountryRepRequest, res:
   }
 
   try {
-    const platformAdmin = await prisma.user.findFirst({
+    const platformAdmins = await prisma.user.findMany({
       where: { role: 'PLATFORM_ADMIN', isActive: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      select: { id: true, email: true, name: true },
     });
+    const platformAdmin = platformAdmins[0];
     const conversation = await prisma.$transaction(async (tx) => {
       const created = await tx.countryAdminConversation.create({
         data: {
@@ -975,6 +1008,11 @@ countryAdmin.post('/communications/threads', async (req: CountryRepRequest, res:
       });
       return created;
     });
+    notifyCountryCommunicationRecipients(
+      platformAdmins,
+      'private-message',
+      '/schoolbase-admin/country-communications',
+    );
     return res.status(201).json({ thread: conversation });
   } catch (error) {
     console.error('[country-admin] conversation creation failed:', error);
@@ -1030,6 +1068,10 @@ countryAdmin.post('/communications/threads/:threadId/messages', async (req: Coun
       });
       if (!thread) return { notFound: true as const };
       if (thread.status === 'RESOLVED') return { resolved: true as const };
+      const platformAdmins = await tx.user.findMany({
+        where: { role: 'PLATFORM_ADMIN', isActive: true },
+        select: { email: true, name: true },
+      });
       const message = await tx.countryAdminMessage.create({
         data: { conversationId: thread.id, senderUserId: representative.userId, body },
         include: { sender: { select: { id: true, name: true, role: true } } },
@@ -1058,10 +1100,15 @@ countryAdmin.post('/communications/threads/:threadId/messages', async (req: Coun
         resourceId: thread.id,
         summary: 'Sent a message to the platform team',
       });
-      return { message };
+      return { message, recipients: platformAdmins };
     });
     if ('notFound' in result) return res.status(404).json({ error: 'Conversation not found.' });
     if ('resolved' in result) return res.status(409).json({ error: 'This conversation is resolved. Reopen it before replying.' });
+    notifyCountryCommunicationRecipients(
+      result.recipients,
+      'private-message',
+      '/schoolbase-admin/country-communications',
+    );
     return res.status(201).json({ message: result.message });
   } catch (error) {
     console.error('[country-admin] conversation reply failed:', error);
@@ -1258,7 +1305,7 @@ countryRepresentativeAdmin.post('/communications/threads', async (req: PlatformA
   try {
     const representative = await prisma.user.findFirst({
       where: { id: representativeUserId, role: 'COUNTRY_REP', isActive: true, countryCode: { not: null } },
-      select: { id: true, countryCode: true },
+      select: { id: true, name: true, email: true, countryCode: true },
     });
     if (!representative?.countryCode || !Object.hasOwn(billingMarkets, representative.countryCode)) {
       return res.status(404).json({ error: 'Active country representative not found.' });
@@ -1295,6 +1342,11 @@ countryRepresentativeAdmin.post('/communications/threads', async (req: PlatformA
       });
       return created;
     });
+    notifyCountryCommunicationRecipients(
+      [representative],
+      'private-message',
+      '/country-admin/messages',
+    );
     return res.status(201).json({ thread: conversation });
   } catch (error) {
     console.error('[country-admin] platform conversation creation failed:', error);
@@ -1341,7 +1393,11 @@ countryRepresentativeAdmin.post('/communications/threads/:threadId/messages', as
     const result = await prisma.$transaction(async (tx) => {
       const thread = await tx.countryAdminConversation.findUnique({
         where: { id: req.params.threadId },
-        select: { id: true, status: true, representative: { select: { countryCode: true } } },
+        select: {
+          id: true,
+          status: true,
+          representative: { select: { name: true, email: true, countryCode: true } },
+        },
       });
       if (!thread) return null;
       if (thread.status === 'RESOLVED') return { resolved: true as const };
@@ -1373,10 +1429,15 @@ countryRepresentativeAdmin.post('/communications/threads/:threadId/messages', as
         resourceId: thread.id,
         summary: 'Sent a message to a country representative',
       });
-      return { message };
+      return { message, recipients: [thread.representative] };
     });
     if (!result) return res.status(404).json({ error: 'Conversation not found.' });
     if ('resolved' in result) return res.status(409).json({ error: 'This conversation is resolved. Reopen it before replying.' });
+    notifyCountryCommunicationRecipients(
+      result.recipients,
+      'private-message',
+      '/country-admin/messages',
+    );
     return res.status(201).json({ message: result.message });
   } catch (error) {
     console.error('[country-admin] platform conversation reply failed:', error);
@@ -1481,6 +1542,14 @@ countryRepresentativeAdmin.post('/communications/announcements', async (req: Pla
     return res.status(400).json({ error: 'Enter a title and announcement (up to 10,000 characters) and choose a supported audience.' });
   }
   try {
+    const representatives = await prisma.user.findMany({
+      where: {
+        role: 'COUNTRY_REP',
+        isActive: true,
+        ...(countryCode ? { countryCode } : {}),
+      },
+      select: { email: true, name: true },
+    });
     const announcement = await prisma.$transaction(async (tx) => {
       const created = await tx.countryAdminAnnouncement.create({
         data: { createdByUserId: req.platformAdminUserId!, countryCode, title, body, isImportant },
@@ -1499,6 +1568,11 @@ countryRepresentativeAdmin.post('/communications/announcements', async (req: Pla
       });
       return created;
     });
+    notifyCountryCommunicationRecipients(
+      representatives,
+      'announcement',
+      '/country-admin/messages',
+    );
     return res.status(201).json({ announcement });
   } catch (error) {
     console.error('[country-admin] announcement publishing failed:', error);
