@@ -35,6 +35,7 @@ let subscriptionEmailTask: any = null;
 let signupRetentionTask: any = null;
 let countryFollowUpReminderTask: any = null;
 let countryWorkAssignmentTask: any = null;
+let disconnectAiEngineDatabase: (() => Promise<void>) | null = null;
 
 async function ensureDefaultAdPlacements() {
   const placements = [
@@ -210,6 +211,10 @@ async function loadRoutes() {
     console.log('✓ Loaded Competition routes');
     const { default: schoolReviewRoutes } = await import('./routes/school-reviews.js');
     console.log('✓ Loaded school review routes');
+    const aiEngineRoutes = await import('./routes/ai-engine.js');
+    const { createAiEngineRouter } = aiEngineRoutes;
+    disconnectAiEngineDatabase = aiEngineRoutes.disconnectAiEngineDatabase;
+    console.log('✓ Loaded AI engine routes');
 
     app.use('/api/admin', adminRoutes);
     app.use('/api/admin/assessment-components', adminComponentsRoutes);
@@ -242,6 +247,7 @@ async function loadRoutes() {
     app.use('/api/support-chat', supportChatRoutes);
     app.use('/schoolbase-admin/api/support-chat', platformSupportChatRouter);
     app.use('/api/auth', authRoutes);
+    app.use('/api/ai', createAiEngineRouter());
     app.use('/schoolbase-admin/api/whatsapp', platformWhatsAppRoutes);
     app.use('/country-admin/api', countryAdminRoutes);
     app.use('/schoolbase-admin/api/country-representatives', countryRepresentativeAdmin);
@@ -368,6 +374,17 @@ process.on('SIGTERM', async () => {
   signupRetentionTask?.stop();
   stopCountryFollowUpReminderJob(countryFollowUpReminderTask);
   stopCountryFollowUpReminderJob(countryWorkAssignmentTask);
-  await prisma.$disconnect();
-  process.exit(0);
+  const shutdownResults = await Promise.allSettled([
+    disconnectAiEngineDatabase?.() ?? Promise.resolve(),
+    prisma.$disconnect(),
+  ]);
+  const shutdownFailures = shutdownResults.filter((result) => result.status === 'rejected');
+  for (const failure of shutdownFailures) {
+    const error = failure.reason;
+    console.error('Database client failed to disconnect during shutdown:', {
+      name: error instanceof Error ? error.name : 'UnknownError',
+      code: typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : undefined,
+    });
+  }
+  process.exit(shutdownFailures.length === 0 ? 0 : 1);
 });
