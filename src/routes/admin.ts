@@ -23,6 +23,7 @@ import { whatsappDeliveryStore } from '../services/whatsapp-delivery-store.js';
 import type { NextFunction } from 'express';
 import { requireAccountingAccess, verifyAuth, type AuthenticatedRequest } from '../middleware/roleAuth.js';
 import { recordActivity } from '../middleware/activityAudit.js';
+import { isTuitionFinancingEnabled } from '../services/tuition-financing-feature-gate.js';
 import { buildGuardianNotificationRecipients } from '../services/guardian-notification-recipients.js';
 import { buildSchoolAdminMembershipWhere, resolveSchoolScope } from '../services/security-context.js';
 import { createAdminRouteAuthorization } from '../middleware/adminRouteAuthorization.js';
@@ -37,8 +38,8 @@ import { buildStaffAttendanceSummary, computeStaffAttendanceStatus, getSchoolLoc
 import { createStaffAttendanceRouter } from './staff-attendance.js';
 import { buildInvoicePaymentCompareAndSet, matchesPaymentIdempotencyRequest, normalizePaymentIdempotencyKey, parsePositiveAmountMinor } from '../services/fee-payment-guard.js';
 import { buildFeeInvoiceIssuanceKey, normalizeFeeScheduleName } from '../services/fee-invoice-issuance.js';
-import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { sumOutstandingInvoiceBalance } from '../services/invoice-balance.js';
+import { buildFeePaymentJournalEntry } from '../services/accounting-posting.js';
 import { canTransitionAdmissionStatus, isAdmissionApprovalStatus, requiresAdmissionDecisionReason } from './admissions-utils.js';
 import { AdmissionDeliveryRetryStore } from '../services/admission-delivery-retry-store.js';
 import { resolveStoredAssessmentTotal } from '../services/result-score-calculation.js';
@@ -956,7 +957,6 @@ router.get('/admissions/reports', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/admissions/reviewers', async (req: Request, res: Response) => {
 router.get('/admissions/assistant/summary', async (req: Request, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);
@@ -993,6 +993,7 @@ router.get('/admissions/assistant/summary', async (req: Request, res: Response) 
   }
 });
 
+router.get('/admissions/reviewers', async (req: Request, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);
     if (!schoolId) return res.status(401).json({ error: 'School ID required' });
@@ -1894,6 +1895,168 @@ router.get('/settings', async (req: Request, res: Response) => {
 });
 
 // POST /api/admin/settings - Save school settings
+router.get('/financing', async (req: Request, res: Response) => {
+  try {
+    const schoolId = await resolveSchoolId(req);
+    if (!schoolId) return res.status(400).json({ error: 'School ID required' });
+
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: {
+        tuitionFinancingParticipationEnabled: true,
+        tuitionFinancingParticipationUpdatedAt: true,
+        currency: true,
+      },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found' });
+    const products = await prisma.financingProduct.findMany({
+        where: {
+          status: 'ACTIVE',
+          currency: school.currency,
+            effectiveAt: { lte: new Date() },
+            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+            institution: { status: 'ACTIVE' },
+        },
+        orderBy: [{ institution: { displayName: 'asc' } }, { displayName: 'asc' }],
+        select: {
+          id: true,
+          displayName: true,
+          currency: true,
+          institution: { select: { displayName: true } },
+          schools: { where: { schoolId }, select: { productId: true } },
+        },
+      });
+
+    res.json({
+      platformEnabled: await isTuitionFinancingEnabled(prisma),
+      participationEnabled: school.tuitionFinancingParticipationEnabled,
+      updatedAt: school.tuitionFinancingParticipationUpdatedAt,
+      currency: school.currency,
+      products: products.map(({ schools, ...product }) => ({
+        ...product,
+        selected: schools.length > 0,
+      })),
+    });
+  } catch (error) {
+    console.error('[admin] Failed to load school financing settings:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'P2021' || code === 'P2022') {
+      return res.status(503).json({ error: 'Financing schema is not installed.' });
+    }
+    res.status(500).json({ error: 'Failed to load school financing settings.' });
+  }
+});
+
+router.patch('/financing/products', async (req: Request, res: Response) => {
+  try {
+    const productIds = req.body?.productIds;
+    if (!Array.isArray(productIds) || productIds.length > 100 ||
+        productIds.some((id: unknown) => typeof id !== 'string' || id.length === 0) ||
+        new Set(productIds).size !== productIds.length) {
+      return res.status(400).json({ error: 'Provide a list of up to 100 unique product IDs.' });
+    }
+
+    const schoolId = await resolveSchoolId(req);
+    const userId = await resolveUserId(req);
+    if (!schoolId || !userId) return res.status(401).json({ error: 'Authenticated school admin required.' });
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: { currency: true },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found.' });
+
+    const eligibleProducts = await prisma.financingProduct.findMany({
+      where: {
+        id: { in: productIds },
+        status: 'ACTIVE',
+        currency: school.currency,
+        effectiveAt: { lte: new Date() },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        institution: { status: 'ACTIVE' },
+      },
+      select: { id: true },
+    });
+    if (eligibleProducts.length !== productIds.length) {
+      return res.status(400).json({ error: 'One or more selected products are unavailable for this school or its currency.' });
+    }
+
+    await prisma.$transaction(async (transaction) => {
+      await transaction.schoolFinancingProduct.deleteMany({ where: { schoolId } });
+      if (productIds.length > 0) {
+        await transaction.schoolFinancingProduct.createMany({
+          data: productIds.map((productId: string) => ({
+            schoolId,
+            productId,
+            enabledBy: userId,
+          })),
+        });
+      }
+      await transaction.platformAuditLog.create({
+        data: {
+          userId,
+          event: 'TUITION_FINANCING_PRODUCTS_SELECTED',
+          details: JSON.stringify({ schoolId, productIds }),
+        },
+      });
+    });
+    return res.json({ productIds });
+  } catch (error) {
+    console.error('[admin] Failed to update school financing products:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'P2021' || code === 'P2022') {
+      return res.status(503).json({ error: 'Financing product catalogue is not installed.' });
+    }
+    res.status(500).json({ error: 'Failed to update school financing products.' });
+  }
+});
+
+router.patch('/financing', async (req: Request, res: Response) => {
+  try {
+    if (typeof req.body?.participationEnabled !== 'boolean') {
+      return res.status(400).json({ error: 'participationEnabled must be a boolean.' });
+    }
+    if (req.body.participationEnabled && req.body.participationAcknowledged !== true) {
+      return res.status(400).json({ error: 'Confirm the school participation notice before opting in.' });
+    }
+
+    const schoolId = await resolveSchoolId(req);
+    const userId = await resolveUserId(req);
+    if (!schoolId || !userId) return res.status(401).json({ error: 'Authenticated school admin required.' });
+
+    const updatedAt = new Date();
+    const school = await prisma.school.update({
+      where: { id: schoolId },
+      data: {
+        tuitionFinancingParticipationEnabled: req.body.participationEnabled,
+        tuitionFinancingParticipationUpdatedAt: updatedAt,
+        tuitionFinancingParticipationUpdatedBy: userId,
+      },
+      select: {
+        tuitionFinancingParticipationEnabled: true,
+        tuitionFinancingParticipationUpdatedAt: true,
+      },
+    });
+    await recordActivity({
+      event: 'TUITION_FINANCING_PARTICIPATION_UPDATED',
+      details: `School participation ${school.tuitionFinancingParticipationEnabled ? 'enabled' : 'disabled'}`,
+      userId,
+      schoolId,
+    });
+
+    res.json({
+      participationEnabled: school.tuitionFinancingParticipationEnabled,
+      updatedAt: school.tuitionFinancingParticipationUpdatedAt,
+    });
+  } catch (error) {
+    console.error('[admin] Failed to update school financing participation:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'P2021' || code === 'P2022') {
+      return res.status(503).json({ error: 'Financing schema is not installed.' });
+    }
+    res.status(500).json({ error: 'Failed to update school financing participation.' });
+  }
+});
+
 router.post('/settings', async (req: Request, res: Response) => {
   try {
     const schoolId = await resolveSchoolId(req);

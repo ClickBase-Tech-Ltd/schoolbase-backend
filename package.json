@@ -20,10 +20,14 @@
     "test:staff-attendance:station-token": "tsx tests/staff-attendance-station-token.test.ts",
     "test:staff-attendance:db": "tsx tests/staff-attendance-db.integration.test.ts",
     "test:staff-attendance:isolated": "tsx scripts/test-staff-attendance-isolated.ts",
+    "test:financing:manual": "tsx tests/financing-manual-workflow.test.ts",
+    "test:financing": "tsx tests/financing-application-lifecycle.test.ts && tsx tests/financing-provider-contract.test.ts && tsx tests/financing-provider-event-planner.test.ts && tsx tests/financing-provider-event-inbox.test.ts && tsx tests/financing-applications.test.ts && tsx tests/financing-manual-workflow.test.ts && tsx tests/financing-products.test.ts && tsx tests/financing-settlement-validation.test.ts && tsx tests/tuition-financing-feature-gate.test.ts",
     "backfill:staff-profiles": "tsx scripts/backfill-staff-profiles.ts",
+    "financing:seed-demo-manual": "tsx scripts/seed-demo-manual-financing.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev"
+    "db:migrate": "prisma migrate dev",
+    "reconcile:schema": "tsx scripts/schema-reconciliation.ts"
   },
   "dependencies": {
     "@adiwajshing/baileys": "^5.0.0",

@@ -22,160 +22,166 @@ model Partner {
 }
 
 model School {
-  id                            String                   @id @default(cuid())
-  partnerId                     String?
-  name                          String
-  slug                          String                   @unique
-  initials                      String?                  @db.VarChar(12)
-  paystackPublicEncrypted       String?
-  paystackSecretEncrypted       String?
-  twilioSidEncrypted            String?
-  twilioTokenEncrypted          String?
-  whatsappFromEncrypted         String?
-  waCloudAccessTokenEncrypted   String?
-  waCloudPhoneNumberIdEncrypted String?
-  tagline                       String?
-  logoUrl                       String?
-  logoKey                       String?
-  logoPlaceholder               String?
-  principalName                 String?
-  principalSignatureUrl         String?
-  stampUrl                      String?
-  principalComment              String?                  @db.LongText
-  reportCardSectionDefaults     String?                  @db.LongText
-  manualPaymentAccountName      String?
-  manualPaymentAccountNumber    String?
-  manualPaymentBankName         String?
-  primaryColor                  String                   @default("#0A66C2")
-  country                       String                   @default("NG")
-  currency                      String                   @default("NGN")
-  timezone                      String                   @default("Africa/Lagos")
-  termCount                     Int                      @default(3)
-  address                       String?
-  city                          String?
-  phone                         String?
-  email                         String?
-  websiteEnabled                Boolean                  @default(true)
-  showPositions                 Boolean                  @default(false)
-  admissionsCapabilityEnabled  Boolean                  @default(false)
-  admissionsEnabled             Boolean                  @default(false)
-  admissionsOpeningDate         DateTime?
-  admissionsClosingDate         DateTime?
-  admissionsIntroText           String?                  @db.LongText
-  admissionsRequirements        String?                  @db.LongText
-  admissionsContactInfo         String?                  @db.LongText
-  createdAt                     DateTime                 @default(now())
-  updatedAt                     DateTime                 @updatedAt
-  academicYears                 AcademicYear[]
-  admissionApplications         AdmissionApplication[]
-  schoolAdminNotifications     SchoolAdminNotification[]
-  admissionApplicationEvents   AdmissionApplicationEvent[]
-  admissionExportAudits        AdmissionExportAudit[]
-  admissionCounters             AdmissionCounter[]
-  announcements                 Announcement[]
-  assessments                   Assessment[]
-  reportCardSectionConfigs    TermReportCardConfig[]
-  termReportCardComments       TermReportCardComment[]
-  assessmentComponents          AssessmentComponent[]
-  assessmentTemplates           AssessmentTemplate[]
-  attendance                    AttendanceRecord[]
-  staffAttendancePolicies       StaffAttendancePolicy[]
-  attendanceStations            AttendanceStation[]
-  attendanceStationEvents       AttendanceStationEvent[]
-  staffAttendanceRecords        StaffAttendanceRecord[]
-  staffAttendanceEvents         StaffAttendanceEvent[]
-  behaviourAssessments          BehaviourAssessment[]
-  classes                       Class[]
-  feeSchedules                  FeeSchedule[]
-  feeScheduleItems              FeeScheduleItem[]
-  paymentAccounts               PaymentAccount[]
-  gradingScales                 GradingScale[]
-  studentFeeAdjustments         StudentFeeAdjustment[]
-  guardians                     Guardian[]
-  invoices                      Invoice[]
-  notifications                 Notification[]
-  whatsappDeliveries            WhatsAppDelivery[]
-  whatsappPolicy                WhatsAppPolicy?
-  communicationRules            CommunicationRule[]
-  psychomotorAssessments        PsychomotorAssessment[]
-  pupils                        Pupil[]
-  reportTemplates               ReportTemplate[]
-  resultAudits                  ResultAudit[]
-  signatories                   Signatory[]
-  resultSheets                  ResultSheet[]
-  studentSummaries              StudentTermSummary[]     @relation("School_StudentTermSummary")
-  promotionRecords              PromotionRecord[]        @relation("School_PromotionRecord")
-  historicalTermTotals          HistoricalTermTotal[]
-  resultPins                    ResultPin[]
-  resultPinBatches              ResultPinBatch[]
-  partner                       Partner?                 @relation(fields: [partnerId], references: [id], map: "School_partnerId_fkey")
-  enabledPhases                 SchoolOnPhase[]
-  subjects                      Subject[]
-  subjectClasses                SubjectClass[]
-  teacherClasses                TeacherClass[]
-  teacherSubjects               TeacherSubject[]
-  employeeProfiles             EmployeeProfile[]
-  staffEmploymentEvents        StaffEmploymentEvent[]
-  staffNumberCounters          StaffNumberCounter[]
-  users                         User[]
-  schoolReview                  SchoolReview?
-  supportRequests               SupportRequest[]
-  platformSupportRequests       PlatformSupportRequest[]
-  auditLogs                     PlatformAuditLog[]
-  countryFollowUp               CountrySchoolFollowUp?
-  emailLogs                     EmailLog[]
-  accountCategories             AccountCategory[]
-  accountingAccounts            AccountingAccount[]
-  accountingJournalEntries      AccountingJournalEntry[]
-  accountingPeriods             AccountingPeriod[]
-  bankStatementImports          BankStatementImport[]
-  bankStatementEvents           BankStatementReconciliationEvent[]
-  cashbookExportAudits          CashbookExportAudit[]
-  financialTransactions         FinancialTransaction[]
-  financialAuditLogs            FinancialAuditLog[]
-  idCardQuotes                  IdCardQuote[]
-  idCardOrders                  IdCardOrder[]
-  idCardDrafts                  IdCardDraft[]
-  idCardUsageAwards              IdCardUsageAward[]
-  idCardIssuances                 IdCardIssuance[]
-  competitionPupilAccounts        CompetitionPupilAccount[]
-  competitionCategories           CompetitionCategory[]
-  competitionQuestionSets         CompetitionQuestionSet[]
-  competitionChallenges           CompetitionChallenge[]
-  competitionAttempts             CompetitionChallengeAttempt[]
-  competitionXpTransactions       CompetitionXpTransaction[]
-  competitionLeaderboardSnapshots CompetitionLeaderboardSnapshot[]
-  competitionTournaments          CompetitionTournament[]
-  competitionTournamentSchools   CompetitionTournamentSchool[]
-  competitionTournamentParticipants CompetitionTournamentParticipant[]
-  competitionPrizes               CompetitionPrize[]
-  competitionCertificates        CompetitionCertificate[]
-  competitionAnnouncements       CompetitionAnnouncement[]
-  competitionSuspiciousActivities CompetitionSuspiciousActivity[]
-  competitionAuditLogs            CompetitionAuditLog[]
-  competitionAnalyticsSnapshots   CompetitionAnalyticsSnapshot[]
+  id                                     String                             @id @default(cuid())
+  partnerId                              String?
+  name                                   String
+  slug                                   String                             @unique
+  initials                               String?                            @db.VarChar(12)
+  paystackPublicEncrypted                String?
+  paystackSecretEncrypted                String?
+  twilioSidEncrypted                     String?
+  twilioTokenEncrypted                   String?
+  whatsappFromEncrypted                  String?
+  waCloudAccessTokenEncrypted            String?
+  waCloudPhoneNumberIdEncrypted          String?
+  tagline                                String?
+  logoUrl                                String?
+  logoKey                                String?
+  logoPlaceholder                        String?
+  principalName                          String?
+  principalSignatureUrl                  String?
+  stampUrl                               String?
+  principalComment                       String?                            @db.LongText
+  reportCardSectionDefaults              String?                            @db.LongText
+  manualPaymentAccountName               String?
+  manualPaymentAccountNumber             String?
+  manualPaymentBankName                  String?
+  primaryColor                           String                             @default("#0A66C2")
+  country                                String                             @default("NG")
+  currency                               String                             @default("NGN")
+  timezone                               String                             @default("Africa/Lagos")
+  termCount                              Int                                @default(3)
+  address                                String?
+  city                                   String?
+  phone                                  String?
+  email                                  String?
+  websiteEnabled                         Boolean                            @default(true)
+  showPositions                          Boolean                            @default(false)
+  admissionsCapabilityEnabled            Boolean                            @default(false)
+  admissionsEnabled                      Boolean                            @default(false)
+  tuitionFinancingParticipationEnabled   Boolean                            @default(false)
+  tuitionFinancingParticipationUpdatedAt DateTime?
+  tuitionFinancingParticipationUpdatedBy String?
+  admissionsOpeningDate                  DateTime?
+  admissionsClosingDate                  DateTime?
+  admissionsIntroText                    String?                            @db.LongText
+  admissionsRequirements                 String?                            @db.LongText
+  admissionsContactInfo                  String?                            @db.LongText
+  createdAt                              DateTime                           @default(now())
+  updatedAt                              DateTime                           @updatedAt
+  academicYears                          AcademicYear[]
+  admissionApplications                  AdmissionApplication[]
+  schoolAdminNotifications               SchoolAdminNotification[]
+  admissionApplicationEvents             AdmissionApplicationEvent[]
+  admissionExportAudits                  AdmissionExportAudit[]
+  admissionCounters                      AdmissionCounter[]
+  announcements                          Announcement[]
+  assessments                            Assessment[]
+  reportCardSectionConfigs               TermReportCardConfig[]
+  termReportCardComments                 TermReportCardComment[]
+  assessmentComponents                   AssessmentComponent[]
+  assessmentTemplates                    AssessmentTemplate[]
+  attendance                             AttendanceRecord[]
+  staffAttendancePolicies                StaffAttendancePolicy[]
+  attendanceStations                     AttendanceStation[]
+  attendanceStationEvents                AttendanceStationEvent[]
+  staffAttendanceRecords                 StaffAttendanceRecord[]
+  staffAttendanceEvents                  StaffAttendanceEvent[]
+  behaviourAssessments                   BehaviourAssessment[]
+  classes                                Class[]
+  feeSchedules                           FeeSchedule[]
+  feeScheduleItems                       FeeScheduleItem[]
+  paymentAccounts                        PaymentAccount[]
+  gradingScales                          GradingScale[]
+  studentFeeAdjustments                  StudentFeeAdjustment[]
+  guardians                              Guardian[]
+  invoices                               Invoice[]
+  financingApplications                  FinancingApplication[]
+  financingApplicationEvents             FinancingApplicationEvent[]
+  financingProducts                      SchoolFinancingProduct[]
+  notifications                          Notification[]
+  whatsappDeliveries                     WhatsAppDelivery[]
+  whatsappPolicy                         WhatsAppPolicy?
+  communicationRules                     CommunicationRule[]
+  psychomotorAssessments                 PsychomotorAssessment[]
+  pupils                                 Pupil[]
+  reportTemplates                        ReportTemplate[]
+  resultAudits                           ResultAudit[]
+  signatories                            Signatory[]
+  resultSheets                           ResultSheet[]
+  studentSummaries                       StudentTermSummary[]               @relation("School_StudentTermSummary")
+  promotionRecords                       PromotionRecord[]                  @relation("School_PromotionRecord")
+  historicalTermTotals                   HistoricalTermTotal[]
+  resultPins                             ResultPin[]
+  resultPinBatches                       ResultPinBatch[]
+  partner                                Partner?                           @relation(fields: [partnerId], references: [id], map: "School_partnerId_fkey")
+  enabledPhases                          SchoolOnPhase[]
+  subjects                               Subject[]
+  subjectClasses                         SubjectClass[]
+  teacherClasses                         TeacherClass[]
+  teacherSubjects                        TeacherSubject[]
+  employeeProfiles                       EmployeeProfile[]
+  staffEmploymentEvents                  StaffEmploymentEvent[]
+  staffNumberCounters                    StaffNumberCounter[]
+  users                                  User[]
+  schoolReview                           SchoolReview?
+  supportRequests                        SupportRequest[]
+  platformSupportRequests                PlatformSupportRequest[]
+  auditLogs                              PlatformAuditLog[]
+  countryFollowUp                        CountrySchoolFollowUp?
+  emailLogs                              EmailLog[]
+  accountCategories                      AccountCategory[]
+  accountingAccounts                     AccountingAccount[]
+  accountingJournalEntries               AccountingJournalEntry[]
+  accountingPeriods                      AccountingPeriod[]
+  bankStatementImports                   BankStatementImport[]
+  bankStatementEvents                    BankStatementReconciliationEvent[]
+  cashbookExportAudits                   CashbookExportAudit[]
+  financialTransactions                  FinancialTransaction[]
+  financialAuditLogs                     FinancialAuditLog[]
+  idCardQuotes                           IdCardQuote[]
+  idCardOrders                           IdCardOrder[]
+  idCardDrafts                           IdCardDraft[]
+  idCardUsageAwards                      IdCardUsageAward[]
+  idCardIssuances                        IdCardIssuance[]
+  competitionPupilAccounts               CompetitionPupilAccount[]
+  competitionCategories                  CompetitionCategory[]
+  competitionQuestionSets                CompetitionQuestionSet[]
+  competitionChallenges                  CompetitionChallenge[]
+  competitionAttempts                    CompetitionChallengeAttempt[]
+  competitionXpTransactions              CompetitionXpTransaction[]
+  competitionLeaderboardSnapshots        CompetitionLeaderboardSnapshot[]
+  competitionTournaments                 CompetitionTournament[]
+  competitionTournamentSchools           CompetitionTournamentSchool[]
+  competitionTournamentParticipants      CompetitionTournamentParticipant[]
+  competitionPrizes                      CompetitionPrize[]
+  competitionCertificates                CompetitionCertificate[]
+  competitionAnnouncements               CompetitionAnnouncement[]
+  competitionSuspiciousActivities        CompetitionSuspiciousActivity[]
+  competitionAuditLogs                   CompetitionAuditLog[]
+  competitionAnalyticsSnapshots          CompetitionAnalyticsSnapshot[]
 
-  status                        SchoolStatus      @default(TRIAL)
+  status                        SchoolStatus        @default(TRIAL)
   archivedAt                    DateTime?
   archivedBy                    String?
-  archiveReason                 String?           @db.VarChar(500)
+  archiveReason                 String?             @db.VarChar(500)
   archivedPreviousStatus        SchoolStatus?
-  plan                          SchoolPlan        @default(FREE)
+  plan                          SchoolPlan          @default(FREE)
   trialEndsAt                   DateTime?
   subscriptionExpiresAt         DateTime?
   suspendedAt                   DateTime?
-  onboardingStatus              String?           @default("Pending")
-  onboardingProgress            Int               @default(0)
+  onboardingStatus              String?             @default("Pending")
+  onboardingProgress            Int                 @default(0)
   lastSeenAt                    DateTime?
-  resultAccessPinEnabled        Boolean           @default(false)
-  resultAccessMode              String            @default("NONE")
-  resultAccessPinType           String            @default("NONE")
-  resultAccessPinValidity       String            @default("TERM")
-  resultAccessAllowRegeneration Boolean           @default(false)
+  resultAccessPinEnabled        Boolean             @default(false)
+  resultAccessMode              String              @default("NONE")
+  resultAccessPinType           String              @default("NONE")
+  resultAccessPinValidity       String              @default("TERM")
+  resultAccessAllowRegeneration Boolean             @default(false)
   timetableConfigs              TimetableConfig[]
   timetableEntries              TimetableEntry[]
   activities                    SchoolActivity[]
-  scheduledActivities            ScheduledActivity[]
+  scheduledActivities           ScheduledActivity[]
 
   @@index([partnerId], map: "School_partnerId_fkey")
 }
@@ -222,15 +228,6 @@ model CountrySchoolFollowUpEvent {
 
   @@index([followUpId, createdAt])
   @@index([actorUserId, createdAt])
-}
-
-/// Nursery / Primary / Secondary toggles (MySQL-friendly; one row per phase)
-model SchoolOnPhase {
-  schoolId String
-  phase    SchoolPhase
-  school   School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-
-  @@id([schoolId, phase])
 }
 
 model CountryAdminConversation {
@@ -310,68 +307,77 @@ model CountryAdminAnnouncementAcknowledgement {
   @@index([representativeUserId, acknowledgedAt], map: "CAAck_rep_ack_idx")
 }
 
+/// Nursery / Primary / Secondary toggles (MySQL-friendly; one row per phase)
+model SchoolOnPhase {
+  schoolId String
+  phase    SchoolPhase
+  school   School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@id([schoolId, phase])
+}
+
 model AcademicYear {
-  id                   String                @id @default(cuid())
-  schoolId             String
-  name                 String
-  isCurrent            Boolean               @default(false)
-  createdAt            DateTime              @default(now())
-  school               School                @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  announcements        Announcement[]
-  resultSheets         ResultSheet[]
-  promotionRecords     PromotionRecord[]
-  historicalTermTotals HistoricalTermTotal[]
-  timetableConfigs     TimetableConfig[]
+  id                    String                        @id @default(cuid())
+  schoolId              String
+  name                  String
+  isCurrent             Boolean                       @default(false)
+  createdAt             DateTime                      @default(now())
+  school                School                        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  announcements         Announcement[]
+  resultSheets          ResultSheet[]
+  promotionRecords      PromotionRecord[]
+  historicalTermTotals  HistoricalTermTotal[]
+  timetableConfigs      TimetableConfig[]
   competitionChallenges CompetitionChallenge[]
   competitionAttempts   CompetitionChallengeAttempt[]
-  terms                Term[]
+  terms                 Term[]
 
   @@unique([schoolId, name])
   @@index([schoolId], map: "AcademicYear_schoolId_fkey")
 }
 
 model Term {
-  id                     String                  @id @default(cuid())
-  academicYearId         String
-  name                   String
-  sortOrder              Int                     @default(1)
-  startsOn               DateTime?
-  endsOn                 DateTime?
-  assessments            Assessment[]
-  behaviourAssessments   BehaviourAssessment[]
+  id                      String                        @id @default(cuid())
+  academicYearId          String
+  name                    String
+  sortOrder               Int                           @default(1)
+  startsOn                DateTime?
+  endsOn                  DateTime?
+  assessments             Assessment[]
+  behaviourAssessments    BehaviourAssessment[]
   reportCardSectionConfig TermReportCardConfig?
-  termReportCardComments TermReportCardComment[]
-  feeSchedules           FeeSchedule[]
-  psychomotorAssessments PsychomotorAssessment[]
-  resultSheets           ResultSheet[]
-  historicalTermTotals   HistoricalTermTotal[]
-  resultPins             ResultPin[]
-  announcements          Announcement[]
-  timetableConfigs       TimetableConfig[]
-  competitionChallenges CompetitionChallenge[]
-  competitionAttempts   CompetitionChallengeAttempt[]
-  academicYear           AcademicYear            @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  termReportCardComments  TermReportCardComment[]
+  feeSchedules            FeeSchedule[]
+  psychomotorAssessments  PsychomotorAssessment[]
+  resultSheets            ResultSheet[]
+  historicalTermTotals    HistoricalTermTotal[]
+  resultPins              ResultPin[]
+  announcements           Announcement[]
+  timetableConfigs        TimetableConfig[]
+  competitionChallenges   CompetitionChallenge[]
+  competitionAttempts     CompetitionChallengeAttempt[]
+  academicYear            AcademicYear                  @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
 
   @@index([academicYearId], map: "Term_academicYearId_fkey")
 }
 
 model TimetableConfig {
-  id             String            @id @default(cuid())
-  schoolId       String
-  academicYearId String
-  termId         String?
-  name           String
-  timezone       String
-  status         TimetableStatus   @default(DRAFT)
-  publishedAt    DateTime?
-  publishedBy    String?
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
-  school         School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  academicYear   AcademicYear      @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
-  term           Term?             @relation(fields: [termId], references: [id], onDelete: SetNull)
-  periods        TimetablePeriod[]
-  entries        TimetableEntry[]
+  id                  String              @id @default(cuid())
+  schoolId            String
+  academicYearId      String
+  termId              String?
+  name                String
+  timezone            String
+  status              TimetableStatus     @default(DRAFT)
+  publishedAt         DateTime?
+  publishedBy         String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  school              School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  academicYear        AcademicYear        @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  term                Term?               @relation(fields: [termId], references: [id], onDelete: SetNull)
+  periods             TimetablePeriod[]
+  entries             TimetableEntry[]
   scheduledActivities ScheduledActivity[]
 
   @@index([schoolId, academicYearId])
@@ -379,17 +385,17 @@ model TimetableConfig {
 }
 
 model TimetablePeriod {
-  id        String           @id @default(cuid())
-  configId  String
-  dayOfWeek Int
-  name      String
-  startsAt  String
-  endsAt    String
-  sortOrder Int
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
-  config    TimetableConfig  @relation(fields: [configId], references: [id], onDelete: Cascade)
-  entries   TimetableEntry[]
+  id                  String              @id @default(cuid())
+  configId            String
+  dayOfWeek           Int
+  name                String
+  startsAt            String
+  endsAt              String
+  sortOrder           Int
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  config              TimetableConfig     @relation(fields: [configId], references: [id], onDelete: Cascade)
+  entries             TimetableEntry[]
   scheduledActivities ScheduledActivity[]
 
   @@unique([configId, dayOfWeek, sortOrder])
@@ -422,35 +428,35 @@ model TimetableEntry {
 }
 
 model SchoolActivity {
-  id                 String               @id @default(cuid())
-  schoolId           String
-  name               String
-  category           String               @default("GENERAL")
-  description        String?              @db.Text
-  isActive           Boolean              @default(true)
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  school             School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  id                  String              @id @default(cuid())
+  schoolId            String
+  name                String
+  category            String              @default("GENERAL")
+  description         String?             @db.Text
+  isActive            Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  school              School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   scheduledActivities ScheduledActivity[]
 
   @@index([schoolId, isActive])
 }
 
 model ScheduledActivity {
-  id           String                    @id @default(cuid())
+  id           String                   @id @default(cuid())
   schoolId     String
   configId     String
   periodId     String
   activityId   String
-  audienceType ActivityAudience          @default(SCHOOL)
+  audienceType ActivityAudience         @default(SCHOOL)
   location     String?
-  notes        String?                   @db.Text
-  createdAt    DateTime                  @default(now())
-  updatedAt    DateTime                  @updatedAt
-  school       School                    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  config       TimetableConfig           @relation(fields: [configId], references: [id], onDelete: Cascade)
-  period       TimetablePeriod           @relation(fields: [periodId], references: [id], onDelete: Cascade)
-  activity     SchoolActivity            @relation(fields: [activityId], references: [id], onDelete: Restrict)
+  notes        String?                  @db.Text
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  school       School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  config       TimetableConfig          @relation(fields: [configId], references: [id], onDelete: Cascade)
+  period       TimetablePeriod          @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  activity     SchoolActivity           @relation(fields: [activityId], references: [id], onDelete: Restrict)
   classes      ScheduledActivityClass[]
 
   @@index([schoolId, configId])
@@ -521,86 +527,87 @@ model ResultPin {
 }
 
 model Class {
-  id                     String                  @id @default(cuid())
-  schoolId               String
-  name                   String
-  phase                  SchoolPhase
-  arm                    String?
-  createdAt              DateTime                @default(now())
-  attendance             AttendanceRecord[]
-  behaviourAssessments   BehaviourAssessment[]
-  psychomotorAssessments PsychomotorAssessment[]
-  termReportCardComments TermReportCardComment[]
-  resultSheets           ResultSheet[]
-  school                 School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupils                 Pupil[]
-  subjectClasses         SubjectClass[]
-  studentSummaries       StudentTermSummary[]
-  subjectResults         SubjectResult[]
-  teacherClasses         TeacherClass[]
-  feeSchedules           FeeSchedule[]
-  assessments            Assessment[]
-  results                Result[]
-  timetableEntries       TimetableEntry[]
-  scheduledActivityLinks ScheduledActivityClass[]
-  historicalTermTotals   HistoricalTermTotal[]
-  competitionChallenges CompetitionChallenge[]
-  competitionAttempts   CompetitionChallengeAttempt[]
+  id                                String                             @id @default(cuid())
+  schoolId                          String
+  name                              String
+  phase                             SchoolPhase
+  arm                               String?
+  createdAt                         DateTime                           @default(now())
+  attendance                        AttendanceRecord[]
+  behaviourAssessments              BehaviourAssessment[]
+  psychomotorAssessments            PsychomotorAssessment[]
+  termReportCardComments            TermReportCardComment[]
+  resultSheets                      ResultSheet[]
+  school                            School                             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupils                            Pupil[]
+  subjectClasses                    SubjectClass[]
+  studentSummaries                  StudentTermSummary[]
+  subjectResults                    SubjectResult[]
+  teacherClasses                    TeacherClass[]
+  feeSchedules                      FeeSchedule[]
+  assessments                       Assessment[]
+  results                           Result[]
+  timetableEntries                  TimetableEntry[]
+  scheduledActivityLinks            ScheduledActivityClass[]
+  historicalTermTotals              HistoricalTermTotal[]
+  competitionChallenges             CompetitionChallenge[]
+  competitionAttempts               CompetitionChallengeAttempt[]
   competitionTournamentParticipants CompetitionTournamentParticipant[]
 
   @@index([schoolId], map: "Class_schoolId_fkey")
 }
 
 model Pupil {
-  id                     String                  @id @default(cuid())
-  schoolId               String
-  classId                String?
-  address                String?
-  firstName              String
-  lastName               String
-  admissionDate          DateTime?
-  status                 String?
-  bloodGroup             String?
-  genotype               String?
-  medicalNotes           String?                 @db.LongText
-  previousSchool         String?
-  previousClass          String?
-  admissionNo            String?
-  isActive               Boolean                 @default(true)
-  createdAt              DateTime                @default(now())
-  photoUrl               String?
-  dateOfBirth            DateTime?
-  gender                 String?
-  middleName             String?
-  studentEmail           String?
-  studentPhone           String?
-  attendance             AttendanceRecord[]
-  behaviourAssessments   BehaviourAssessment[]
-  guardians              GuardianPupil[]
-  invoices               Invoice[]
-  promotionRecords       PromotionRecord[]
-  psychomotorAssessments PsychomotorAssessment[]
-  termReportCardComments TermReportCardComment[]
-  studentSummaries       StudentTermSummary[]
-  subjectResults         SubjectResult[]
-  class                  Class?                  @relation(fields: [classId], references: [id])
-  school                 School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  results                Result[]
-  historicalTermTotals   HistoricalTermTotal[]
-  resultPins             ResultPin[]
-  studentFeeAdjustments  StudentFeeAdjustment[]
-  idCardIssuances        IdCardIssuance[]
-  competitionAccount    CompetitionPupilAccount? @relation("CompetitionPupilAccountPupil")
-  competitionAttempts   CompetitionChallengeAttempt[]
-  competitionXpTransactions CompetitionXpTransaction[]
-  competitionAchievements CompetitionPupilAchievement[]
-  competitionChallengesSent CompetitionStudentChallenge[] @relation("CompetitionChallengeSender")
-  competitionChallengesReceived CompetitionStudentChallenge[] @relation("CompetitionChallengeRecipient")
-  competitionChallengesWon CompetitionStudentChallenge[] @relation("CompetitionChallengeWinner")
+  id                                String                             @id @default(cuid())
+  schoolId                          String
+  classId                           String?
+  address                           String?
+  firstName                         String
+  lastName                          String
+  admissionDate                     DateTime?
+  status                            String?
+  bloodGroup                        String?
+  genotype                          String?
+  medicalNotes                      String?                            @db.LongText
+  previousSchool                    String?
+  previousClass                     String?
+  admissionNo                       String?
+  isActive                          Boolean                            @default(true)
+  createdAt                         DateTime                           @default(now())
+  photoUrl                          String?
+  dateOfBirth                       DateTime?
+  gender                            String?
+  middleName                        String?
+  studentEmail                      String?
+  studentPhone                      String?
+  attendance                        AttendanceRecord[]
+  behaviourAssessments              BehaviourAssessment[]
+  guardians                         GuardianPupil[]
+  invoices                          Invoice[]
+  financingApplications             FinancingApplication[]
+  promotionRecords                  PromotionRecord[]
+  psychomotorAssessments            PsychomotorAssessment[]
+  termReportCardComments            TermReportCardComment[]
+  studentSummaries                  StudentTermSummary[]
+  subjectResults                    SubjectResult[]
+  class                             Class?                             @relation(fields: [classId], references: [id])
+  school                            School                             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  results                           Result[]
+  historicalTermTotals              HistoricalTermTotal[]
+  resultPins                        ResultPin[]
+  studentFeeAdjustments             StudentFeeAdjustment[]
+  idCardIssuances                   IdCardIssuance[]
+  competitionAccount                CompetitionPupilAccount?           @relation("CompetitionPupilAccountPupil")
+  competitionAttempts               CompetitionChallengeAttempt[]
+  competitionXpTransactions         CompetitionXpTransaction[]
+  competitionAchievements           CompetitionPupilAchievement[]
+  competitionChallengesSent         CompetitionStudentChallenge[]      @relation("CompetitionChallengeSender")
+  competitionChallengesReceived     CompetitionStudentChallenge[]      @relation("CompetitionChallengeRecipient")
+  competitionChallengesWon          CompetitionStudentChallenge[]      @relation("CompetitionChallengeWinner")
   competitionTournamentParticipants CompetitionTournamentParticipant[]
-  competitionCertificates CompetitionCertificate[]
-  competitionPrizes CompetitionPrize[]
-  competitionSuspiciousActivities CompetitionSuspiciousActivity[]
+  competitionCertificates           CompetitionCertificate[]
+  competitionPrizes                 CompetitionPrize[]
+  competitionSuspiciousActivities   CompetitionSuspiciousActivity[]
 
   @@unique([schoolId, admissionNo])
   @@index([classId], map: "Pupil_classId_fkey")
@@ -608,23 +615,24 @@ model Pupil {
 }
 
 model Guardian {
-  id                 String             @id @default(cuid())
-  schoolId           String
-  firstName          String
-  lastName           String
-  phone              String
-  altPhone           String?
-  email              String?
-  whatsapp           String?
-  occupation         String?
-  createdAt          DateTime           @default(now())
-  school             School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupils             GuardianPupil[]
-  notifications      Notification[]
-  whatsappDeliveries WhatsAppDelivery[]
-  supportRequests    SupportRequest[]        @relation("SupportRequestGuardian")
-  supportMessages    SupportRequestMessage[] @relation("SupportMessageGuardian")
-  competitionAccounts CompetitionPupilAccount[]
+  id                    String                    @id @default(cuid())
+  schoolId              String
+  firstName             String
+  lastName              String
+  phone                 String
+  altPhone              String?
+  email                 String?
+  whatsapp              String?
+  occupation            String?
+  createdAt             DateTime                  @default(now())
+  school                School                    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupils                GuardianPupil[]
+  financingApplications FinancingApplication[]
+  notifications         Notification[]
+  whatsappDeliveries    WhatsAppDelivery[]
+  supportRequests       SupportRequest[]          @relation("SupportRequestGuardian")
+  supportMessages       SupportRequestMessage[]   @relation("SupportMessageGuardian")
+  competitionAccounts   CompetitionPupilAccount[]
 
   @@index([schoolId], map: "Guardian_schoolId_fkey")
 }
@@ -641,51 +649,51 @@ model GuardianPupil {
 }
 
 model User {
-  id                String                @id @default(cuid())
-  schoolId          String?
-  countryCode       String? @db.VarChar(2)
-  countryFollowUpRemindersEnabled Boolean @default(true)
-  email             String                @unique
-  name              String
-  role              UserRole
-  passwordHash      String?
-  isActive          Boolean               @default(true)
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @default(now()) @updatedAt
-  teacherClasses    TeacherClass[]
-  teacherSubjects   TeacherSubject[]
-  staffAttendanceEvents StaffAttendanceEvent[] @relation("StaffAttendanceEventActor")
+  id                      String                   @id @default(cuid())
+  schoolId                String?
+  countryCode             String?                  @db.VarChar(2)
+  countryFollowUpRemindersEnabled Boolean          @default(true)
+  email                   String                   @unique
+  name                    String
+  role                    UserRole
+  passwordHash            String?
+  isActive                Boolean                  @default(true)
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @default(now()) @updatedAt
+  teacherClasses          TeacherClass[]
+  teacherSubjects         TeacherSubject[]
+  staffAttendanceEvents   StaffAttendanceEvent[]   @relation("StaffAttendanceEventActor")
   attendanceStationEvents AttendanceStationEvent[]
-  platformAuditLogs PlatformAuditLog[]
-  supportNotes      SupportInternalNote[] @relation("SupportNoteAuthor")
-  createdSupportRequests SupportRequest[] @relation("SupportRequestCreator")
-  assignedCountryRequests SupportRequest[] @relation("CountrySupportRequestAssignee")
-  supportMessages       SupportRequestMessage[] @relation("SupportMessageSender")
-  createdTasks      SupportTeamTask[]     @relation("SupportTaskCreator")
-  assignedTasks     SupportTeamTask[]     @relation("SupportTaskAssignee")
-  timetableEntries  TimetableEntry[]
-  passwordResets    PasswordReset[]
-  school            School?               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  employeeProfile   EmployeeProfile?
-  staffEmploymentEvents StaffEmploymentEvent[] @relation("StaffEmploymentEventActor")
-  submittedSchoolReviews SchoolReview[] @relation("SchoolReviewSubmitter")
-  moderatedSchoolReviews SchoolReview[] @relation("SchoolReviewModerator")
-  
+  platformAuditLogs       PlatformAuditLog[]
+  supportNotes            SupportInternalNote[]    @relation("SupportNoteAuthor")
+  createdSupportRequests  SupportRequest[]         @relation("SupportRequestCreator")
+  assignedCountryRequests SupportRequest[]         @relation("CountrySupportRequestAssignee")
+  supportMessages         SupportRequestMessage[]  @relation("SupportMessageSender")
+  createdTasks            SupportTeamTask[]        @relation("SupportTaskCreator")
+  assignedTasks           SupportTeamTask[]        @relation("SupportTaskAssignee")
+  timetableEntries        TimetableEntry[]
+  passwordResets          PasswordReset[]
+  school                  School?                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  employeeProfile         EmployeeProfile?
+  staffEmploymentEvents   StaffEmploymentEvent[]   @relation("StaffEmploymentEventActor")
+  submittedSchoolReviews  SchoolReview[]           @relation("SchoolReviewSubmitter")
+  moderatedSchoolReviews  SchoolReview[]           @relation("SchoolReviewModerator")
+
   // Financial transactions
-  createdTransactions   FinancialTransaction[] @relation("FinancialTransactionCreatedBy")
-  postedTransactions    FinancialTransaction[] @relation("FinancialTransactionPostedBy")
-  reversedTransactions  FinancialTransaction[] @relation("FinancialTransactionReversedBy")
-  auditLogChanges       FinancialAuditLog[]
-  cashbookExports       CashbookExportAudit[]
-  admissionNotifications SchoolAdminNotification[]
-  assignedAdmissionApplications AdmissionApplication[] @relation("AdmissionReviewer")
-  admissionApplicationEvents AdmissionApplicationEvent[] @relation("AdmissionEventActor")
-  admissionExportAudits AdmissionExportAudit[] @relation("AdmissionExportActor")
-  competitionAccount    CompetitionPupilAccount?  @relation("CompetitionPupilAccountUser")
-  competitionAccountsLinked CompetitionPupilAccount[] @relation("CompetitionPupilAccountLinkedBy")
-  competitionAuditEvents CompetitionAuditLog[] @relation("CompetitionAuditActor")
-  countryFollowUpsOwned CountrySchoolFollowUp[] @relation("CountrySchoolFollowUpOwner")
-  countryFollowUpDigests CountryFollowUpDigest[]
+  createdTransactions           FinancialTransaction[]      @relation("FinancialTransactionCreatedBy")
+  postedTransactions            FinancialTransaction[]      @relation("FinancialTransactionPostedBy")
+  reversedTransactions          FinancialTransaction[]      @relation("FinancialTransactionReversedBy")
+  auditLogChanges               FinancialAuditLog[]
+  cashbookExports               CashbookExportAudit[]
+  admissionNotifications        SchoolAdminNotification[]
+  assignedAdmissionApplications AdmissionApplication[]      @relation("AdmissionReviewer")
+  admissionApplicationEvents    AdmissionApplicationEvent[] @relation("AdmissionEventActor")
+  admissionExportAudits         AdmissionExportAudit[]      @relation("AdmissionExportActor")
+  competitionAccount            CompetitionPupilAccount?    @relation("CompetitionPupilAccountUser")
+  competitionAccountsLinked     CompetitionPupilAccount[]   @relation("CompetitionPupilAccountLinkedBy")
+  competitionAuditEvents        CompetitionAuditLog[]       @relation("CompetitionAuditActor")
+  countryFollowUpsOwned         CountrySchoolFollowUp[]     @relation("CountrySchoolFollowUpOwner")
+  countryFollowUpDigests        CountryFollowUpDigest[]
   countryAdminConversationsAsRepresentative CountryAdminConversation[] @relation("CountryAdminConversationRepresentative")
   countryAdminConversationsAsOwner CountryAdminConversation[] @relation("CountryAdminConversationOwner")
   countryAdminConversationsCreated CountryAdminConversation[] @relation("CountryAdminConversationCreator")
@@ -699,29 +707,29 @@ model User {
 }
 
 model EmployeeProfile {
-  id                    String                   @id @default(cuid())
-  schoolId              String
-  userId                String                   @unique
-  staffNumber           String
-  firstName             String
-  middleName            String?
-  lastName              String
-  phone                 String?
-  photoUrl              String?
-  jobTitle              String
-  department            String?
-  classification        EmployeeClassification
-  employmentType        EmploymentType           @default(FULL_TIME)
-  employmentStatus      EmploymentStatus         @default(ACTIVE)
-  startDate             DateTime                 @db.Date
-  endDate               DateTime?                @db.Date
-  emergencyContactName  String?
-  emergencyContactPhone String?
-  createdAt             DateTime                 @default(now())
-  updatedAt             DateTime                 @updatedAt
-  school                School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  user                  User                     @relation(fields: [userId], references: [id], onDelete: Restrict)
-  employmentEvents      StaffEmploymentEvent[]
+  id                     String                  @id @default(cuid())
+  schoolId               String
+  userId                 String                  @unique
+  staffNumber            String
+  firstName              String
+  middleName             String?
+  lastName               String
+  phone                  String?
+  photoUrl               String?
+  jobTitle               String
+  department             String?
+  classification         EmployeeClassification
+  employmentType         EmploymentType          @default(FULL_TIME)
+  employmentStatus       EmploymentStatus        @default(ACTIVE)
+  startDate              DateTime                @db.Date
+  endDate                DateTime?               @db.Date
+  emergencyContactName   String?
+  emergencyContactPhone  String?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  school                 School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user                   User                    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  employmentEvents       StaffEmploymentEvent[]
   staffAttendanceRecords StaffAttendanceRecord[]
   staffAttendanceEvents  StaffAttendanceEvent[]
 
@@ -743,25 +751,25 @@ model StaffNumberCounter {
 }
 
 model StaffEmploymentEvent {
-  id                   String           @id @default(cuid())
-  schoolId             String
-  employeeId           String
-  actorUserId           String?
-  eventType            String
-  effectiveAt          DateTime         @default(now())
-  reason               String?          @db.Text
-  previousStatus       EmploymentStatus?
-  nextStatus           EmploymentStatus?
-  previousJobTitle     String?
-  nextJobTitle         String?
-  previousDepartment   String?
-  nextDepartment       String?
-  previousStaffNumber  String?
-  nextStaffNumber      String?
-  createdAt            DateTime         @default(now())
-  school               School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  employee             EmployeeProfile  @relation(fields: [employeeId], references: [id], onDelete: Restrict)
-  actor                User?            @relation("StaffEmploymentEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  id                  String            @id @default(cuid())
+  schoolId            String
+  employeeId          String
+  actorUserId         String?
+  eventType           String
+  effectiveAt         DateTime          @default(now())
+  reason              String?           @db.Text
+  previousStatus      EmploymentStatus?
+  nextStatus          EmploymentStatus?
+  previousJobTitle    String?
+  nextJobTitle        String?
+  previousDepartment  String?
+  nextDepartment      String?
+  previousStaffNumber String?
+  nextStaffNumber     String?
+  createdAt           DateTime          @default(now())
+  school              School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  employee            EmployeeProfile   @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  actor               User?             @relation("StaffEmploymentEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, employeeId, effectiveAt])
   @@index([actorUserId, createdAt])
@@ -787,20 +795,20 @@ enum EmploymentStatus {
 }
 
 model CompetitionPupilAccount {
-  id              String                         @id @default(cuid())
-  schoolId        String
-  pupilId         String                         @unique
-  userId          String?                        @unique
-  guardianId      String?
-  linkedByUserId  String?
-  status          CompetitionPupilAccountStatus  @default(ACTIVE)
-  linkedAt        DateTime                       @default(now())
-  revokedAt       DateTime?
-  school          School                         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupil           Pupil                          @relation("CompetitionPupilAccountPupil", fields: [pupilId], references: [id], onDelete: Cascade)
-  user            User?                          @relation("CompetitionPupilAccountUser", fields: [userId], references: [id], onDelete: Cascade)
-  guardian         Guardian?                      @relation(fields: [guardianId], references: [id], onDelete: Cascade)
-  linkedBy        User?                          @relation("CompetitionPupilAccountLinkedBy", fields: [linkedByUserId], references: [id], onDelete: SetNull)
+  id             String                        @id @default(cuid())
+  schoolId       String
+  pupilId        String                        @unique
+  userId         String?                       @unique
+  guardianId     String?
+  linkedByUserId String?
+  status         CompetitionPupilAccountStatus @default(ACTIVE)
+  linkedAt       DateTime                      @default(now())
+  revokedAt      DateTime?
+  school         School                        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupil          Pupil                         @relation("CompetitionPupilAccountPupil", fields: [pupilId], references: [id], onDelete: Cascade)
+  user           User?                         @relation("CompetitionPupilAccountUser", fields: [userId], references: [id], onDelete: Cascade)
+  guardian       Guardian?                     @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+  linkedBy       User?                         @relation("CompetitionPupilAccountLinkedBy", fields: [linkedByUserId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, status])
   @@index([guardianId])
@@ -808,22 +816,22 @@ model CompetitionPupilAccount {
 }
 
 model CompetitionCategory {
-  id          String   @id @default(cuid())
-  schoolId    String?
-  subjectId   String?
-  code        String
-  name        String
-  description String?  @db.Text
-  countryCode String?  @db.VarChar(2)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  school      School?  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  subject     Subject? @relation(fields: [subjectId], references: [id], onDelete: SetNull)
-  questionSets CompetitionQuestionSet[]
-  challenges  CompetitionChallenge[]
+  id            String                    @id @default(cuid())
+  schoolId      String?
+  subjectId     String?
+  code          String
+  name          String
+  description   String?                   @db.Text
+  countryCode   String?                   @db.VarChar(2)
+  isActive      Boolean                   @default(true)
+  createdAt     DateTime                  @default(now())
+  updatedAt     DateTime                  @updatedAt
+  school        School?                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  subject       Subject?                  @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  questionSets  CompetitionQuestionSet[]
+  challenges    CompetitionChallenge[]
   examPractices CompetitionExamPractice[]
-  tournaments CompetitionTournament[]
+  tournaments   CompetitionTournament[]
 
   @@unique([schoolId, code])
   @@index([subjectId])
@@ -831,28 +839,28 @@ model CompetitionCategory {
 }
 
 model CompetitionQuestionSet {
-  id              String                    @id @default(cuid())
-  schoolId        String?
-  categoryId      String
-  subjectId       String?
-  name            String
-  description     String?                   @db.Text
-  gradeLabel      String?
-  topic           String?
-  locale          String                    @default("en")
-  version         Int                       @default(1)
-  status          CompetitionContentStatus  @default(DRAFT)
-  createdByUserId String?
+  id               String                   @id @default(cuid())
+  schoolId         String?
+  categoryId       String
+  subjectId        String?
+  name             String
+  description      String?                  @db.Text
+  gradeLabel       String?
+  topic            String?
+  locale           String                   @default("en")
+  version          Int                      @default(1)
+  status           CompetitionContentStatus @default(DRAFT)
+  createdByUserId  String?
   reviewedByUserId String?
-  reviewedAt      DateTime?
-  reviewNotes     String?                   @db.Text
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  school          School?                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  category        CompetitionCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  subject         Subject?                  @relation(fields: [subjectId], references: [id], onDelete: SetNull)
-  questions       CompetitionQuestion[]
-  challenges      CompetitionChallenge[]
+  reviewedAt       DateTime?
+  reviewNotes      String?                  @db.Text
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  school           School?                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  category         CompetitionCategory      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  subject          Subject?                 @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  questions        CompetitionQuestion[]
+  challenges       CompetitionChallenge[]
 
   @@unique([schoolId, name, version])
   @@index([categoryId, status, gradeLabel])
@@ -861,23 +869,23 @@ model CompetitionQuestionSet {
 }
 
 model CompetitionQuestion {
-  id               String                    @id @default(cuid())
+  id               String                        @id @default(cuid())
   questionSetId    String
   type             CompetitionQuestionType
-  difficulty       CompetitionDifficulty     @default(MEDIUM)
-  prompt           String                    @db.LongText
-  explanation      String?                   @db.LongText
-  basePoints       Int                       @default(100)
+  difficulty       CompetitionDifficulty         @default(MEDIUM)
+  prompt           String                        @db.LongText
+  explanation      String?                       @db.LongText
+  basePoints       Int                           @default(100)
   timeLimitSeconds Int?
-  version          Int                       @default(1)
-  status           CompetitionContentStatus  @default(DRAFT)
+  version          Int                           @default(1)
+  status           CompetitionContentStatus      @default(DRAFT)
   createdByUserId  String?
   reviewedByUserId String?
   reviewedAt       DateTime?
-  reviewNotes      String?                   @db.Text
-  createdAt        DateTime                  @default(now())
-  updatedAt        DateTime                  @updatedAt
-  questionSet      CompetitionQuestionSet    @relation(fields: [questionSetId], references: [id], onDelete: Cascade)
+  reviewNotes      String?                       @db.Text
+  createdAt        DateTime                      @default(now())
+  updatedAt        DateTime                      @updatedAt
+  questionSet      CompetitionQuestionSet        @relation(fields: [questionSetId], references: [id], onDelete: Cascade)
   options          CompetitionQuestionOption[]
   media            CompetitionQuestionMedia[]
   attemptQuestions CompetitionAttemptQuestion[]
@@ -887,12 +895,12 @@ model CompetitionQuestion {
 }
 
 model CompetitionQuestionOption {
-  id         String               @id @default(cuid())
+  id         String              @id @default(cuid())
   questionId String
-  content    String               @db.LongText
+  content    String              @db.LongText
   sortOrder  Int
-  isCorrect  Boolean              @default(false)
-  createdAt  DateTime             @default(now())
+  isCorrect  Boolean             @default(false)
+  createdAt  DateTime            @default(now())
   question   CompetitionQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
 
   @@unique([questionId, sortOrder])
@@ -900,27 +908,27 @@ model CompetitionQuestionOption {
 }
 
 model CompetitionQuestionMedia {
-  id         String               @id @default(cuid())
+  id         String              @id @default(cuid())
   questionId String
-  assetUrl   String               @db.VarChar(2048)
-  storageKey String?              @db.VarChar(512)
-  mimeType   String               @db.VarChar(120)
-  altText    String?              @db.VarChar(500)
-  sortOrder  Int                  @default(0)
-  createdAt  DateTime             @default(now())
+  assetUrl   String              @db.VarChar(2048)
+  storageKey String?             @db.VarChar(512)
+  mimeType   String              @db.VarChar(120)
+  altText    String?             @db.VarChar(500)
+  sortOrder  Int                 @default(0)
+  createdAt  DateTime            @default(now())
   question   CompetitionQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
 
   @@index([questionId, sortOrder])
 }
 
 model CompetitionScoringPolicy {
-  id              String   @id @default(cuid())
+  id              String                        @id @default(cuid())
   name            String
   version         Int
-  policyJson      String   @db.LongText
-  isActive        Boolean  @default(false)
+  policyJson      String                        @db.LongText
+  isActive        Boolean                       @default(false)
   createdByUserId String?
-  createdAt       DateTime @default(now())
+  createdAt       DateTime                      @default(now())
   challenges      CompetitionChallenge[]
   attempts        CompetitionChallengeAttempt[]
 
@@ -929,39 +937,39 @@ model CompetitionScoringPolicy {
 }
 
 model CompetitionChallenge {
-  id                String                     @id @default(cuid())
-  schoolId          String?
-  categoryId        String
-  questionSetId     String
-  scoringPolicyId   String
-  classId           String?
-  academicYearId    String?
-  termId            String?
-  title             String
-  description       String?                    @db.Text
-  gradeLabel        String?
-  questionCount     Int
-  durationSeconds   Int
-  difficultyMixJson String?                    @db.LongText
-  eligibilityJson   String?                    @db.LongText
-  xpPolicyJson      String?                    @db.LongText
-  attemptLimit      Int                        @default(1)
-  opensAt           DateTime?
-  closesAt          DateTime?
-  status            CompetitionChallengeStatus @default(DRAFT)
-  createdByUserId   String?
-  createdAt         DateTime                   @default(now())
-  updatedAt         DateTime                   @updatedAt
-  school            School?                    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  category          CompetitionCategory        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  questionSet       CompetitionQuestionSet     @relation(fields: [questionSetId], references: [id], onDelete: Restrict)
-  scoringPolicy     CompetitionScoringPolicy   @relation(fields: [scoringPolicyId], references: [id], onDelete: Restrict)
-  class             Class?                     @relation(fields: [classId], references: [id], onDelete: SetNull)
-  academicYear      AcademicYear?              @relation(fields: [academicYearId], references: [id], onDelete: SetNull)
-  term              Term?                      @relation(fields: [termId], references: [id], onDelete: SetNull)
-  attempts          CompetitionChallengeAttempt[]
+  id                 String                        @id @default(cuid())
+  schoolId           String?
+  categoryId         String
+  questionSetId      String
+  scoringPolicyId    String
+  classId            String?
+  academicYearId     String?
+  termId             String?
+  title              String
+  description        String?                       @db.Text
+  gradeLabel         String?
+  questionCount      Int
+  durationSeconds    Int
+  difficultyMixJson  String?                       @db.LongText
+  eligibilityJson    String?                       @db.LongText
+  xpPolicyJson       String?                       @db.LongText
+  attemptLimit       Int                           @default(1)
+  opensAt            DateTime?
+  closesAt           DateTime?
+  status             CompetitionChallengeStatus    @default(DRAFT)
+  createdByUserId    String?
+  createdAt          DateTime                      @default(now())
+  updatedAt          DateTime                      @updatedAt
+  school             School?                       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  category           CompetitionCategory           @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  questionSet        CompetitionQuestionSet        @relation(fields: [questionSetId], references: [id], onDelete: Restrict)
+  scoringPolicy      CompetitionScoringPolicy      @relation(fields: [scoringPolicyId], references: [id], onDelete: Restrict)
+  class              Class?                        @relation(fields: [classId], references: [id], onDelete: SetNull)
+  academicYear       AcademicYear?                 @relation(fields: [academicYearId], references: [id], onDelete: SetNull)
+  term               Term?                         @relation(fields: [termId], references: [id], onDelete: SetNull)
+  attempts           CompetitionChallengeAttempt[]
   studentInvitations CompetitionStudentChallenge[]
-  examPractice      CompetitionExamPractice?
+  examPractice       CompetitionExamPractice?
 
   @@index([schoolId, status, opensAt, closesAt])
   @@index([categoryId, status])
@@ -970,69 +978,69 @@ model CompetitionChallenge {
 }
 
 model CompetitionExamPractice {
-  id                 String                         @id @default(cuid())
-  challengeId        String                         @unique
-  examCode           String                         @db.VarChar(40)
-  countryCode        String                         @db.VarChar(2)
-  gradeLabel         String                         @db.VarChar(80)
-  subjectCategoryId  String
-  format             CompetitionExamPracticeFormat @default(PRACTICE)
-  syllabusVersion    String?                        @db.VarChar(80)
-  isActive           Boolean                        @default(false)
-  reviewedByUserId   String?
-  reviewedAt         DateTime?
-  createdByUserId    String?
-  createdAt          DateTime                       @default(now())
-  updatedAt          DateTime                       @updatedAt
-  challenge          CompetitionChallenge           @relation(fields: [challengeId], references: [id], onDelete: Cascade)
-  subjectCategory    CompetitionCategory            @relation(fields: [subjectCategoryId], references: [id], onDelete: Restrict)
+  id                String                        @id @default(cuid())
+  challengeId       String                        @unique
+  examCode          String                        @db.VarChar(40)
+  countryCode       String                        @db.VarChar(2)
+  gradeLabel        String                        @db.VarChar(80)
+  subjectCategoryId String
+  format            CompetitionExamPracticeFormat @default(PRACTICE)
+  syllabusVersion   String?                       @db.VarChar(80)
+  isActive          Boolean                       @default(false)
+  reviewedByUserId  String?
+  reviewedAt        DateTime?
+  createdByUserId   String?
+  createdAt         DateTime                      @default(now())
+  updatedAt         DateTime                      @updatedAt
+  challenge         CompetitionChallenge          @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  subjectCategory   CompetitionCategory           @relation(fields: [subjectCategoryId], references: [id], onDelete: Restrict)
 
   @@index([countryCode, gradeLabel, isActive])
   @@index([examCode, countryCode, isActive])
 }
 
 model CompetitionChallengeAttempt {
-  id                    String                    @id @default(cuid())
-  schoolId              String
-  pupilId               String
-  classId               String?
-  challengeId           String
-  attemptNumber         Int
-  academicYearId        String?
-  termId                String?
-  scoringPolicyId       String
-  status                CompetitionAttemptStatus  @default(CREATED)
-  idempotencyKey        String                    @unique
-  startedAt             DateTime?
-  deadlineAt            DateTime?
-  submittedAt           DateTime?
-  score                 Int                       @default(0)
-  correctCount          Int                       @default(0)
-  questionCount         Int                       @default(0)
-  elapsedMs             Int?
-  accuracyPercent       Decimal?                  @db.Decimal(7, 4)
-  scoringPolicyVersion  Int
-  scoringSnapshotJson   String                    @db.LongText
-  invalidationReason    String?                   @db.Text
-  createdAt             DateTime                  @default(now())
-  updatedAt             DateTime                  @updatedAt
-  school                School                    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupil                 Pupil                     @relation(fields: [pupilId], references: [id], onDelete: Cascade)
-  class                 Class?                    @relation(fields: [classId], references: [id], onDelete: SetNull)
-  challenge             CompetitionChallenge      @relation(fields: [challengeId], references: [id], onDelete: Restrict)
-  academicYear          AcademicYear?             @relation(fields: [academicYearId], references: [id], onDelete: SetNull)
-  term                  Term?                     @relation(fields: [termId], references: [id], onDelete: SetNull)
-  scoringPolicy         CompetitionScoringPolicy  @relation(fields: [scoringPolicyId], references: [id], onDelete: Restrict)
-  questions             CompetitionAttemptQuestion[]
-  answers               CompetitionAnswerSubmission[]
-  xpTransactions        CompetitionXpTransaction[]
-  studentChallengesAsSender CompetitionStudentChallenge[] @relation("StudentChallengeSenderAttempt")
-  studentChallengesAsRecipient CompetitionStudentChallenge[] @relation("StudentChallengeRecipientAttempt")
-  suspiciousActivities  CompetitionSuspiciousActivity[]
-  certificates          CompetitionCertificate[]
+  id                           String                          @id @default(cuid())
+  schoolId                     String
+  pupilId                      String
+  classId                      String?
+  challengeId                  String
+  attemptNumber                Int
+  academicYearId               String?
+  termId                       String?
+  scoringPolicyId              String
+  status                       CompetitionAttemptStatus        @default(CREATED)
+  idempotencyKey               String                          @unique
+  startedAt                    DateTime?
+  deadlineAt                   DateTime?
+  submittedAt                  DateTime?
+  score                        Int                             @default(0)
+  correctCount                 Int                             @default(0)
+  questionCount                Int                             @default(0)
+  elapsedMs                    Int?
+  accuracyPercent              Decimal?                        @db.Decimal(7, 4)
+  scoringPolicyVersion         Int
+  scoringSnapshotJson          String                          @db.LongText
+  invalidationReason           String?                         @db.Text
+  createdAt                    DateTime                        @default(now())
+  updatedAt                    DateTime                        @updatedAt
+  school                       School                          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupil                        Pupil                           @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  class                        Class?                          @relation(fields: [classId], references: [id], onDelete: SetNull)
+  challenge                    CompetitionChallenge            @relation(fields: [challengeId], references: [id], onDelete: Restrict)
+  academicYear                 AcademicYear?                   @relation(fields: [academicYearId], references: [id], onDelete: SetNull)
+  term                         Term?                           @relation(fields: [termId], references: [id], onDelete: SetNull)
+  scoringPolicy                CompetitionScoringPolicy        @relation(fields: [scoringPolicyId], references: [id], onDelete: Restrict)
+  questions                    CompetitionAttemptQuestion[]
+  answers                      CompetitionAnswerSubmission[]
+  xpTransactions               CompetitionXpTransaction[]
+  studentChallengesAsSender    CompetitionStudentChallenge[]   @relation("StudentChallengeSenderAttempt")
+  studentChallengesAsRecipient CompetitionStudentChallenge[]   @relation("StudentChallengeRecipientAttempt")
+  suspiciousActivities         CompetitionSuspiciousActivity[]
+  certificates                 CompetitionCertificate[]
 
-  @@index([schoolId, status, createdAt])
   @@unique([pupilId, challengeId, attemptNumber])
+  @@index([schoolId, status, createdAt])
   @@index([pupilId, createdAt])
   @@index([challengeId, status])
   @@index([classId, createdAt])
@@ -1072,24 +1080,24 @@ model CompetitionAnswerSubmission {
 }
 
 model CompetitionStudentChallenge {
-  id                String                              @id @default(cuid())
-  challengeId       String
-  senderPupilId     String
-  recipientPupilId  String
-  senderAttemptId   String?                             @unique
-  recipientAttemptId String?                            @unique
-  winnerPupilId     String?
-  status            CompetitionStudentChallengeStatus  @default(PENDING)
-  expiresAt         DateTime
-  acceptedAt        DateTime?
-  completedAt       DateTime?
-  createdAt         DateTime                            @default(now())
-  challenge         CompetitionChallenge               @relation(fields: [challengeId], references: [id], onDelete: Cascade)
-  sender            Pupil                               @relation("CompetitionChallengeSender", fields: [senderPupilId], references: [id], onDelete: Cascade)
-  recipient         Pupil                               @relation("CompetitionChallengeRecipient", fields: [recipientPupilId], references: [id], onDelete: Cascade)
-  senderAttempt     CompetitionChallengeAttempt?        @relation("StudentChallengeSenderAttempt", fields: [senderAttemptId], references: [id], onDelete: SetNull)
-  recipientAttempt  CompetitionChallengeAttempt?        @relation("StudentChallengeRecipientAttempt", fields: [recipientAttemptId], references: [id], onDelete: SetNull)
-  winner            Pupil?                              @relation("CompetitionChallengeWinner", fields: [winnerPupilId], references: [id], onDelete: SetNull)
+  id                 String                            @id @default(cuid())
+  challengeId        String
+  senderPupilId      String
+  recipientPupilId   String
+  senderAttemptId    String?                           @unique
+  recipientAttemptId String?                           @unique
+  winnerPupilId      String?
+  status             CompetitionStudentChallengeStatus @default(PENDING)
+  expiresAt          DateTime
+  acceptedAt         DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime                          @default(now())
+  challenge          CompetitionChallenge              @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  sender             Pupil                             @relation("CompetitionChallengeSender", fields: [senderPupilId], references: [id], onDelete: Cascade)
+  recipient          Pupil                             @relation("CompetitionChallengeRecipient", fields: [recipientPupilId], references: [id], onDelete: Cascade)
+  senderAttempt      CompetitionChallengeAttempt?      @relation("StudentChallengeSenderAttempt", fields: [senderAttemptId], references: [id], onDelete: SetNull)
+  recipientAttempt   CompetitionChallengeAttempt?      @relation("StudentChallengeRecipientAttempt", fields: [recipientAttemptId], references: [id], onDelete: SetNull)
+  winner             Pupil?                            @relation("CompetitionChallengeWinner", fields: [winnerPupilId], references: [id], onDelete: SetNull)
 
   @@index([recipientPupilId, status, expiresAt])
   @@index([senderPupilId, createdAt])
@@ -1098,19 +1106,19 @@ model CompetitionStudentChallenge {
 }
 
 model CompetitionXpTransaction {
-  id             String                        @id @default(cuid())
+  id             String                       @id @default(cuid())
   schoolId       String
   pupilId        String
   attemptId      String?
-  sourceType     String                        @db.VarChar(80)
-  sourceId       String                        @db.VarChar(191)
+  sourceType     String                       @db.VarChar(80)
+  sourceId       String                       @db.VarChar(191)
   amount         Int
-  reason         String                        @db.VarChar(500)
-  idempotencyKey String                        @unique
-  createdAt      DateTime                      @default(now())
-  school         School                        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupil          Pupil                         @relation(fields: [pupilId], references: [id], onDelete: Cascade)
-  attempt        CompetitionChallengeAttempt?  @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  reason         String                       @db.VarChar(500)
+  idempotencyKey String                       @unique
+  createdAt      DateTime                     @default(now())
+  school         School                       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupil          Pupil                        @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  attempt        CompetitionChallengeAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, createdAt])
   @@index([pupilId, createdAt])
@@ -1118,26 +1126,26 @@ model CompetitionXpTransaction {
 }
 
 model CompetitionAchievement {
-  id          String   @id @default(cuid())
-  code        String   @unique
-  title       String
-  description String   @db.Text
-  criteriaJson String  @db.LongText
-  iconUrl     String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  awards      CompetitionPupilAchievement[]
+  id           String                        @id @default(cuid())
+  code         String                        @unique
+  title        String
+  description  String                        @db.Text
+  criteriaJson String                        @db.LongText
+  iconUrl      String?
+  isActive     Boolean                       @default(true)
+  createdAt    DateTime                      @default(now())
+  updatedAt    DateTime                      @updatedAt
+  awards       CompetitionPupilAchievement[]
 }
 
 model CompetitionPupilAchievement {
-  id            String                  @id @default(cuid())
+  id            String                 @id @default(cuid())
   pupilId       String
   achievementId String
-  awardedAt     DateTime                @default(now())
-  sourceType    String?                 @db.VarChar(80)
-  sourceId      String?                 @db.VarChar(191)
-  pupil         Pupil                   @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  awardedAt     DateTime               @default(now())
+  sourceType    String?                @db.VarChar(80)
+  sourceId      String?                @db.VarChar(191)
+  pupil         Pupil                  @relation(fields: [pupilId], references: [id], onDelete: Cascade)
   achievement   CompetitionAchievement @relation(fields: [achievementId], references: [id], onDelete: Restrict)
 
   @@unique([pupilId, achievementId])
@@ -1145,49 +1153,49 @@ model CompetitionPupilAchievement {
 }
 
 model CompetitionLeaderboardSnapshot {
-  id            String                       @id @default(cuid())
+  id            String                      @id @default(cuid())
   schoolId      String?
   scope         CompetitionLeaderboardScope
-  scopeKey      String                       @db.VarChar(191)
+  scopeKey      String                      @db.VarChar(191)
   periodStart   DateTime?
   periodEnd     DateTime?
   policyVersion Int
-  entriesJson   String                       @db.LongText
-  generatedAt   DateTime                     @default(now())
-  school        School?                      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  entriesJson   String                      @db.LongText
+  generatedAt   DateTime                    @default(now())
+  school        School?                     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
   @@index([scope, scopeKey, generatedAt])
   @@index([schoolId, scope, generatedAt])
 }
 
 model CompetitionTournament {
-  id                   String                      @id @default(cuid())
+  id                   String                             @id @default(cuid())
   schoolId             String?
   categoryId           String
   title                String
-  slug                 String                      @unique
-  description          String?                     @db.LongText
-  rules                String?                     @db.LongText
-  status               CompetitionTournamentStatus @default(DRAFT)
-  scope                CompetitionTournamentScope  @default(SCHOOL)
-  countryCode          String?                     @db.VarChar(2)
-  regionCode           String?                     @db.VarChar(120)
-  districtCode         String?                     @db.VarChar(120)
-  gradeRangeJson       String?                     @db.LongText
-  eligibilityJson      String?                     @db.LongText
-  scoringPolicyJson    String                      @db.LongText
+  slug                 String                             @unique
+  description          String?                            @db.LongText
+  rules                String?                            @db.LongText
+  status               CompetitionTournamentStatus        @default(DRAFT)
+  scope                CompetitionTournamentScope         @default(SCHOOL)
+  countryCode          String?                            @db.VarChar(2)
+  regionCode           String?                            @db.VarChar(120)
+  districtCode         String?                            @db.VarChar(120)
+  gradeRangeJson       String?                            @db.LongText
+  eligibilityJson      String?                            @db.LongText
+  scoringPolicyJson    String                             @db.LongText
   participantLimit     Int?
   registrationOpensAt  DateTime?
   registrationClosesAt DateTime?
   startsAt             DateTime?
   endsAt               DateTime?
-  publicVisibility     Boolean                     @default(false)
+  publicVisibility     Boolean                            @default(false)
   bannerUrl            String?
   createdByUserId      String?
-  createdAt            DateTime                    @default(now())
-  updatedAt            DateTime                    @updatedAt
-  school               School?                     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  category             CompetitionCategory         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdAt            DateTime                           @default(now())
+  updatedAt            DateTime                           @updatedAt
+  school               School?                            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  category             CompetitionCategory                @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   schools              CompetitionTournamentSchool[]
   participants         CompetitionTournamentParticipant[]
   rounds               CompetitionTournamentRound[]
@@ -1203,16 +1211,16 @@ model CompetitionTournament {
 }
 
 model CompetitionTournamentSchool {
-  id               String                        @id @default(cuid())
+  id               String                             @id @default(cuid())
   tournamentId     String
   schoolId         String
-  status           CompetitionRegistrationStatus @default(PENDING)
-  registeredAt     DateTime                      @default(now())
+  status           CompetitionRegistrationStatus      @default(PENDING)
+  registeredAt     DateTime                           @default(now())
   approvedAt       DateTime?
   approvedByUserId String?
-  decisionReason   String?                       @db.Text
-  tournament       CompetitionTournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
-  school           School                        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  decisionReason   String?                            @db.Text
+  tournament       CompetitionTournament              @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  school           School                             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   participants     CompetitionTournamentParticipant[]
 
   @@unique([tournamentId, schoolId])
@@ -1220,32 +1228,32 @@ model CompetitionTournamentSchool {
 }
 
 model CompetitionTournamentParticipant {
-  id                  String                        @id @default(cuid())
-  tournamentId        String
-  tournamentSchoolId  String?
-  schoolId            String
-  pupilId             String
-  classId             String?
-  status              CompetitionRegistrationStatus @default(PENDING)
-  displayNameSnapshot String                        @db.VarChar(160)
-  visibilityApproved  Boolean                       @default(false)
-  nominatedAt         DateTime?
-  nominatedByUserId   String?
-  guardianConsentStatus CompetitionGuardianConsentStatus?
-  guardianConsentAt   DateTime?
+  id                        String                            @id @default(cuid())
+  tournamentId              String
+  tournamentSchoolId        String?
+  schoolId                  String
+  pupilId                   String
+  classId                   String?
+  status                    CompetitionRegistrationStatus     @default(PENDING)
+  displayNameSnapshot       String                            @db.VarChar(160)
+  visibilityApproved        Boolean                           @default(false)
+  nominatedAt               DateTime?
+  nominatedByUserId         String?
+  guardianConsentStatus     CompetitionGuardianConsentStatus?
+  guardianConsentAt         DateTime?
   guardianConsentGuardianId String?
-  registeredAt        DateTime                      @default(now())
-  approvedAt          DateTime?
-  tournament          CompetitionTournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
-  tournamentSchool    CompetitionTournamentSchool?  @relation(fields: [tournamentSchoolId], references: [id], onDelete: SetNull)
-  school              School                        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupil               Pupil                         @relation(fields: [pupilId], references: [id], onDelete: Cascade)
-  class               Class?                        @relation(fields: [classId], references: [id], onDelete: SetNull)
-  matchesAsHome       CompetitionTournamentMatch[]  @relation("CompetitionMatchHome")
-  matchesAsAway       CompetitionTournamentMatch[]  @relation("CompetitionMatchAway")
-  matchesWon          CompetitionTournamentMatch[]  @relation("CompetitionMatchWinner")
-  prizes              CompetitionPrize[]
-  certificates        CompetitionCertificate[]
+  registeredAt              DateTime                          @default(now())
+  approvedAt                DateTime?
+  tournament                CompetitionTournament             @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentSchool          CompetitionTournamentSchool?      @relation(fields: [tournamentSchoolId], references: [id], onDelete: SetNull)
+  school                    School                            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupil                     Pupil                             @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  class                     Class?                            @relation(fields: [classId], references: [id], onDelete: SetNull)
+  matchesAsHome             CompetitionTournamentMatch[]      @relation("CompetitionMatchHome")
+  matchesAsAway             CompetitionTournamentMatch[]      @relation("CompetitionMatchAway")
+  matchesWon                CompetitionTournamentMatch[]      @relation("CompetitionMatchWinner")
+  prizes                    CompetitionPrize[]
+  certificates              CompetitionCertificate[]
 
   @@unique([tournamentId, pupilId])
   @@index([schoolId, tournamentId, status])
@@ -1255,16 +1263,16 @@ model CompetitionTournamentParticipant {
 }
 
 model CompetitionTournamentRound {
-  id           String                      @id @default(cuid())
+  id           String                       @id @default(cuid())
   tournamentId String
   name         String
   roundNumber  Int
-  status       CompetitionRoundStatus      @default(PENDING)
+  status       CompetitionRoundStatus       @default(PENDING)
   startsAt     DateTime?
   endsAt       DateTime?
-  rulesJson    String?                     @db.LongText
-  createdAt    DateTime                    @default(now())
-  tournament   CompetitionTournament       @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  rulesJson    String?                      @db.LongText
+  createdAt    DateTime                     @default(now())
+  tournament   CompetitionTournament        @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
   matches      CompetitionTournamentMatch[]
 
   @@unique([tournamentId, roundNumber])
@@ -1272,22 +1280,22 @@ model CompetitionTournamentRound {
 }
 
 model CompetitionTournamentMatch {
-  id                    String                       @id @default(cuid())
-  roundId               String
-  homeParticipantId     String?
-  awayParticipantId     String?
-  winnerParticipantId   String?
-  status                CompetitionMatchStatus       @default(SCHEDULED)
-  scheduledAt           DateTime?
-  completedAt           DateTime?
-  homeScore             Int?
-  awayScore             Int?
-  resultJson            String?                      @db.LongText
-  disputeStatus         String?                      @db.VarChar(40)
-  round                 CompetitionTournamentRound   @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  homeParticipant       CompetitionTournamentParticipant? @relation("CompetitionMatchHome", fields: [homeParticipantId], references: [id], onDelete: SetNull)
-  awayParticipant       CompetitionTournamentParticipant? @relation("CompetitionMatchAway", fields: [awayParticipantId], references: [id], onDelete: SetNull)
-  winnerParticipant     CompetitionTournamentParticipant? @relation("CompetitionMatchWinner", fields: [winnerParticipantId], references: [id], onDelete: SetNull)
+  id                  String                            @id @default(cuid())
+  roundId             String
+  homeParticipantId   String?
+  awayParticipantId   String?
+  winnerParticipantId String?
+  status              CompetitionMatchStatus            @default(SCHEDULED)
+  scheduledAt         DateTime?
+  completedAt         DateTime?
+  homeScore           Int?
+  awayScore           Int?
+  resultJson          String?                           @db.LongText
+  disputeStatus       String?                           @db.VarChar(40)
+  round               CompetitionTournamentRound        @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  homeParticipant     CompetitionTournamentParticipant? @relation("CompetitionMatchHome", fields: [homeParticipantId], references: [id], onDelete: SetNull)
+  awayParticipant     CompetitionTournamentParticipant? @relation("CompetitionMatchAway", fields: [awayParticipantId], references: [id], onDelete: SetNull)
+  winnerParticipant   CompetitionTournamentParticipant? @relation("CompetitionMatchWinner", fields: [winnerParticipantId], references: [id], onDelete: SetNull)
 
   @@index([roundId, status])
   @@index([homeParticipantId])
@@ -1296,60 +1304,60 @@ model CompetitionTournamentMatch {
 }
 
 model CompetitionSponsor {
-  id                 String                    @id @default(cuid())
-  advertiserId       String                    @unique
-  sponsorshipLevel   CompetitionSponsorLevel  @default(SECONDARY)
-  startsAt           DateTime?
-  endsAt             DateTime?
-  prizeContribution  String?                   @db.Text
-  status             String                    @default("PENDING") @db.VarChar(40)
-  approvedAt         DateTime?
-  createdAt          DateTime                  @default(now())
-  updatedAt          DateTime                  @updatedAt
-  advertiser         Advertiser                @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
-  tournaments        CompetitionTournamentSponsor[]
-  prizes             CompetitionPrize[]
+  id                String                         @id @default(cuid())
+  advertiserId      String                         @unique
+  sponsorshipLevel  CompetitionSponsorLevel        @default(SECONDARY)
+  startsAt          DateTime?
+  endsAt            DateTime?
+  prizeContribution String?                        @db.Text
+  status            String                         @default("PENDING") @db.VarChar(40)
+  approvedAt        DateTime?
+  createdAt         DateTime                       @default(now())
+  updatedAt         DateTime                       @updatedAt
+  advertiser        Advertiser                     @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+  tournaments       CompetitionTournamentSponsor[]
+  prizes            CompetitionPrize[]
 
   @@index([status, startsAt, endsAt])
 }
 
 model CompetitionTournamentSponsor {
-  id                String                     @id @default(cuid())
-  tournamentId      String
-  sponsorId         String
-  level             CompetitionSponsorLevel
-  deliverablesJson  String?                    @db.LongText
-  approvedAt        DateTime?
-  createdAt         DateTime                   @default(now())
-  tournament        CompetitionTournament      @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
-  sponsor           CompetitionSponsor         @relation(fields: [sponsorId], references: [id], onDelete: Cascade)
+  id               String                  @id @default(cuid())
+  tournamentId     String
+  sponsorId        String
+  level            CompetitionSponsorLevel
+  deliverablesJson String?                 @db.LongText
+  approvedAt       DateTime?
+  createdAt        DateTime                @default(now())
+  tournament       CompetitionTournament   @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  sponsor          CompetitionSponsor      @relation(fields: [sponsorId], references: [id], onDelete: Cascade)
 
   @@unique([tournamentId, sponsorId])
   @@index([sponsorId, level])
 }
 
 model CompetitionPrize {
-  id                 String                    @id @default(cuid())
-  schoolId           String?
-  tournamentId       String
-  sponsorId          String?
-  recipientPupilId   String?
-  participantId      String?
-  name               String
-  description        String?                   @db.Text
-  valueMinor         Int?
-  currency           String                    @default("NGN") @db.VarChar(3)
-  status             CompetitionPrizeStatus   @default(AVAILABLE)
-  awardedAt          DateTime?
-  fulfilledAt        DateTime?
-  fulfillmentNotes   String?                   @db.Text
-  createdAt          DateTime                  @default(now())
-  updatedAt          DateTime                  @updatedAt
-  school             School?                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  tournament         CompetitionTournament    @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
-  sponsor            CompetitionSponsor?      @relation(fields: [sponsorId], references: [id], onDelete: SetNull)
-  recipient          Pupil?                    @relation(fields: [recipientPupilId], references: [id], onDelete: SetNull)
-  participant        CompetitionTournamentParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  id               String                            @id @default(cuid())
+  schoolId         String?
+  tournamentId     String
+  sponsorId        String?
+  recipientPupilId String?
+  participantId    String?
+  name             String
+  description      String?                           @db.Text
+  valueMinor       Int?
+  currency         String                            @default("NGN") @db.VarChar(3)
+  status           CompetitionPrizeStatus            @default(AVAILABLE)
+  awardedAt        DateTime?
+  fulfilledAt      DateTime?
+  fulfillmentNotes String?                           @db.Text
+  createdAt        DateTime                          @default(now())
+  updatedAt        DateTime                          @updatedAt
+  school           School?                           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  tournament       CompetitionTournament             @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  sponsor          CompetitionSponsor?               @relation(fields: [sponsorId], references: [id], onDelete: SetNull)
+  recipient        Pupil?                            @relation(fields: [recipientPupilId], references: [id], onDelete: SetNull)
+  participant      CompetitionTournamentParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, status])
   @@index([tournamentId, status])
@@ -1357,25 +1365,25 @@ model CompetitionPrize {
 }
 
 model CompetitionCertificate {
-  id                  String                       @id @default(cuid())
+  id                  String                            @id @default(cuid())
   schoolId            String?
   tournamentId        String?
   attemptId           String?
   participantId       String?
   pupilId             String
-  certificateCodeHash String                       @unique @db.VarChar(128)
-  displayNameSnapshot String                       @db.VarChar(160)
-  schoolNameSnapshot  String                       @db.VarChar(191)
-  achievementTitle    String                       @db.VarChar(191)
-  issuedAt            DateTime                     @default(now())
-  status              CompetitionCertificateStatus @default(ISSUED)
+  certificateCodeHash String                            @unique @db.VarChar(128)
+  displayNameSnapshot String                            @db.VarChar(160)
+  schoolNameSnapshot  String                            @db.VarChar(191)
+  achievementTitle    String                            @db.VarChar(191)
+  issuedAt            DateTime                          @default(now())
+  status              CompetitionCertificateStatus      @default(ISSUED)
   revokedAt           DateTime?
-  revokedReason       String?                      @db.Text
-  school              School?                      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  tournament          CompetitionTournament?       @relation(fields: [tournamentId], references: [id], onDelete: SetNull)
-  attempt             CompetitionChallengeAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  revokedReason       String?                           @db.Text
+  school              School?                           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  tournament          CompetitionTournament?            @relation(fields: [tournamentId], references: [id], onDelete: SetNull)
+  attempt             CompetitionChallengeAttempt?      @relation(fields: [attemptId], references: [id], onDelete: SetNull)
   participant         CompetitionTournamentParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
-  pupil               Pupil                        @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  pupil               Pupil                             @relation(fields: [pupilId], references: [id], onDelete: Cascade)
 
   @@index([schoolId, issuedAt])
   @@index([pupilId, issuedAt])
@@ -1383,17 +1391,17 @@ model CompetitionCertificate {
 }
 
 model CompetitionAnnouncement {
-  id              String                  @id @default(cuid())
+  id              String                 @id @default(cuid())
   schoolId        String?
   tournamentId    String?
   title           String
-  body            String                  @db.LongText
-  isPublic        Boolean                 @default(false)
+  body            String                 @db.LongText
+  isPublic        Boolean                @default(false)
   publishedAt     DateTime?
   createdByUserId String?
-  createdAt       DateTime                @default(now())
-  updatedAt       DateTime                @updatedAt
-  school          School?                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  school          School?                @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   tournament      CompetitionTournament? @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
 
   @@index([schoolId, publishedAt])
@@ -1457,24 +1465,24 @@ model CompetitionAnalyticsSnapshot {
 }
 
 model SignupOtp {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  schoolName   String
-  slug         String
-  country      String
-  adminName    String
-  tagline      String?
-  address      String?
-  phone        String?
-  passwordHash String
-  otpHash      String
-  attempts     Int       @default(0)
-  expiresAt    DateTime
-  verifiedAt   DateTime?
-  recoveryKeyHash String?  @db.Char(64)
+  id                String    @id @default(cuid())
+  email             String    @unique
+  schoolName        String
+  slug              String
+  country           String
+  adminName         String
+  tagline           String?
+  address           String?
+  phone             String?
+  passwordHash      String
+  otpHash           String
+  attempts          Int       @default(0)
+  expiresAt         DateTime
+  verifiedAt        DateTime?
+  recoveryKeyHash   String?   @db.Char(64)
   recoveryExpiresAt DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 }
 
 model SignupRateLimit {
@@ -1485,43 +1493,43 @@ model SignupRateLimit {
 }
 
 model PasswordReset {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   userId    String
   tokenHash String
-  attempts  Int      @default(0)
+  attempts  Int       @default(0)
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId], map: "PasswordReset_userId_fkey")
 }
 
 model SupportRequest {
-  id                 String                  @id @default(cuid())
-  schoolId           String
-  createdByUserId    String?
+  id                  String                  @id @default(cuid())
+  schoolId            String
+  createdByUserId     String?
   createdByGuardianId String?
   assignedCountryRepId String?
-  requesterName      String?
-  requesterEmail     String?
-  requesterRole      String?
-  subject            String
-  message            String                  @db.LongText
-  status             SupportStatus           @default(OPEN)
-  priority           SupportPriority         @default(MEDIUM)
-  response           String?                 @db.LongText
-  createdAt          DateTime                @default(now())
-  updatedAt          DateTime                @updatedAt
-  lastMessageAt      DateTime                @default(now())
-  school             School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  createdByUser      User?                   @relation("SupportRequestCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  createdByGuardian  Guardian?               @relation("SupportRequestGuardian", fields: [createdByGuardianId], references: [id], onDelete: SetNull)
-  assignedCountryRep User?                    @relation("CountrySupportRequestAssignee", fields: [assignedCountryRepId], references: [id], onDelete: SetNull)
-  messages           SupportRequestMessage[]
-  attachments        SupportAttachment[]
-  internalNotes      SupportInternalNote[]
+  requesterName       String?
+  requesterEmail      String?
+  requesterRole       String?
+  subject             String
+  message             String                  @db.LongText
+  status              SupportStatus           @default(OPEN)
+  priority            SupportPriority         @default(MEDIUM)
+  response            String?                 @db.LongText
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  lastMessageAt       DateTime                @default(now())
+  school              School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdByUser       User?                   @relation("SupportRequestCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdByGuardian   Guardian?               @relation("SupportRequestGuardian", fields: [createdByGuardianId], references: [id], onDelete: SetNull)
+  assignedCountryRep  User?                   @relation("CountrySupportRequestAssignee", fields: [assignedCountryRepId], references: [id], onDelete: SetNull)
+  messages            SupportRequestMessage[]
+  attachments         SupportAttachment[]
+  internalNotes       SupportInternalNote[]
 
   @@index([schoolId, lastMessageAt])
   @@index([status, lastMessageAt])
@@ -1628,25 +1636,25 @@ model PlatformAuditLog {
 }
 
 model SchoolReview {
-  id                    String            @id @default(cuid())
-  schoolId              String            @unique
-  submittedByUserId     String?
-  rating                Int
-  reviewText            String?           @db.VarChar(2000)
-  status                SchoolReviewStatus @default(PENDING)
-  publishConsent       Boolean           @default(false)
-  schoolNameConsent    Boolean           @default(false)
-  schoolLogoConsent    Boolean           @default(false)
-  consentGrantedAt     DateTime?
-  consentRevokedAt     DateTime?
-  moderatedByUserId    String?
-  moderatedAt          DateTime?
-  moderationNote       String?           @db.VarChar(2000)
-  createdAt             DateTime          @default(now())
-  updatedAt             DateTime          @updatedAt
-  school                School            @relation(fields: [schoolId], references: [id], onDelete: Restrict)
-  submittedBy           User?             @relation("SchoolReviewSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
-  moderatedBy           User?             @relation("SchoolReviewModerator", fields: [moderatedByUserId], references: [id], onDelete: SetNull)
+  id                String             @id @default(cuid())
+  schoolId          String             @unique
+  submittedByUserId String?
+  rating            Int
+  reviewText        String?            @db.VarChar(2000)
+  status            SchoolReviewStatus @default(PENDING)
+  publishConsent    Boolean            @default(false)
+  schoolNameConsent Boolean            @default(false)
+  schoolLogoConsent Boolean            @default(false)
+  consentGrantedAt  DateTime?
+  consentRevokedAt  DateTime?
+  moderatedByUserId String?
+  moderatedAt       DateTime?
+  moderationNote    String?            @db.VarChar(2000)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  school            School             @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  submittedBy       User?              @relation("SchoolReviewSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
+  moderatedBy       User?              @relation("SchoolReviewModerator", fields: [moderatedByUserId], references: [id], onDelete: SetNull)
 
   @@index([status, createdAt])
   @@index([status, rating, createdAt])
@@ -1662,6 +1670,205 @@ enum SchoolReviewStatus {
 model PlatformSetting {
   key   String @id
   value String @db.LongText
+}
+
+enum FinancingInstitutionStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum FinancingIntegrationMode {
+  HOSTED
+  API
+  MANUAL
+}
+
+enum FinancingProductStatus {
+  DRAFT
+  APPROVED
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum FinancingProductApplicationMode {
+  HOSTED
+  SCHOOL_CONTACT
+  API
+}
+
+enum FinancingProviderEventStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  REVIEW_REQUIRED
+  FAILED
+}
+
+model FinancingInstitution {
+  id              String                     @id @default(cuid())
+  code            String                     @unique @db.VarChar(64)
+  displayName     String                     @db.VarChar(191)
+  integrationMode FinancingIntegrationMode
+  isDemo          Boolean                    @default(false)
+  status          FinancingInstitutionStatus @default(SUSPENDED)
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+  providerEvents  FinancingProviderEvent[]
+  applications    FinancingApplication[]
+  products        FinancingProduct[]
+}
+
+model FinancingProduct {
+  id                        String                          @id @default(cuid())
+  institutionId             String
+  code                      String                          @db.VarChar(64)
+  displayName               String                          @db.VarChar(191)
+  summary                   String                          @db.VarChar(500)
+  eligibilitySummary        String                          @db.Text
+  termsSummary              String                          @db.Text
+  termsUrl                  String?                         @db.VarChar(2048)
+  termsVersion              String                          @db.VarChar(80)
+  currency                  String                          @db.VarChar(3)
+  applicationMode           FinancingProductApplicationMode
+  applicationUrl            String?                         @db.VarChar(2048)
+  approvalEvidenceReference String?                         @db.VarChar(191)
+  createdBy                 String                          @db.VarChar(191)
+  effectiveAt               DateTime                        @db.DateTime(3)
+  expiresAt                 DateTime?                       @db.DateTime(3)
+  status                    FinancingProductStatus          @default(DRAFT)
+  approvedAt                DateTime?                       @db.DateTime(3)
+  approvedBy                String?                         @db.VarChar(191)
+  createdAt                 DateTime                        @default(now()) @db.DateTime(3)
+  updatedAt                 DateTime                        @updatedAt @db.DateTime(3)
+  institution               FinancingInstitution            @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  schools                   SchoolFinancingProduct[]
+  applications              FinancingApplication[]
+
+  @@unique([institutionId, code], map: "fin_product_institution_code_key")
+  @@index([status, effectiveAt, expiresAt])
+  @@index([institutionId, status])
+}
+
+model SchoolFinancingProduct {
+  schoolId  String           @db.VarChar(191)
+  productId String
+  enabledAt DateTime         @default(now()) @db.DateTime(3)
+  enabledBy String           @db.VarChar(191)
+  school    School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  product   FinancingProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([schoolId, productId])
+  @@index([productId, enabledAt])
+}
+
+model FinancingProviderEvent {
+  id                   String                       @id @default(cuid())
+  institutionId        String
+  externalEventId      String                       @db.VarChar(191)
+  eventType            String                       @db.VarChar(40)
+  applicationReference String                       @db.VarChar(191)
+  occurredAt           DateTime                     @db.DateTime(3)
+  payloadHash          String                       @db.Char(64)
+  normalizedPayload    Json
+  status               FinancingProviderEventStatus @default(RECEIVED)
+  attempts             Int                          @default(0)
+  lastErrorCode        String?                      @db.VarChar(80)
+  lockExpiresAt        DateTime?                    @db.DateTime(3)
+  receivedAt           DateTime                     @default(now()) @db.DateTime(3)
+  processedAt          DateTime?                    @db.DateTime(3)
+  updatedAt            DateTime                     @updatedAt @db.DateTime(3)
+  institution          FinancingInstitution         @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  applicationEvent     FinancingApplicationEvent?
+
+  @@unique([institutionId, externalEventId])
+  @@index([status, lockExpiresAt, receivedAt])
+  @@index([institutionId, applicationReference, receivedAt], map: "fin_provider_event_institution_ref_received_idx")
+}
+
+enum FinancingApplicationStatus {
+  DRAFT
+  CONSENTED
+  SUBMITTED
+  UNDER_REVIEW
+  MORE_INFO_REQUIRED
+  OFFERED
+  OFFER_ACCEPTED
+  REJECTED
+  CANCELLED
+  EXPIRED
+}
+
+enum FinancingApplicationEventActorType {
+  PARENT
+  SCHOOL
+  PLATFORM
+  LENDER
+  SYSTEM
+}
+
+model FinancingApplication {
+  id                           String                        @id @default(cuid())
+  schoolId                     String
+  pupilId                      String
+  guardianId                   String
+  invoiceId                    String
+  institutionId                String?
+  productId                    String?
+  interestKey                  String?                       @unique(map: "fin_application_interest_key") @db.Char(64)
+  externalApplicationReference String?                       @db.VarChar(191)
+  status                       FinancingApplicationStatus    @default(DRAFT)
+  createdAt                    DateTime                      @default(now()) @db.DateTime(3)
+  updatedAt                    DateTime                      @updatedAt @db.DateTime(3)
+  school                       School                        @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  pupil                        Pupil                         @relation(fields: [pupilId], references: [id], onDelete: Restrict)
+  guardian                     Guardian                      @relation(fields: [guardianId], references: [id], onDelete: Restrict)
+  invoice                      Invoice                       @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  institution                  FinancingInstitution?         @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  product                      FinancingProduct?             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  events                       FinancingApplicationEvent[]
+  settlementPayments           FinancingApplicationPayment[]
+
+  @@unique([institutionId, externalApplicationReference], map: "fin_application_institution_external_ref_key")
+  @@index([schoolId, status, createdAt])
+  @@index([guardianId, createdAt])
+  @@index([invoiceId, status])
+  @@index([institutionId, status, createdAt])
+  @@index([productId, status, createdAt])
+}
+
+model FinancingApplicationEvent {
+  id              String                             @id @default(cuid())
+  schoolId        String
+  applicationId   String
+  actorId         String?                            @db.VarChar(191)
+  demoActionKey   String?                            @unique(map: "fin_app_event_demo_action_key") @db.Char(64)
+  providerEventId String?                            @unique
+  actorType       FinancingApplicationEventActorType
+  eventType       String                             @db.VarChar(40)
+  fromStatus      FinancingApplicationStatus?
+  toStatus        FinancingApplicationStatus?
+  metadata        Json?
+  createdAt       DateTime                           @default(now()) @db.DateTime(3)
+  school          School                             @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  application     FinancingApplication               @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  providerEvent   FinancingProviderEvent?            @relation(fields: [providerEventId], references: [id], onDelete: Restrict)
+
+  @@index([schoolId, applicationId, createdAt])
+  @@index([applicationId, createdAt])
+}
+
+model FinancingApplicationPayment {
+  id            String               @id @default(cuid())
+  applicationId String
+  paymentId     String               @unique
+  bankReference String               @db.VarChar(191)
+  recordedBy    String               @db.VarChar(191)
+  recordedAt    DateTime             @default(now()) @db.DateTime(3)
+  application   FinancingApplication @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  payment       Payment              @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([applicationId, recordedAt])
 }
 
 model IdCardPricingRule {
@@ -1680,77 +1887,77 @@ model IdCardPricingRule {
 }
 
 model IdCardQuote {
-  id                String   @id @default(cuid())
-  schoolId          String
-  pricingRuleId     String
-  pricingRuleVersion Int
-  status            String   @default("QUOTED")
-  currency          String
-  quantity          Int
-  templateId        String
-  templateTier      String
-  subtotalMinor     Int
-  discountMinor     Int      @default(0)
-  taxMinor          Int      @default(0)
-  totalMinor        Int
-  studentIdsJson    String   @db.LongText
-  optionsJson       String   @db.LongText
-  renderSnapshotEncrypted String @db.LongText
-  expiresAt         DateTime
-  createdBy         String
-  createdAt         DateTime @default(now())
-  school            School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  order             IdCardOrder?
+  id                      String       @id @default(cuid())
+  schoolId                String
+  pricingRuleId           String
+  pricingRuleVersion      Int
+  status                  String       @default("QUOTED")
+  currency                String
+  quantity                Int
+  templateId              String
+  templateTier            String
+  subtotalMinor           Int
+  discountMinor           Int          @default(0)
+  taxMinor                Int          @default(0)
+  totalMinor              Int
+  studentIdsJson          String       @db.LongText
+  optionsJson             String       @db.LongText
+  renderSnapshotEncrypted String       @db.LongText
+  expiresAt               DateTime
+  createdBy               String
+  createdAt               DateTime     @default(now())
+  school                  School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  order                   IdCardOrder?
 
   @@index([schoolId, createdAt])
   @@index([status, expiresAt])
 }
 
 model IdCardDraft {
-  id         String   @id @default(cuid())
-  schoolId   String
-  createdBy  String
-  draftJson  String   @db.LongText
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  school     School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  id        String   @id @default(cuid())
+  schoolId  String
+  createdBy String
+  draftJson String   @db.LongText
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
   @@unique([schoolId, createdBy])
   @@index([expiresAt])
 }
 
 model IdCardOrder {
-  id                       String   @id @default(cuid())
-  schoolId                 String
-  quoteId                  String   @unique
-  status                   String   @default("PAYMENT_PENDING")
-  paymentStatus            String   @default("PENDING")
-  currency                 String
-  amountMinor              Int
-  providerReference        String?  @unique
-  providerTransactionId    String?  @unique
-  renderSnapshotEncrypted  String?  @db.LongText
-  artifactKey              String?  @db.VarChar(512)
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
-  school                   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  quote                    IdCardQuote @relation(fields: [quoteId], references: [id], onDelete: Restrict)
-  events                   IdCardOrderEvent[]
-  issuances                IdCardIssuance[]
-  awardLedgerEntries       IdCardAwardLedger[]
+  id                      String              @id @default(cuid())
+  schoolId                String
+  quoteId                 String              @unique
+  status                  String              @default("PAYMENT_PENDING")
+  paymentStatus           String              @default("PENDING")
+  currency                String
+  amountMinor             Int
+  providerReference       String?             @unique
+  providerTransactionId   String?             @unique
+  renderSnapshotEncrypted String?             @db.LongText
+  artifactKey             String?             @db.VarChar(512)
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  school                  School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  quote                   IdCardQuote         @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  events                  IdCardOrderEvent[]
+  issuances               IdCardIssuance[]
+  awardLedgerEntries      IdCardAwardLedger[]
 
   @@index([schoolId, createdAt])
   @@index([status, paymentStatus])
 }
 
 model IdCardOrderEvent {
-  id        String   @id @default(cuid())
+  id        String      @id @default(cuid())
   orderId   String
   eventType String
   actorId   String?
-  details   String?  @db.LongText
-  createdAt DateTime @default(now())
+  details   String?     @db.LongText
+  createdAt DateTime    @default(now())
   order     IdCardOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([orderId, createdAt])
@@ -1758,23 +1965,23 @@ model IdCardOrderEvent {
 }
 
 model IdCardIssuance {
-  id             String          @id @default(cuid())
-  schoolId       String
-  pupilId        String
-  orderId        String
-  status         String          @default("GENERATED")
-  issuedAt       DateTime?
-  expiresAt      DateTime?
-  supersedesId   String?
-  reason         String?         @db.Text
-  createdBy      String?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  school         School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  pupil          Pupil           @relation(fields: [pupilId], references: [id], onDelete: Cascade)
-  order          IdCardOrder     @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  supersedes     IdCardIssuance? @relation("IdCardReplacement", fields: [supersedesId], references: [id], onDelete: SetNull)
-  replacements   IdCardIssuance[] @relation("IdCardReplacement")
+  id           String           @id @default(cuid())
+  schoolId     String
+  pupilId      String
+  orderId      String
+  status       String           @default("GENERATED")
+  issuedAt     DateTime?
+  expiresAt    DateTime?
+  supersedesId String?
+  reason       String?          @db.Text
+  createdBy    String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  school       School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  pupil        Pupil            @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  order        IdCardOrder      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  supersedes   IdCardIssuance?  @relation("IdCardReplacement", fields: [supersedesId], references: [id], onDelete: SetNull)
+  replacements IdCardIssuance[] @relation("IdCardReplacement")
 
   @@unique([orderId, pupilId])
   @@index([schoolId, pupilId, status])
@@ -1783,43 +1990,43 @@ model IdCardIssuance {
 }
 
 model IdCardUsageAward {
-  id                    String   @id @default(cuid())
-  schoolId              String
-  awardType             String
-  unitsGranted          Int      @default(0)
-  unitsReserved         Int      @default(0)
-  unitsRedeemed         Int      @default(0)
-  valueMinor            Int      @default(0)
-  currency              String   @default("NGN")
-  eligibleTiersJson     String   @db.LongText
-  reasonCategory        String
-  campaign              String?
-  internalNote          String?  @db.Text
-  terms                 String?  @db.Text
-  status                String   @default("PENDING_APPROVAL")
-  expiresAt             DateTime?
-  createdBy             String
-  approvedBy            String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
-  school                School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  ledgerEntries         IdCardAwardLedger[]
+  id                String              @id @default(cuid())
+  schoolId          String
+  awardType         String
+  unitsGranted      Int                 @default(0)
+  unitsReserved     Int                 @default(0)
+  unitsRedeemed     Int                 @default(0)
+  valueMinor        Int                 @default(0)
+  currency          String              @default("NGN")
+  eligibleTiersJson String              @db.LongText
+  reasonCategory    String
+  campaign          String?
+  internalNote      String?             @db.Text
+  terms             String?             @db.Text
+  status            String              @default("PENDING_APPROVAL")
+  expiresAt         DateTime?
+  createdBy         String
+  approvedBy        String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  school            School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  ledgerEntries     IdCardAwardLedger[]
 
   @@index([schoolId, status, expiresAt])
 }
 
 model IdCardAwardLedger {
-  id          String   @id @default(cuid())
+  id          String           @id @default(cuid())
   awardId     String
   orderId     String?
   entryType   String
-  units       Int      @default(0)
-  amountMinor Int      @default(0)
+  units       Int              @default(0)
+  amountMinor Int              @default(0)
   actorId     String?
-  reason      String?  @db.Text
-  createdAt   DateTime @default(now())
+  reason      String?          @db.Text
+  createdAt   DateTime         @default(now())
   award       IdCardUsageAward @relation(fields: [awardId], references: [id], onDelete: Cascade)
-  order       IdCardOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  order       IdCardOrder?     @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@index([awardId, createdAt])
   @@index([orderId])
@@ -1886,65 +2093,65 @@ enum AdAnalyticsEventType {
 }
 
 model Advertiser {
-  id                  String                       @id @default(cuid())
-  companyName         String
-  contactName         String
-  email               String
-  phone               String?
-  website             String?
-  category            String?
-  verificationStatus  AdvertiserVerificationStatus @default(PENDING)
-  verifiedAt          DateTime?
-  rejectionReason     String?                      @db.Text
-  notes               String?                      @db.Text
-  createdAt           DateTime                     @default(now())
-  updatedAt           DateTime                     @updatedAt
-  campaigns           AdCampaign[]
-  competitionSponsor  CompetitionSponsor?
+  id                 String                       @id @default(cuid())
+  companyName        String
+  contactName        String
+  email              String
+  phone              String?
+  website            String?
+  category           String?
+  verificationStatus AdvertiserVerificationStatus @default(PENDING)
+  verifiedAt         DateTime?
+  rejectionReason    String?                      @db.Text
+  notes              String?                      @db.Text
+  createdAt          DateTime                     @default(now())
+  updatedAt          DateTime                     @updatedAt
+  campaigns          AdCampaign[]
+  competitionSponsor CompetitionSponsor?
 
   @@index([verificationStatus])
 }
 
 model AdPlacement {
-  id            String         @id @default(cuid())
-  name          String
-  type          AdPlacementType @unique
-  path          String?
-  label         String         @default("Sponsored")
-  enabled       Boolean        @default(true)
-  sortOrder     Int            @default(0)
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  campaigns     AdCampaignPlacement[]
+  id        String                @id @default(cuid())
+  name      String
+  type      AdPlacementType       @unique
+  path      String?
+  label     String                @default("Sponsored")
+  enabled   Boolean               @default(true)
+  sortOrder Int                   @default(0)
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+  campaigns AdCampaignPlacement[]
 
   @@index([enabled, sortOrder])
 }
 
 model AdCampaign {
-  id                 String                @id @default(cuid())
-  advertiserId       String
-  title              String
-  slug               String               @unique
-  headline           String?
-  summary            String?              @db.Text
-  landingUrl         String
-  status             AdCampaignStatus      @default(DRAFT)
-  startDate          DateTime?
-  endDate            DateTime?
-  budget             Float                @default(0)
-  currency           String               @default("NGN")
-  enabled            Boolean              @default(true)
-  approvedBy         String?
-  approvedAt         DateTime?
-  rejectedReason     String?              @db.Text
-  submittedAt        DateTime?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  advertiser         Advertiser           @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
-  placements         AdCampaignPlacement[]
-  creatives          AdCreative[]
-  approvalLogs       CampaignApprovalLog[]
-  analyticsEvents    AdAnalyticsEvent[]
+  id              String                @id @default(cuid())
+  advertiserId    String
+  title           String
+  slug            String                @unique
+  headline        String?
+  summary         String?               @db.Text
+  landingUrl      String
+  status          AdCampaignStatus      @default(DRAFT)
+  startDate       DateTime?
+  endDate         DateTime?
+  budget          Float                 @default(0)
+  currency        String                @default("NGN")
+  enabled         Boolean               @default(true)
+  approvedBy      String?
+  approvedAt      DateTime?
+  rejectedReason  String?               @db.Text
+  submittedAt     DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  advertiser      Advertiser            @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+  placements      AdCampaignPlacement[]
+  creatives       AdCreative[]
+  approvalLogs    CampaignApprovalLog[]
+  analyticsEvents AdAnalyticsEvent[]
 
   @@index([advertiserId])
   @@index([status])
@@ -1965,66 +2172,66 @@ model AdCampaignPlacement {
 }
 
 model AdCreative {
-  id            String      @id @default(cuid())
-  campaignId    String
-  imageUrl      String?
-  headline      String?
-  description   String?     @db.Text
-  ctaText       String?     @default("Learn more")
-  altText       String?
-  assetType     String      @default("IMAGE")
-  isPrimary     Boolean     @default(true)
-  approvedAt    DateTime?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  campaign      AdCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id          String     @id @default(cuid())
+  campaignId  String
+  imageUrl    String?
+  headline    String?
+  description String?    @db.Text
+  ctaText     String?    @default("Learn more")
+  altText     String?
+  assetType   String     @default("IMAGE")
+  isPrimary   Boolean    @default(true)
+  approvedAt  DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  campaign    AdCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId])
 }
 
 model CampaignApprovalLog {
-  id          String      @id @default(cuid())
-  campaignId  String
-  reviewerId  String?
-  action      String
-  reason      String?     @db.Text
-  notes       String?     @db.Text
-  createdAt   DateTime    @default(now())
-  campaign    AdCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id         String     @id @default(cuid())
+  campaignId String
+  reviewerId String?
+  action     String
+  reason     String?    @db.Text
+  notes      String?    @db.Text
+  createdAt  DateTime   @default(now())
+  campaign   AdCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, createdAt])
 }
 
 model AdAnalyticsEvent {
-  id             String               @id @default(cuid())
-  campaignId     String
-  placementId    String?
-  eventType      AdAnalyticsEventType
-  sourcePath     String?
-  userAgent      String?
-  referrer       String?
-  ipHash         String?
-  createdAt      DateTime             @default(now())
-  campaign       AdCampaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id          String               @id @default(cuid())
+  campaignId  String
+  placementId String?
+  eventType   AdAnalyticsEventType
+  sourcePath  String?
+  userAgent   String?
+  referrer    String?
+  ipHash      String?
+  createdAt   DateTime             @default(now())
+  campaign    AdCampaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, eventType])
   @@index([sourcePath])
 }
 
 model Subject {
-  id                   String                @id @default(cuid())
-  schoolId             String
-  name                 String
-  code                 String?
-  createdAt            DateTime              @default(now())
-  results              Result[]
-  historicalTermTotals HistoricalTermTotal[]
-  school               School                @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  subjectClasses       SubjectClass[]
-  subjectResults       SubjectResult[]
-  teacherSubjects      TeacherSubject[]
-  timetableEntries     TimetableEntry[]
-  competitionCategories CompetitionCategory[]
+  id                      String                   @id @default(cuid())
+  schoolId                String
+  name                    String
+  code                    String?
+  createdAt               DateTime                 @default(now())
+  results                 Result[]
+  historicalTermTotals    HistoricalTermTotal[]
+  school                  School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  subjectClasses          SubjectClass[]
+  subjectResults          SubjectResult[]
+  teacherSubjects         TeacherSubject[]
+  timetableEntries        TimetableEntry[]
+  competitionCategories   CompetitionCategory[]
   competitionQuestionSets CompetitionQuestionSet[]
 
   @@unique([schoolId, name])
@@ -2077,81 +2284,81 @@ model SubjectClass {
 }
 
 model StaffAttendancePolicy {
-  id                         String                  @id @default(cuid())
-  schoolId                   String
-  name                       String                  @default("Standard attendance")
-  shiftStartTime             String                  @default("08:30")
-  checkInGraceMinutes        Int                     @default(15)
-  checkOutCutoffMinutes      Int                     @default(540)
-  requireCheckout            Boolean                 @default(true)
-  workDays                   String                  @default("1,2,3,4,5")
-  effectiveFrom              DateTime                @db.Date
-  effectiveTo                DateTime?               @db.Date
-  isActive                   Boolean                 @default(true)
-  createdAt                  DateTime                @default(now())
-  updatedAt                  DateTime                @updatedAt
-  school                     School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  attendanceRecords          StaffAttendanceRecord[]
+  id                    String                  @id @default(cuid())
+  schoolId              String
+  name                  String                  @default("Standard attendance")
+  shiftStartTime        String                  @default("08:30")
+  checkInGraceMinutes   Int                     @default(15)
+  checkOutCutoffMinutes Int                     @default(540)
+  requireCheckout       Boolean                 @default(true)
+  workDays              String                  @default("1,2,3,4,5")
+  effectiveFrom         DateTime                @db.Date
+  effectiveTo           DateTime?               @db.Date
+  isActive              Boolean                 @default(true)
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+  school                School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendanceRecords     StaffAttendanceRecord[]
 
   @@unique([schoolId, name, effectiveFrom], map: "staff_att_policy_effective_key")
   @@index([schoolId, isActive, effectiveFrom, effectiveTo], map: "staff_att_policy_active_dates_idx")
 }
 
 model AttendanceStation {
-  id                    String                 @id @default(cuid())
-  schoolId              String
-  publicCode            String                 @unique(map: "attendance_station_public_code_key") @default(cuid())
-  name                  String
-  locationLabel         String?
-  isActive              Boolean                @default(true)
-  tokenVersion          Int                    @default(1)
-  lastCodeIssuedAt      DateTime?
-  scanWindowStartedAt   DateTime?
-  scanWindowCount       Int                    @default(0)
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
-  school                School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  attendanceEvents      StaffAttendanceEvent[]
-  stationEvents         AttendanceStationEvent[]
+  id                  String                   @id @default(cuid())
+  schoolId            String
+  publicCode          String                   @unique(map: "attendance_station_public_code_key") @default(cuid())
+  name                String
+  locationLabel       String?
+  isActive            Boolean                  @default(true)
+  tokenVersion        Int                      @default(1)
+  lastCodeIssuedAt    DateTime?
+  scanWindowStartedAt DateTime?
+  scanWindowCount     Int                      @default(0)
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  school              School                   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendanceEvents    StaffAttendanceEvent[]
+  stationEvents       AttendanceStationEvent[]
 
   @@unique([schoolId, name], map: "attendance_station_school_name_key")
   @@index([schoolId, isActive], map: "attendance_station_school_active_idx")
 }
 
 model AttendanceStationEvent {
-  id          String             @id @default(cuid())
+  id          String            @id @default(cuid())
   schoolId    String
   stationId   String
   actorUserId String?
   eventType   String
-  reason      String?            @db.Text
+  reason      String?           @db.Text
   details     Json?
-  createdAt   DateTime           @default(now())
-  school      School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  station     AttendanceStation  @relation(fields: [stationId], references: [id], onDelete: Restrict)
-  actor       User?              @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  createdAt   DateTime          @default(now())
+  school      School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  station     AttendanceStation @relation(fields: [stationId], references: [id], onDelete: Restrict)
+  actor       User?             @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, stationId, createdAt], map: "attendance_station_event_history_idx")
   @@index([actorUserId, createdAt], map: "attendance_station_event_actor_idx")
 }
 
 model StaffAttendanceRecord {
-  id          String                 @id @default(cuid())
-  schoolId    String
-  employeeId  String
-  policyId    String?
-  date        DateTime               @db.Date
-  shiftKey    String                 @default("DEFAULT")
-  checkInAt   DateTime?
-  checkOutAt  DateTime?
-  status      StaffAttendanceStatus  @default(PRESENT)
-  reason      String?                @db.Text
-  createdAt   DateTime               @default(now())
-  updatedAt   DateTime               @updatedAt
-  school      School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  employee    EmployeeProfile        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
-  policy      StaffAttendancePolicy? @relation(fields: [policyId], references: [id], onDelete: SetNull)
-  events      StaffAttendanceEvent[]
+  id         String                 @id @default(cuid())
+  schoolId   String
+  employeeId String
+  policyId   String?
+  date       DateTime               @db.Date
+  shiftKey   String                 @default("DEFAULT")
+  checkInAt  DateTime?
+  checkOutAt DateTime?
+  status     StaffAttendanceStatus  @default(PRESENT)
+  reason     String?                @db.Text
+  createdAt  DateTime               @default(now())
+  updatedAt  DateTime               @updatedAt
+  school     School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  employee   EmployeeProfile        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  policy     StaffAttendancePolicy? @relation(fields: [policyId], references: [id], onDelete: SetNull)
+  events     StaffAttendanceEvent[]
 
   @@unique([schoolId, employeeId, date, shiftKey], map: "staff_att_record_employee_date_shift_key")
   @@index([schoolId, date, status], map: "staff_att_record_school_date_status_idx")
@@ -2160,25 +2367,25 @@ model StaffAttendanceRecord {
 }
 
 model StaffAttendanceEvent {
-  id              String                 @id @default(cuid())
-  schoolId        String
-  attendanceId    String
-  employeeId      String
-  actorUserId     String?
-  stationId       String?
-  eventType       String
-  status          StaffAttendanceStatus?
-  reason          String                 @db.Text
-  idempotencyKey  String?
-  beforeSnapshot  Json?
-  afterSnapshot   Json?
-  details         Json?
-  createdAt       DateTime               @default(now())
-  school          School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  attendance      StaffAttendanceRecord  @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
-  employee        EmployeeProfile        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
-  actor           User?                  @relation("StaffAttendanceEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
-  station         AttendanceStation?     @relation(fields: [stationId], references: [id], onDelete: SetNull)
+  id             String                 @id @default(cuid())
+  schoolId       String
+  attendanceId   String
+  employeeId     String
+  actorUserId    String?
+  stationId      String?
+  eventType      String
+  status         StaffAttendanceStatus?
+  reason         String                 @db.Text
+  idempotencyKey String?
+  beforeSnapshot Json?
+  afterSnapshot  Json?
+  details        Json?
+  createdAt      DateTime               @default(now())
+  school         School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  attendance     StaffAttendanceRecord  @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
+  employee       EmployeeProfile        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  actor          User?                  @relation("StaffAttendanceEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  station        AttendanceStation?     @relation(fields: [stationId], references: [id], onDelete: SetNull)
 
   @@unique([schoolId, idempotencyKey], map: "staff_att_event_idempotency_key")
   @@index([schoolId, attendanceId, createdAt], map: "staff_att_event_record_date_idx")
@@ -2225,17 +2432,17 @@ model PaymentAccount {
 }
 
 model FeeSchedule {
-  id        String    @id @default(cuid())
+  id        String            @id @default(cuid())
   schoolId  String
   termId    String
   classId   String?
   phase     SchoolPhase?
   name      String
   amount    Int
-  createdAt DateTime  @default(now())
-  school    School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  term      Term      @relation(fields: [termId], references: [id], onDelete: Cascade)
-  class     Class?    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  createdAt DateTime          @default(now())
+  school    School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  term      Term              @relation(fields: [termId], references: [id], onDelete: Cascade)
+  class     Class?            @relation(fields: [classId], references: [id], onDelete: Cascade)
   items     FeeScheduleItem[]
   invoices  Invoice[]
 
@@ -2245,18 +2452,18 @@ model FeeSchedule {
 }
 
 model FeeScheduleItem {
-  id            String    @id @default(cuid())
+  id            String   @id @default(cuid())
   schoolId      String
   feeScheduleId String
   name          String
   amount        Int
-  isRequired    Boolean   @default(true)
-  sortOrder     Int       @default(0)
+  isRequired    Boolean  @default(true)
+  sortOrder     Int      @default(0)
   description   String?
-  createdAt     DateTime  @default(now())
+  createdAt     DateTime @default(now())
 
-  school       School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  feeSchedule  FeeSchedule        @relation(fields: [feeScheduleId], references: [id], onDelete: Cascade)
+  school       School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  feeSchedule  FeeSchedule            @relation(fields: [feeScheduleId], references: [id], onDelete: Cascade)
   invoiceItems InvoiceItem[]
   adjustments  StudentFeeAdjustment[]
 
@@ -2265,29 +2472,30 @@ model FeeScheduleItem {
 }
 
 model Invoice {
-  id                 String        @id @default(cuid())
-  schoolId           String
-  pupilId            String
-  feeScheduleId      String
-  issuanceKey        String?       @unique @db.VarChar(191)
-  invoiceNo          String
-  amountDue          Int
-  amountPaid         Int           @default(0)
-  status             InvoiceStatus @default(DRAFT)
-  voidedAt           DateTime?
-  voidedBy           String?
-  voidReason         String?       @db.VarChar(500)
-  parentMarkedPaid   Boolean       @default(false)
-  parentMarkedPaidAt DateTime?
-  dueDate            DateTime?
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
-  feeSchedule        FeeSchedule   @relation(fields: [feeScheduleId], references: [id])
-  pupil              Pupil         @relation(fields: [pupilId], references: [id], onDelete: Cascade)
-  school             School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  items              InvoiceItem[]
-  adjustments        StudentFeeAdjustment[]
-  payments           Payment[]
+  id                     String                 @id @default(cuid())
+  schoolId               String
+  pupilId                String
+  feeScheduleId          String
+  issuanceKey            String?                @unique @db.VarChar(191)
+  invoiceNo              String
+  amountDue              Int
+  amountPaid             Int                    @default(0)
+  status                 InvoiceStatus          @default(DRAFT)
+  voidedAt               DateTime?
+  voidedBy               String?
+  voidReason             String?                @db.VarChar(500)
+  parentMarkedPaid       Boolean                @default(false)
+  parentMarkedPaidAt     DateTime?
+  dueDate                DateTime?
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  feeSchedule            FeeSchedule            @relation(fields: [feeScheduleId], references: [id])
+  pupil                  Pupil                  @relation(fields: [pupilId], references: [id], onDelete: Cascade)
+  school                 School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  items                  InvoiceItem[]
+  adjustments            StudentFeeAdjustment[]
+  payments               Payment[]
+  financingApplications  FinancingApplication[]
   accountingTransactions FinancialTransaction[] @relation("InvoiceAccountingTransactions")
 
   @@unique([schoolId, invoiceNo])
@@ -2305,9 +2513,9 @@ model InvoiceItem {
   description       String?
   createdAt         DateTime @default(now())
 
-  invoice         Invoice          @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  feeScheduleItem FeeScheduleItem? @relation(fields: [feeScheduleItemId], references: [id], onDelete: SetNull)
-  allocations     PaymentAllocation[]
+  invoice                Invoice                @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  feeScheduleItem        FeeScheduleItem?       @relation(fields: [feeScheduleItemId], references: [id], onDelete: SetNull)
+  allocations            PaymentAllocation[]
   accountingTransactions FinancialTransaction[] @relation("InvoiceItemAccountingTransactions")
 
   @@index([invoiceId])
@@ -2328,9 +2536,9 @@ model StudentFeeAdjustment {
   approvedBy        String?
   createdAt         DateTime          @default(now())
 
-  school          School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  student         Pupil           @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  invoice         Invoice?        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  school          School           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student         Pupil            @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  invoice         Invoice?         @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   feeScheduleItem FeeScheduleItem? @relation(fields: [feeScheduleItemId], references: [id], onDelete: SetNull)
 
   @@index([schoolId, studentId])
@@ -2354,18 +2562,19 @@ enum AdjustmentStatus {
 }
 
 model Payment {
-  id            String        @id @default(cuid())
-  invoiceId     String?
-  amount        Int
-  method        PaymentMethod
-  reference     String?
-  idempotencyKey String?      @db.VarChar(191)
-  paidAt        DateTime      @default(now())
-  recordedBy    String?
-  note          String?
-  invoice       Invoice?      @relation(fields: [invoiceId], references: [id])
-  allocations   PaymentAllocation[]
-  accountingTransactions FinancialTransaction[] @relation("PaymentAccountingTransactions")
+  id                          String                       @id @default(cuid())
+  invoiceId                   String?
+  amount                      Int
+  method                      PaymentMethod
+  reference                   String?
+  idempotencyKey              String?                      @db.VarChar(191)
+  paidAt                      DateTime                     @default(now())
+  recordedBy                  String?
+  note                        String?
+  invoice                     Invoice?                     @relation(fields: [invoiceId], references: [id])
+  allocations                 PaymentAllocation[]
+  accountingTransactions      FinancialTransaction[]       @relation("PaymentAccountingTransactions")
+  financingApplicationPayment FinancingApplicationPayment?
 
   @@unique([invoiceId, idempotencyKey])
   @@index([invoiceId], map: "Payment_invoiceId_fkey")
@@ -2373,11 +2582,11 @@ model Payment {
 }
 
 model PaymentAllocation {
-  id            String      @id @default(cuid())
+  id            String   @id @default(cuid())
   paymentId     String
   invoiceItemId String
   amount        Int
-  createdAt     DateTime    @default(now())
+  createdAt     DateTime @default(now())
 
   payment     Payment     @relation(fields: [paymentId], references: [id], onDelete: Cascade)
   invoiceItem InvoiceItem @relation(fields: [invoiceItemId], references: [id], onDelete: Cascade)
@@ -2394,7 +2603,7 @@ model PlatformPayment {
   reference  String?
   createdAt  DateTime      @default(now())
   recordedBy String?
-  note       String?   @db.Text
+  note       String?       @db.Text
 }
 
 model Assessment {
@@ -2691,17 +2900,17 @@ model PsychomotorAssessment {
 }
 
 model TermReportCardConfig {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   schoolId    String
-  termId      String   @unique
-  configData  String   @db.LongText
+  termId      String    @unique
+  configData  String    @db.LongText
   publishedAt DateTime?
   publishedBy String?
   reopenedAt  DateTime?
   reopenedBy  String?
   updatedBy   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   term   Term   @relation(fields: [termId], references: [id], onDelete: Cascade)
@@ -2942,103 +3151,103 @@ model WhatsAppDelivery {
 }
 
 model WhatsAppPolicy {
-  id                       String   @id @default(cuid())
-  schoolId                 String   @unique
-  enabled                  Boolean  @default(true)
-  messagesPerMinute        Int      @default(10)
-  messagesPerHour          Int      @default(100)
-  messagesPerDay           Int      @default(300)
-  batchSize                Int      @default(25)
-  batchCooldownSeconds     Int      @default(120)
-  quietHoursStart          String   @default("21:00")
-  quietHoursEnd            String   @default("07:00")
-  requireApprovalForBulk   Boolean  @default(true)
-  allowAutomaticRetries    Boolean  @default(true)
-  timezone                String   @default("Africa/Lagos")
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
-  school                   School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  id                     String   @id @default(cuid())
+  schoolId               String   @unique
+  enabled                Boolean  @default(true)
+  messagesPerMinute      Int      @default(10)
+  messagesPerHour        Int      @default(100)
+  messagesPerDay         Int      @default(300)
+  batchSize              Int      @default(25)
+  batchCooldownSeconds   Int      @default(120)
+  quietHoursStart        String   @default("21:00")
+  quietHoursEnd          String   @default("07:00")
+  requireApprovalForBulk Boolean  @default(true)
+  allowAutomaticRetries  Boolean  @default(true)
+  timezone               String   @default("Africa/Lagos")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  school                 School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
   @@index([schoolId])
 }
 
 model PlatformWhatsAppAccount {
-  id                     String                     @id @default(cuid())
-  status                 String                     @default("DISCONNECTED")
-  provider               String                     @default("META_CLOUD_API")
-  displayName            String?
-  phoneNumber            String?
-  phoneNumberId          String?
-  businessAccountId      String?
-  accessTokenEncrypted   String?
-  webhookUrl             String?
-  webhookVerifyToken     String?
-  connectedAt            DateTime?
-  disconnectedAt         DateTime?
-  lastHealthCheckAt      DateTime?
-  lastError              String?                    @db.Text
-  createdAt              DateTime                   @default(now())
-  updatedAt              DateTime                   @updatedAt
-  templates              PlatformWhatsAppTemplate[]
-  campaigns              PlatformWhatsAppCampaign[]
-  webhookEvents          PlatformWhatsAppWebhookEvent[]
-  messageLogs            PlatformWhatsAppMessageLog[]
+  id                   String                         @id @default(cuid())
+  status               String                         @default("DISCONNECTED")
+  provider             String                         @default("META_CLOUD_API")
+  displayName          String?
+  phoneNumber          String?
+  phoneNumberId        String?
+  businessAccountId    String?
+  accessTokenEncrypted String?
+  webhookUrl           String?
+  webhookVerifyToken   String?
+  connectedAt          DateTime?
+  disconnectedAt       DateTime?
+  lastHealthCheckAt    DateTime?
+  lastError            String?                        @db.Text
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+  templates            PlatformWhatsAppTemplate[]
+  campaigns            PlatformWhatsAppCampaign[]
+  webhookEvents        PlatformWhatsAppWebhookEvent[]
+  messageLogs          PlatformWhatsAppMessageLog[]
 
   @@index([status])
 }
 
 model PlatformWhatsAppTemplate {
-  id          String   @id @default(cuid())
-  accountId   String
-  name        String
-  category    String   @default("GENERAL")
-  status      String   @default("DRAFT")
-  body        String   @db.Text
-  language    String   @default("en")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  account     PlatformWhatsAppAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  campaigns   PlatformWhatsAppCampaign[]
+  id        String                     @id @default(cuid())
+  accountId String
+  name      String
+  category  String                     @default("GENERAL")
+  status    String                     @default("DRAFT")
+  body      String                     @db.Text
+  language  String                     @default("en")
+  createdAt DateTime                   @default(now())
+  updatedAt DateTime                   @updatedAt
+  account   PlatformWhatsAppAccount    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  campaigns PlatformWhatsAppCampaign[]
 
   @@index([accountId, status])
 }
 
 model PlatformWhatsAppCampaign {
-  id                String   @id @default(cuid())
-  accountId         String
-  templateId        String?
-  name              String
-  audienceType      String   @default("SCHOOL_FILTER")
-  audienceFilter    String?  @db.LongText
-  status            String   @default("DRAFT")
-  recipientsCount   Int      @default(0)
-  scheduledAt       DateTime?
-  sentAt            DateTime?
-  approvedBy        String?
-  approvalNote      String?  @db.Text
-  lastError         String?  @db.Text
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  account           PlatformWhatsAppAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  template          PlatformWhatsAppTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  recipients        PlatformWhatsAppCampaignRecipient[]
-  messageLogs       PlatformWhatsAppMessageLog[]
+  id              String                              @id @default(cuid())
+  accountId       String
+  templateId      String?
+  name            String
+  audienceType    String                              @default("SCHOOL_FILTER")
+  audienceFilter  String?                             @db.LongText
+  status          String                              @default("DRAFT")
+  recipientsCount Int                                 @default(0)
+  scheduledAt     DateTime?
+  sentAt          DateTime?
+  approvedBy      String?
+  approvalNote    String?                             @db.Text
+  lastError       String?                             @db.Text
+  createdAt       DateTime                            @default(now())
+  updatedAt       DateTime                            @updatedAt
+  account         PlatformWhatsAppAccount             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  template        PlatformWhatsAppTemplate?           @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  recipients      PlatformWhatsAppCampaignRecipient[]
+  messageLogs     PlatformWhatsAppMessageLog[]
 
   @@index([accountId, status])
   @@index([scheduledAt])
 }
 
 model PlatformWhatsAppCampaignRecipient {
-  id            String   @id @default(cuid())
+  id            String                   @id @default(cuid())
   campaignId    String
   schoolId      String?
   recipientName String?
   phoneNumber   String
-  status        String   @default("PENDING")
+  status        String                   @default("PENDING")
   deliveredAt   DateTime?
-  lastError     String?  @db.Text
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  lastError     String?                  @db.Text
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
   campaign      PlatformWhatsAppCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, status])
@@ -3046,21 +3255,21 @@ model PlatformWhatsAppCampaignRecipient {
 }
 
 model PlatformWhatsAppMessageLog {
-  id                 String   @id @default(cuid())
-  accountId          String
-  campaignId         String?
-  schoolId           String?
-  recipientName      String?
-  recipientPhone     String
-  direction          String   @default("OUTBOUND")
-  contentPreview     String?  @db.VarChar(500)
-  status             String   @default("QUEUED")
-  providerMessageId  String?
-  lastError          String?  @db.Text
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  account            PlatformWhatsAppAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  campaign           PlatformWhatsAppCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  id                String                    @id @default(cuid())
+  accountId         String
+  campaignId        String?
+  schoolId          String?
+  recipientName     String?
+  recipientPhone    String
+  direction         String                    @default("OUTBOUND")
+  contentPreview    String?                   @db.VarChar(500)
+  status            String                    @default("QUEUED")
+  providerMessageId String?
+  lastError         String?                   @db.Text
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+  account           PlatformWhatsAppAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  campaign          PlatformWhatsAppCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@index([accountId, status])
   @@index([campaignId])
@@ -3068,12 +3277,12 @@ model PlatformWhatsAppMessageLog {
 }
 
 model PlatformWhatsAppWebhookEvent {
-  id          String   @id @default(cuid())
-  accountId   String
-  eventType   String
-  payload     String   @db.LongText
-  createdAt   DateTime @default(now())
-  account     PlatformWhatsAppAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  id        String                  @id @default(cuid())
+  accountId String
+  eventType String
+  payload   String                  @db.LongText
+  createdAt DateTime                @default(now())
+  account   PlatformWhatsAppAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([accountId, eventType])
 }
@@ -3121,66 +3330,66 @@ model VideoTutorial {
 }
 
 model AdmissionApplication {
-  id                   String    @id @default(cuid()) @db.VarChar(255)
-  schoolId             String    @db.VarChar(255)
-  applicationNumber    String?   @db.VarChar(255)
-  requestKey           String?   @db.VarChar(255)
-  publicStatusTokenHash String?  @unique(map: "AdmissionApplication_status_token_key") @db.VarChar(64)
-  publicStatusTokenExpiresAt DateTime? @db.DateTime(0)
-  status               String    @default("SUBMITTED") @db.VarChar(255)
-  firstName            String    @db.VarChar(255)
-  lastName             String    @db.VarChar(255)
-  email                String?   @db.VarChar(255)
-  phone                String?   @db.VarChar(255)
-  childName            String?   @db.VarChar(255)
-  dateOfBirth          DateTime? @db.DateTime(0)
-  intendedClass        String?   @db.VarChar(255)
-  parentName           String?   @db.VarChar(255)
-  note                 String?   @db.LongText
-  studentFirstName     String?   @db.VarChar(255)
-  studentMiddleName    String?   @db.VarChar(255)
-  studentLastName      String?   @db.VarChar(255)
-  studentEmail         String?   @db.VarChar(255)
-  studentPhone         String?   @db.VarChar(255)
-  gender               String?   @db.VarChar(255)
-  admissionDate        DateTime? @db.DateTime(0)
-  address              String?   @db.VarChar(255)
-  bloodGroup           String?   @db.VarChar(255)
-  genotype             String?   @db.VarChar(255)
-  medicalNotes         String?   @db.LongText
-  previousSchool       String?   @db.VarChar(255)
-  previousClass        String?   @db.VarChar(255)
-  photoUrl             String?   @db.VarChar(255)
-  guardianFirst        String?   @db.VarChar(255)
-  guardianLast         String?   @db.VarChar(255)
-  guardianRelationship String?   @db.VarChar(255)
-  guardianEmail        String?   @db.VarChar(255)
-  guardianPhone        String?   @db.VarChar(255)
-  guardianAltPhone     String?   @db.VarChar(255)
-  guardianOccupation   String?   @db.VarChar(255)
-  studentId            String?   @db.VarChar(255)
-  submittedAt          DateTime  @default(now()) @db.DateTime(0)
-  reviewedAt           DateTime? @db.DateTime(0)
-  reviewedBy           String?   @db.VarChar(255)
-  assignedReviewerId   String?   @db.VarChar(191)
-  internalReviewNotes  String?   @db.LongText
-  followUpAt           DateTime? @db.DateTime(0)
-  decisionReason       String?   @db.LongText
-  createdAt            DateTime  @default(now()) @db.DateTime(0)
-  updatedAt            DateTime  @updatedAt @db.DateTime(0)
-  school               School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  notifications        SchoolAdminNotification[]
-  deliveryAttempts     AdmissionDeliveryAttempt[]
-  deliveryRetries      AdmissionDeliveryRetry[]
-  assignedReviewer     User?     @relation("AdmissionReviewer", fields: [assignedReviewerId], references: [id], onDelete: SetNull)
-  events               AdmissionApplicationEvent[]
+  id                         String                      @id @default(cuid()) @db.VarChar(255)
+  schoolId                   String                      @db.VarChar(255)
+  applicationNumber          String?                     @db.VarChar(255)
+  requestKey                 String?                     @db.VarChar(255)
+  publicStatusTokenHash      String?                     @unique(map: "AdmissionApplication_status_token_key") @db.VarChar(64)
+  publicStatusTokenExpiresAt DateTime?                   @db.DateTime(0)
+  status                     String                      @default("SUBMITTED") @db.VarChar(255)
+  firstName                  String                      @db.VarChar(255)
+  lastName                   String                      @db.VarChar(255)
+  email                      String?                     @db.VarChar(255)
+  phone                      String?                     @db.VarChar(255)
+  childName                  String?                     @db.VarChar(255)
+  dateOfBirth                DateTime?                   @db.DateTime(0)
+  intendedClass              String?                     @db.VarChar(255)
+  parentName                 String?                     @db.VarChar(255)
+  note                       String?                     @db.LongText
+  studentFirstName           String?                     @db.VarChar(255)
+  studentMiddleName          String?                     @db.VarChar(255)
+  studentLastName            String?                     @db.VarChar(255)
+  studentEmail               String?                     @db.VarChar(255)
+  studentPhone               String?                     @db.VarChar(255)
+  gender                     String?                     @db.VarChar(255)
+  admissionDate              DateTime?                   @db.DateTime(0)
+  address                    String?                     @db.VarChar(255)
+  bloodGroup                 String?                     @db.VarChar(255)
+  genotype                   String?                     @db.VarChar(255)
+  medicalNotes               String?                     @db.LongText
+  previousSchool             String?                     @db.VarChar(255)
+  previousClass              String?                     @db.VarChar(255)
+  photoUrl                   String?                     @db.VarChar(255)
+  guardianFirst              String?                     @db.VarChar(255)
+  guardianLast               String?                     @db.VarChar(255)
+  guardianRelationship       String?                     @db.VarChar(255)
+  guardianEmail              String?                     @db.VarChar(255)
+  guardianPhone              String?                     @db.VarChar(255)
+  guardianAltPhone           String?                     @db.VarChar(255)
+  guardianOccupation         String?                     @db.VarChar(255)
+  studentId                  String?                     @db.VarChar(255)
+  submittedAt                DateTime                    @default(now()) @db.DateTime(0)
+  reviewedAt                 DateTime?                   @db.DateTime(0)
+  reviewedBy                 String?                     @db.VarChar(255)
+  assignedReviewerId         String?                     @db.VarChar(191)
+  internalReviewNotes        String?                     @db.LongText
+  followUpAt                 DateTime?                   @db.DateTime(0)
+  decisionReason             String?                     @db.LongText
+  createdAt                  DateTime                    @default(now()) @db.DateTime(0)
+  updatedAt                  DateTime                    @updatedAt @db.DateTime(0)
+  school                     School                      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  notifications              SchoolAdminNotification[]
+  deliveryAttempts           AdmissionDeliveryAttempt[]
+  deliveryRetries            AdmissionDeliveryRetry[]
+  assignedReviewer           User?                       @relation("AdmissionReviewer", fields: [assignedReviewerId], references: [id], onDelete: SetNull)
+  events                     AdmissionApplicationEvent[]
 
+  @@unique([schoolId, applicationNumber], map: "AdmissionApplication_school_app_ref_key")
+  @@unique([schoolId, requestKey], map: "AdmissionApplication_school_request_key")
   @@index([schoolId], map: "AdmissionApplication_schoolId_fkey")
   @@index([status], map: "AdmissionApplication_status_idx")
   @@index([studentId], map: "AdmissionApplication_studentId_idx")
   @@index([schoolId, assignedReviewerId, status, createdAt], map: "AdmissionApplication_queue_idx")
-  @@unique([schoolId, applicationNumber], map: "AdmissionApplication_school_app_ref_key")
-  @@unique([schoolId, requestKey], map: "AdmissionApplication_school_request_key")
 }
 
 model AdmissionApplicationEvent {
@@ -3219,18 +3428,18 @@ model AdmissionExportAudit {
 }
 
 model SchoolAdminNotification {
-  id                    String              @id @default(cuid()) @db.VarChar(191)
-  schoolId              String              @db.VarChar(191)
-  recipientUserId       String              @db.VarChar(191)
-  admissionApplicationId String              @db.VarChar(255)
-  type                  String              @default("ADMISSION_APPLICATION") @db.VarChar(64)
-  title                 String              @db.VarChar(180)
-  body                  String              @db.VarChar(500)
-  createdAt             DateTime            @default(now())
-  readAt                DateTime?
-  school                School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  recipient             User                @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
-  admissionApplication  AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
+  id                     String               @id @default(cuid()) @db.VarChar(191)
+  schoolId               String               @db.VarChar(191)
+  recipientUserId        String               @db.VarChar(191)
+  admissionApplicationId String               @db.VarChar(255)
+  type                   String               @default("ADMISSION_APPLICATION") @db.VarChar(64)
+  title                  String               @db.VarChar(180)
+  body                   String               @db.VarChar(500)
+  createdAt              DateTime             @default(now())
+  readAt                 DateTime?
+  school                 School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  recipient              User                 @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+  admissionApplication   AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
 
   @@unique([recipientUserId, admissionApplicationId, type], map: "SchoolAdminNotification_recipient_application_type_key")
   @@index([recipientUserId, readAt, createdAt])
@@ -3273,10 +3482,10 @@ model AdmissionDeliveryRetry {
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
   admissionApplication   AdmissionApplication @relation(fields: [admissionApplicationId], references: [id], onDelete: Cascade)
+  status                 String               @default("QUEUED") @db.VarChar(24)
 
   @@index([nextAttemptAt, lockExpiresAt])
   @@index([schoolId, status])
-  status                 String               @default("QUEUED") @db.VarChar(24)
 }
 
 model AdmissionCounter {
@@ -3374,6 +3583,11 @@ enum CountrySchoolFollowUpStage {
   ONBOARDING
   BLOCKED
   OPERATIONAL
+}
+
+enum CountryAdminConversationStatus {
+  OPEN
+  RESOLVED
 }
 
 enum CountryFollowUpDigestStatus {
@@ -3598,11 +3812,6 @@ enum EmailStatus {
   CLICKED
 }
 
-enum CountryAdminConversationStatus {
-  OPEN
-  RESOLVED
-}
-
 enum TransactionType {
   INCOME
   EXPENSE
@@ -3681,17 +3890,17 @@ model EmailLog {
 }
 
 model AccountCategory {
-  id              String @id @default(cuid())
-  schoolId        String
-  school          School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  type            TransactionType
-  name            String
-  description     String?
-  isActive        Boolean @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id          String          @id @default(cuid())
+  schoolId    String
+  school      School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  type        TransactionType
+  name        String
+  description String?
+  isActive    Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
 
-  transactions    FinancialTransaction[]
+  transactions FinancialTransaction[]
 
   @@unique([schoolId, type, name])
   @@index([schoolId])
@@ -3699,20 +3908,20 @@ model AccountCategory {
 }
 
 model AccountingAccount {
-  id               String                  @id @default(cuid())
-  schoolId          String
-  school            School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  code             String
-  name             String
-  type             AccountingAccountType
-  description      String?
-  isActive         Boolean                 @default(true)
-  parentAccountId  String?
-  parentAccount    AccountingAccount?      @relation("AccountingAccountParent", fields: [parentAccountId], references: [id], onDelete: SetNull)
-  childAccounts    AccountingAccount[]     @relation("AccountingAccountParent")
-  createdAt        DateTime                @default(now())
-  updatedAt        DateTime                @updatedAt
-  journalLines     AccountingJournalLine[]
+  id                   String                  @id @default(cuid())
+  schoolId             String
+  school               School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  code                 String
+  name                 String
+  type                 AccountingAccountType
+  description          String?
+  isActive             Boolean                 @default(true)
+  parentAccountId      String?
+  parentAccount        AccountingAccount?      @relation("AccountingAccountParent", fields: [parentAccountId], references: [id], onDelete: SetNull)
+  childAccounts        AccountingAccount[]     @relation("AccountingAccountParent")
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  journalLines         AccountingJournalLine[]
   bankStatementImports BankStatementImport[]
 
   @@unique([schoolId, code])
@@ -3720,60 +3929,60 @@ model AccountingAccount {
 }
 
 model AccountingJournalEntry {
-  id              String                    @id @default(cuid())
-  schoolId        String
-  school          School                    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  reference       String
-  description     String?
-  entryDate       DateTime
-  status          AccountingJournalStatus   @default(DRAFT)
-  sourceType      String?
-  sourceId        String?
-  idempotencyKey  String?                   @db.VarChar(191)
-  createdBy       String
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  postedAt        DateTime?
-  lines           AccountingJournalLine[]
+  id             String                  @id @default(cuid())
+  schoolId       String
+  school         School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  reference      String
+  description    String?
+  entryDate      DateTime
+  status         AccountingJournalStatus @default(DRAFT)
+  sourceType     String?
+  sourceId       String?
+  idempotencyKey String?                 @db.VarChar(191)
+  createdBy      String
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  postedAt       DateTime?
+  lines          AccountingJournalLine[]
 
   @@unique([schoolId, idempotencyKey])
   @@index([schoolId, entryDate])
 }
 
 model AccountingPeriod {
-  id                    String                  @id @default(cuid())
-  schoolId              String
-  school                School                  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  name                  String
-  startDate             DateTime
-  endDate               DateTime
-  status                AccountingPeriodStatus  @default(OPEN)
-  ledgerBalanceMinor    Int                     @default(0)
-  bankStatementMinor    Int                     @default(0)
-  differenceMinor       Int                     @default(0)
-  totalDebitMinor       Int                     @default(0)
-  totalCreditMinor      Int                     @default(0)
-  isBankReconciled      Boolean                 @default(false)
-  hasOpenEntries        Boolean                 @default(false)
-  closedAt              DateTime?
-  closedBy              String?
-  createdAt             DateTime                @default(now())
-  updatedAt             DateTime                @updatedAt
+  id                 String                 @id @default(cuid())
+  schoolId           String
+  school             School                 @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name               String
+  startDate          DateTime
+  endDate            DateTime
+  status             AccountingPeriodStatus @default(OPEN)
+  ledgerBalanceMinor Int                    @default(0)
+  bankStatementMinor Int                    @default(0)
+  differenceMinor    Int                    @default(0)
+  totalDebitMinor    Int                    @default(0)
+  totalCreditMinor   Int                    @default(0)
+  isBankReconciled   Boolean                @default(false)
+  hasOpenEntries     Boolean                @default(false)
+  closedAt           DateTime?
+  closedBy           String?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
 
   @@unique([schoolId, name])
   @@index([schoolId, status])
 }
 
 model AccountingJournalLine {
-  id            String                 @id @default(cuid())
-  journalEntryId String
-  journalEntry  AccountingJournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
-  accountId     String
-  account       AccountingAccount      @relation(fields: [accountId], references: [id], onDelete: Restrict)
-  side          AccountingJournalLineSide
-  amount        Int
-  description   String?
-  createdAt     DateTime               @default(now())
+  id                   String                    @id @default(cuid())
+  journalEntryId       String
+  journalEntry         AccountingJournalEntry    @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountId            String
+  account              AccountingAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  side                 AccountingJournalLineSide
+  amount               Int
+  description          String?
+  createdAt            DateTime                  @default(now())
   bankStatementMatches BankStatementMatch[]
 
   @@index([journalEntryId])
@@ -3781,26 +3990,26 @@ model AccountingJournalLine {
 }
 
 model BankStatementImport {
-  id                String                     @id @default(cuid())
-  schoolId          String
-  school            School                     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  id                  String                             @id @default(cuid())
+  schoolId            String
+  school              School                             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   accountingAccountId String
-  accountingAccount AccountingAccount          @relation(fields: [accountingAccountId], references: [id], onDelete: Restrict)
-  periodStart       DateTime
-  periodEnd         DateTime
+  accountingAccount   AccountingAccount                  @relation(fields: [accountingAccountId], references: [id], onDelete: Restrict)
+  periodStart         DateTime
+  periodEnd           DateTime
   openingBalanceMinor Int
   closingBalanceMinor Int
-  fileName          String
-  checksum          String                     @db.Char(64)
-  status            BankStatementImportStatus  @default(IMPORTED)
-  importedBy        String
-  importedAt        DateTime                   @default(now())
-  reconciledBy      String?
-  reconciledAt      DateTime?
-  preparedBy        String?
-  preparedAt        DateTime?
-  lines             BankStatementLine[]
-  events            BankStatementReconciliationEvent[]
+  fileName            String
+  checksum            String                             @db.Char(64)
+  status              BankStatementImportStatus          @default(IMPORTED)
+  importedBy          String
+  importedAt          DateTime                           @default(now())
+  reconciledBy        String?
+  reconciledAt        DateTime?
+  preparedBy          String?
+  preparedAt          DateTime?
+  lines               BankStatementLine[]
+  events              BankStatementReconciliationEvent[]
 
   @@index([schoolId, accountingAccountId, checksum])
   @@index([schoolId, periodStart, periodEnd])
@@ -3808,83 +4017,83 @@ model BankStatementImport {
 }
 
 model BankStatementReconciliationEvent {
-  id        String                           @id @default(cuid())
-  schoolId  String
-  school    School                           @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  importId  String
-  statementImport BankStatementImport        @relation(fields: [importId], references: [id], onDelete: Cascade)
-  actorId   String
-  action    BankStatementReconciliationAction
-  reason    String?                          @db.LongText
-  metadata  String?                          @db.LongText
-  createdAt DateTime                         @default(now())
+  id              String                            @id @default(cuid())
+  schoolId        String
+  school          School                            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  importId        String
+  statementImport BankStatementImport               @relation(fields: [importId], references: [id], onDelete: Cascade)
+  actorId         String
+  action          BankStatementReconciliationAction
+  reason          String?                           @db.LongText
+  metadata        String?                           @db.LongText
+  createdAt       DateTime                          @default(now())
 
   @@index([schoolId, importId, createdAt])
   @@index([actorId, createdAt])
 }
 
 model BankStatementLine {
-  id                    String                 @id @default(cuid())
-  importId              String
-  statementImport       BankStatementImport    @relation(fields: [importId], references: [id], onDelete: Cascade)
-  transactionDate       DateTime
-  description           String
-  reference             String?
-  direction             BankStatementDirection
-  amountMinor           Int
-  createdAt             DateTime               @default(now())
-  matches               BankStatementMatch[]
+  id              String                 @id @default(cuid())
+  importId        String
+  statementImport BankStatementImport    @relation(fields: [importId], references: [id], onDelete: Cascade)
+  transactionDate DateTime
+  description     String
+  reference       String?
+  direction       BankStatementDirection
+  amountMinor     Int
+  createdAt       DateTime               @default(now())
+  matches         BankStatementMatch[]
 
   @@index([importId, transactionDate])
 }
 
 model BankStatementMatch {
-  id               String              @id @default(cuid())
-  statementLineId  String
-  statementLine    BankStatementLine   @relation(fields: [statementLineId], references: [id], onDelete: Cascade)
-  journalLineId    String
-  journalLine      AccountingJournalLine @relation(fields: [journalLineId], references: [id], onDelete: Restrict)
-  amountMinor      Int
-  matchedBy        String
-  matchedAt        DateTime            @default(now())
+  id              String                @id @default(cuid())
+  statementLineId String
+  statementLine   BankStatementLine     @relation(fields: [statementLineId], references: [id], onDelete: Cascade)
+  journalLineId   String
+  journalLine     AccountingJournalLine @relation(fields: [journalLineId], references: [id], onDelete: Restrict)
+  amountMinor     Int
+  matchedBy       String
+  matchedAt       DateTime              @default(now())
 
   @@unique([statementLineId, journalLineId])
   @@index([journalLineId])
 }
 
 model FinancialTransaction {
-  id                String            @id @default(cuid())
-  schoolId          String
-  school            School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  categoryId        String
-  category          AccountCategory   @relation(fields: [categoryId], references: [id])
-  type              TransactionType
-  amount            Int
-  currency          String            @default("NGN")
-  paymentMethod     PaymentMethod?
-  description       String?
-  referenceNumber   String?
-  invoiceId         String?
-  invoice           Invoice?          @relation("InvoiceAccountingTransactions", fields: [invoiceId], references: [id])
-  invoiceItemId     String?
-  invoiceItem       InvoiceItem?      @relation("InvoiceItemAccountingTransactions", fields: [invoiceItemId], references: [id])
-  paymentId         String?           @unique
-  payment           Payment?          @relation("PaymentAccountingTransactions", fields: [paymentId], references: [id])
-  transactionDate   DateTime
-  status            TransactionStatus @default(DRAFT)
-  createdBy         String
-  createdByUser     User              @relation("FinancialTransactionCreatedBy", fields: [createdBy], references: [id])
-  postedAt          DateTime?
-  postedBy          String?
-  postedByUser      User?             @relation("FinancialTransactionPostedBy", fields: [postedBy], references: [id])
-  reversalDate      DateTime?
-  reversalReason    String?
-  reversedBy        String?
-  reversedByUser    User?             @relation("FinancialTransactionReversedBy", fields: [reversedBy], references: [id])
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  id              String            @id @default(cuid())
+  schoolId        String
+  school          School            @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  categoryId      String
+  category        AccountCategory   @relation(fields: [categoryId], references: [id])
+  type            TransactionType
+  amount          Int
+  currency        String            @default("NGN")
+  paymentMethod   PaymentMethod?
+  description     String?
+  referenceNumber String?
+  invoiceId       String?
+  invoice         Invoice?          @relation("InvoiceAccountingTransactions", fields: [invoiceId], references: [id])
+  invoiceItemId   String?
+  invoiceItem     InvoiceItem?      @relation("InvoiceItemAccountingTransactions", fields: [invoiceItemId], references: [id])
+  paymentId       String?           @unique
+  payment         Payment?          @relation("PaymentAccountingTransactions", fields: [paymentId], references: [id])
+  transactionDate DateTime
+  status          TransactionStatus @default(DRAFT)
+  createdBy       String
+  createdByUser   User              @relation("FinancialTransactionCreatedBy", fields: [createdBy], references: [id])
+  postedAt        DateTime?
+  postedBy        String?
+  postedByUser    User?             @relation("FinancialTransactionPostedBy", fields: [postedBy], references: [id])
+  reversalDate    DateTime?
+  reversalReason  String?
+  reversedBy      String?
+  reversedByUser  User?             @relation("FinancialTransactionReversedBy", fields: [reversedBy], references: [id])
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 
-  auditLogs         FinancialAuditLog[]
+  auditLogs FinancialAuditLog[]
 
   @@index([schoolId])
   @@index([categoryId])
@@ -3896,17 +4105,17 @@ model FinancialTransaction {
 }
 
 model FinancialAuditLog {
-  id                  String @id @default(cuid())
-  schoolId            String
-  school              School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  transactionId       String
-  transaction         FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
-  action              String
-  previousValues      String? @db.LongText
-  newValues           String? @db.LongText
-  changedBy           String
-  changedByUser       User   @relation(fields: [changedBy], references: [id])
-  createdAt           DateTime @default(now())
+  id             String               @id @default(cuid())
+  schoolId       String
+  school         School               @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  transactionId  String
+  transaction    FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  action         String
+  previousValues String?              @db.LongText
+  newValues      String?              @db.LongText
+  changedBy      String
+  changedByUser  User                 @relation(fields: [changedBy], references: [id])
+  createdAt      DateTime             @default(now())
 
   @@index([schoolId])
   @@index([transactionId])

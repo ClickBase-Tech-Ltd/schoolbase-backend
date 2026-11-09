@@ -33,7 +33,7 @@ router.get('/school', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const school = await database.school.findUnique({
       where: { id: user.schoolId },
-      select: { id: true, name: true, city: true, country: true, logoUrl: true, primaryColor: true },
+      select: { id: true, name: true, city: true, country: true, timezone: true, logoUrl: true, primaryColor: true },
     });
     if (!school) return res.status(404).json({ error: 'School not found.' });
     return res.json({ school });

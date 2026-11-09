@@ -8,6 +8,14 @@ import { getSessionSecret } from '../services/security-config.js';
 import { verifyAuth, requireParent, type AuthenticatedRequest } from '../middleware/roleAuth.js';
 import { resolveCompetitionFeature } from '../services/competition-feature-gate.js';
 import { sumOutstandingInvoiceBalance } from '../services/invoice-balance.js';
+import {
+  createFinancingApplication,
+  isFinancingInterestAcknowledgementList,
+  FINANCING_INTEREST_NOTICE_VERSION,
+  FinancingFeatureDisabledError,
+  InvalidFinancingApplicationScopeError,
+} from '../services/financing-applications.js';
+import { isTuitionFinancingEnabled } from '../services/tuition-financing-feature-gate.js';
 
 const router = Router();
 const prisma = new PrismaClient() as PrismaClient & {
@@ -1422,6 +1430,272 @@ router.get('/competition/achievements', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[parent] Competition achievements failed', error);
     res.status(500).json({ error: 'COMPETITION_ACHIEVEMENTS_FAILED' });
+  }
+});
+
+router.get('/financing/overview', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const session = req.user as (AuthenticatedRequest['user'] & { guardianId?: string }) | undefined;
+    if (!session?.schoolId || !session.guardianId) return res.status(401).json({ error: 'Parent session is invalid.' });
+    if (!(await isTuitionFinancingEnabled(prisma))) {
+      res.set('Cache-Control', 'private, no-store');
+      return res.json({
+        enabled: false,
+        available: false,
+        interestNoticeVersion: FINANCING_INTEREST_NOTICE_VERSION,
+        schoolParticipating: false,
+        invoices: [],
+        products: [],
+      });
+    }
+
+    const family = await resolveParentFamily(session);
+    const guardianIds = family.guardians.map((guardian: { id: string }) => guardian.id);
+    if (family.schoolId !== session.schoolId || guardianIds.length === 0) {
+      return res.status(401).json({ error: 'Parent session is invalid.' });
+    }
+
+    const school = await prisma.school.findUnique({
+      where: { id: session.schoolId },
+      select: { tuitionFinancingParticipationEnabled: true, currency: true },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found.' });
+
+    const [invoices, products] = await Promise.all([
+      prisma.invoice.findMany({
+        where: {
+          schoolId: session.schoolId,
+          pupilId: { in: family.pupilIds },
+          status: { in: ['SENT', 'PART_PAID', 'OVERDUE'] },
+          voidedAt: null,
+        },
+        orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
+        select: {
+          id: true,
+          invoiceNo: true,
+          amountDue: true,
+          amountPaid: true,
+          status: true,
+          dueDate: true,
+          pupil: { select: { firstName: true, lastName: true } },
+          financingApplications: {
+            where: { guardianId: { in: guardianIds } },
+            orderBy: { createdAt: 'desc' },
+            take: 10,
+            select: {
+              id: true,
+              status: true,
+              createdAt: true,
+              product: { select: { displayName: true } },
+              institution: { select: { isDemo: true } },
+              events: {
+                where: {
+                  OR: [
+                    { toStatus: { not: null } },
+                    { eventType: 'DEMO_FUNDING_SIMULATED' },
+                  ],
+                },
+                orderBy: { createdAt: 'asc' },
+                select: { eventType: true, toStatus: true, createdAt: true },
+              },
+              settlementPayments: {
+                orderBy: { recordedAt: 'asc' },
+                select: {
+                  recordedAt: true,
+                  payment: { select: { amount: true, paidAt: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      school.tuitionFinancingParticipationEnabled
+        ? prisma.financingProduct.findMany({
+        where: {
+          status: 'ACTIVE',
+          applicationMode: { not: 'API' },
+          currency: school.currency,
+          effectiveAt: { lte: new Date() },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          institution: {
+            status: 'ACTIVE',
+            ...(process.env.NODE_ENV === 'production' ? { isDemo: false } : {}),
+          },
+          schools: { some: { schoolId: session.schoolId } },
+        },
+        orderBy: [{ institution: { displayName: 'asc' } }, { displayName: 'asc' }],
+        select: {
+          id: true,
+          displayName: true,
+          summary: true,
+          eligibilitySummary: true,
+          termsSummary: true,
+          termsUrl: true,
+          termsVersion: true,
+          currency: true,
+          applicationMode: true,
+          applicationUrl: true,
+          effectiveAt: true,
+          expiresAt: true,
+          institution: { select: { displayName: true, isDemo: true, integrationMode: true } },
+        },
+        })
+        : Promise.resolve([]),
+    ]);
+
+    const outstandingInvoices = invoices
+      .map((invoice) => ({
+        id: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        pupilName: `${invoice.pupil.firstName} ${invoice.pupil.lastName}`,
+        amountDue: invoice.amountDue,
+        amountPaid: invoice.amountPaid,
+        outstanding: Math.max(0, invoice.amountDue - invoice.amountPaid),
+        status: invoice.status,
+        dueDate: invoice.dueDate,
+        applications: invoice.financingApplications.map((application) => ({
+          id: application.id,
+          status: application.status === 'DRAFT' ? 'REQUEST_RECORDED' : 'UPDATE_AVAILABLE',
+          createdAt: application.createdAt,
+          productName: application.product?.displayName ?? null,
+          isDemo: application.institution?.isDemo ?? false,
+          currentStatus: application.status,
+          statusHistory: application.events.filter((event) => event.toStatus !== null).map((event) => ({
+            status: event.toStatus,
+            createdAt: event.createdAt,
+          })),
+          demoFundingSimulated: application.events.some((event) => event.eventType === 'DEMO_FUNDING_SIMULATED'),
+          settledPayments: application.settlementPayments.map((link) => ({
+            amount: link.payment.amount,
+            paidAt: link.payment.paidAt,
+            recordedAt: link.recordedAt,
+          })),
+        })),
+      }))
+      .filter((invoice) => invoice.outstanding > 0);
+
+    res.set('Cache-Control', 'private, no-store');
+    res.json({
+      enabled: true,
+      available: school.tuitionFinancingParticipationEnabled &&
+        outstandingInvoices.length > 0,
+      interestNoticeVersion: FINANCING_INTEREST_NOTICE_VERSION,
+      schoolParticipating: school.tuitionFinancingParticipationEnabled,
+      invoices: outstandingInvoices,
+      products,
+    });
+  } catch (error) {
+    console.error('[parent] Failed to load financing overview:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'P2021' || code === 'P2022') {
+      return res.status(503).json({ error: 'Financing is temporarily unavailable.' });
+    }
+    res.status(500).json({ error: 'Failed to load financing overview.' });
+  }
+});
+
+router.post('/financing/invoices/:id/interest', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const session = req.user as (AuthenticatedRequest['user'] & { guardianId?: string }) | undefined;
+    const noticeVersion = req.body?.noticeVersion;
+    const acknowledgedItems = req.body?.acknowledgedItems;
+    const productId = typeof req.body?.productId === 'string' ? req.body.productId.trim() : undefined;
+    if (!session?.schoolId || !session.guardianId) return res.status(401).json({ error: 'Parent session is invalid.' });
+    if (noticeVersion !== FINANCING_INTEREST_NOTICE_VERSION ||
+        !isFinancingInterestAcknowledgementList(acknowledgedItems) ||
+        (req.body?.productId !== undefined && (!productId || productId.length > 191))) {
+      return res.status(400).json({ error: 'Please review and acknowledge the current interest notice.' });
+    }
+
+    const family = await resolveParentFamily(session);
+    const guardianIds = family.guardians.map((guardian: { id: string }) => guardian.id);
+    if (family.schoolId !== session.schoolId || guardianIds.length === 0) {
+      return res.status(401).json({ error: 'Parent session is invalid.' });
+    }
+
+    const invoice = await prisma.invoice.findFirst({
+      where: {
+        id: req.params.id,
+        schoolId: session.schoolId,
+        pupilId: { in: family.pupilIds },
+        voidedAt: null,
+      },
+      select: { id: true, pupilId: true },
+    });
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found.' });
+
+    const guardianLink = await prisma.guardianPupil.findFirst({
+      where: {
+        pupilId: invoice.pupilId,
+        guardianId: { in: guardianIds },
+        guardian: { schoolId: session.schoolId },
+      },
+      orderBy: { guardianId: 'asc' },
+      select: { guardianId: true },
+    });
+    if (!guardianLink) return res.status(404).json({ error: 'Invoice not found.' });
+
+    await createFinancingApplication(prisma, {
+      schoolId: session.schoolId,
+      pupilId: invoice.pupilId,
+      guardianId: guardianLink.guardianId,
+      invoiceId: invoice.id,
+      ...(productId ? { productId } : {}),
+      interestNoticeVersion: noticeVersion,
+      acknowledgedItems,
+    });
+    const selectedProduct = productId
+      ? await prisma.financingProduct.findFirst({
+        where: {
+          id: productId,
+          status: 'ACTIVE',
+          applicationMode: { not: 'API' },
+          effectiveAt: { lte: new Date() },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          institution: {
+            status: 'ACTIVE',
+            ...(process.env.NODE_ENV === 'production' ? { isDemo: false } : {}),
+          },
+          schools: { some: { schoolId: session.schoolId } },
+        },
+        select: {
+          displayName: true,
+          applicationMode: true,
+          applicationUrl: true,
+          institution: { select: { displayName: true, isDemo: true, integrationMode: true } },
+        },
+      })
+      : null;
+    res.set('Cache-Control', 'private, no-store');
+    res.status(201).json({
+      status: 'REQUEST_RECORDED',
+      ...(selectedProduct ? {
+        partner: {
+          productName: selectedProduct.displayName,
+          institutionName: selectedProduct.institution.displayName,
+          applicationMode: selectedProduct.applicationMode,
+          isDemo: selectedProduct.institution.isDemo,
+          manualWorkflow: selectedProduct.institution.integrationMode === 'MANUAL' &&
+            selectedProduct.applicationMode === 'SCHOOL_CONTACT',
+          applicationUrl: selectedProduct.applicationMode === 'HOSTED'
+            ? selectedProduct.applicationUrl
+            : null,
+        },
+      } : {}),
+    });
+  } catch (error) {
+    if (error instanceof FinancingFeatureDisabledError) {
+      return res.status(404).json({ error: 'Tuition financing is not available.' });
+    }
+    if (error instanceof InvalidFinancingApplicationScopeError) {
+      return res.status(404).json({ error: 'This request is not available for the selected invoice right now.' });
+    }
+    console.error('[parent] Failed to record financing interest:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'P2021' || code === 'P2022') {
+      return res.status(503).json({ error: 'Financing is temporarily unavailable.' });
+    }
+    res.status(500).json({ error: 'Failed to record financing interest.' });
   }
 });
 

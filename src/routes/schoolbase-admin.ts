@@ -20,6 +20,14 @@ import {
   type BillingMarketCode,
 } from '../services/billing-markets.js';
 import { normalizeCompetitionFeatures } from '../services/competition-feature-gate.js';
+import { isTuitionFinancingEnabled } from '../services/tuition-financing-feature-gate.js';
+import {
+  canApproveFinancingProduct,
+  getFinancingProductActivationBlockers,
+  getFinancingProductApprovalBlockers,
+  InvalidFinancingProductInputError,
+  parseFinancingProductInput,
+} from '../services/financing-products.js';
 import { sendWelcomeEmail, sendInternalSignupNotification } from '../services/email.js';
 import { sendAdvertiserStatusEmail } from '../services/email.js';
 import { normalizePlacementIds } from './ads-utils.js';
@@ -980,6 +988,12 @@ router.get('/subscription-payments', async (req: Request, res: Response) => {
             currency: true,
             plan: true,
             status: true,
+            users: {
+              where: { role: 'SCHOOL_ADMIN', isActive: true },
+              orderBy: { createdAt: 'asc' },
+              take: 1,
+              select: { email: true },
+            },
           },
         })
       : [];
@@ -1755,6 +1769,10 @@ router.patch('/settings', async (req: Request, res: Response) => {
       normalizedSettings.competitionFeatures = normalizeCompetitionFeatures(featureSettings);
     }
 
+    if ('tuitionFinancingEnabled' in input && typeof input.tuitionFinancingEnabled !== 'boolean') {
+      return res.status(400).json({ message: 'tuitionFinancingEnabled must be a boolean.' });
+    }
+
     const entries = Object.entries(normalizedSettings);
     await prisma.$transaction(
       entries.map(([key, value]) =>
@@ -1773,13 +1791,471 @@ router.patch('/settings', async (req: Request, res: Response) => {
         details: `Updated settings: ${entries.map(([key]) => key).join(', ')}`,
       },
     });
-
-    res.json({ success: true, settings: normalizedSettings });
+    return res.json({ success: true, settings: normalizedSettings });
   } catch (error) {
     console.error('Error updating platform settings:', error);
-    res.status(500).json({ message: (error as Error).message || 'Failed to update settings' });
+    return res.status(500).json({ message: (error as Error).message || 'Failed to update settings' });
   }
 });
+
+    router.get('/financing', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+
+      try {
+        const [enabled, institutions, eventCounts, exceptionEvents, products] = await Promise.all([
+          isTuitionFinancingEnabled(prisma),
+          prisma.financingInstitution.findMany({
+            orderBy: { displayName: 'asc' },
+            select: {
+              id: true,
+              code: true,
+              displayName: true,
+              integrationMode: true,
+              isDemo: true,
+              status: true,
+              createdAt: true,
+              updatedAt: true,
+              _count: { select: { applications: true, providerEvents: true } },
+            },
+          }),
+          prisma.financingProviderEvent.groupBy({
+            by: ['status'],
+            _count: { _all: true },
+          }),
+          prisma.financingProviderEvent.findMany({
+            where: { status: { in: ['REVIEW_REQUIRED', 'FAILED'] } },
+            orderBy: { receivedAt: 'desc' },
+            take: 30,
+            select: {
+              id: true,
+              externalEventId: true,
+              eventType: true,
+              applicationReference: true,
+              status: true,
+              attempts: true,
+              lastErrorCode: true,
+              receivedAt: true,
+              institution: { select: { displayName: true, code: true } },
+            },
+          }),
+          prisma.financingProduct.findMany({
+            orderBy: [{ institution: { displayName: 'asc' } }, { displayName: 'asc' }],
+            select: {
+              id: true,
+              institutionId: true,
+              code: true,
+              displayName: true,
+              summary: true,
+              eligibilitySummary: true,
+              termsSummary: true,
+              termsUrl: true,
+              termsVersion: true,
+              currency: true,
+              applicationMode: true,
+              applicationUrl: true,
+              approvalEvidenceReference: true,
+              createdBy: true,
+              effectiveAt: true,
+              expiresAt: true,
+              status: true,
+              approvedAt: true,
+              approvedBy: true,
+              institution: { select: { displayName: true, status: true, integrationMode: true, isDemo: true } },
+              _count: { select: { applications: true, schools: true } },
+            },
+          }),
+        ]);
+
+        return res.json({
+          enabled,
+          institutions,
+          products,
+          eventCounts: Object.fromEntries(eventCounts.map(({ status, _count }) => [status, _count._all])),
+          exceptionEvents,
+        });
+      } catch (error) {
+        console.error('[platform financing] failed to load operations data:', error);
+        if ((error as { code?: string })?.code === 'P2021') {
+          return res.status(503).json({
+            code: 'FINANCING_SCHEMA_NOT_INSTALLED',
+            message: 'Tuition financing operations are unavailable until the reviewed financing migration is installed.',
+          });
+        }
+        return res.status(500).json({ message: 'Failed to load tuition financing operations.' });
+      }
+    });
+
+    router.post('/financing/institutions', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+
+      const code = typeof req.body?.code === 'string' ? req.body.code.trim().toUpperCase() : '';
+      const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+      const integrationMode = req.body?.integrationMode;
+      if (!/^[A-Z0-9][A-Z0-9_-]{1,63}$/.test(code)) {
+        return res.status(400).json({ message: 'Institution code must be 2–64 letters, digits, underscores, or hyphens.' });
+      }
+      if (!displayName || displayName.length > 191) {
+        return res.status(400).json({ message: 'Institution name is required and must be 191 characters or fewer.' });
+      }
+      if (!['HOSTED', 'API', 'MANUAL'].includes(integrationMode)) {
+        return res.status(400).json({ message: 'Integration mode must be HOSTED, API, or MANUAL.' });
+      }
+
+      try {
+        const institution = await prisma.$transaction(async (transaction) => {
+          const created = await transaction.financingInstitution.create({
+            data: {
+              code,
+              displayName,
+              integrationMode,
+              status: 'SUSPENDED',
+            },
+            select: { id: true, code: true, displayName: true, integrationMode: true, status: true },
+          });
+          await transaction.platformAuditLog.create({
+            data: {
+              userId: session,
+              event: 'TUITION_FINANCING_INSTITUTION_CREATED',
+              details: JSON.stringify({
+                institutionId: created.id,
+                code: created.code,
+                integrationMode: created.integrationMode,
+                initialStatus: 'SUSPENDED',
+              }),
+            },
+          });
+          return created;
+        });
+        return res.status(201).json({ institution });
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'P2002') {
+          return res.status(409).json({ message: 'An institution with that code already exists.' });
+        }
+        console.error('[platform financing] failed to create institution:', error);
+        if ((error as { code?: string })?.code === 'P2021') {
+          return res.status(503).json({
+            code: 'FINANCING_SCHEMA_NOT_INSTALLED',
+            message: 'Institution management requires the reviewed financing migration.',
+          });
+        }
+        return res.status(500).json({ message: 'Failed to create financing institution.' });
+      }
+    });
+
+    router.patch('/financing/institutions/:institutionId/status', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+
+      const institutionId = req.params.institutionId.trim();
+      const status = req.body?.status;
+      if (!institutionId) return res.status(400).json({ message: 'Institution ID is required.' });
+      if (status !== 'ACTIVE' && status !== 'SUSPENDED') {
+        return res.status(400).json({ message: 'Institution status must be ACTIVE or SUSPENDED.' });
+      }
+
+      try {
+        const updated = await prisma.$transaction(async (transaction) => {
+          const current = await transaction.financingInstitution.findUnique({
+            where: { id: institutionId },
+            select: { id: true, code: true, displayName: true, status: true },
+          });
+          if (!current) return null;
+          if (current.status === status) return { ...current, unchanged: true };
+
+          const result = await transaction.financingInstitution.updateMany({
+            where: { id: institutionId, status: current.status },
+            data: { status },
+          });
+          if (result.count !== 1) throw new Error('Institution status changed concurrently; reload and try again.');
+          const suspendedProducts = status === 'SUSPENDED'
+            ? await transaction.financingProduct.updateMany({
+              where: { institutionId, status: 'ACTIVE' },
+              data: { status: 'SUSPENDED' },
+            })
+            : { count: 0 };
+
+          await transaction.platformAuditLog.create({
+            data: {
+              userId: session,
+              event: status === 'ACTIVE'
+                ? 'TUITION_FINANCING_INSTITUTION_ACTIVATED'
+                : 'TUITION_FINANCING_INSTITUTION_SUSPENDED',
+              details: JSON.stringify({
+                institutionId: current.id,
+                code: current.code,
+                fromStatus: current.status,
+                toStatus: status,
+                productsSuspended: suspendedProducts.count,
+              }),
+            },
+          });
+          return { ...current, status, unchanged: false };
+        });
+
+        if (!updated) return res.status(404).json({ message: 'Financing institution not found.' });
+        return res.json({ institution: updated });
+      } catch (error) {
+        console.error('[platform financing] failed to update institution status:', error);
+        if ((error as { code?: string })?.code === 'P2021') {
+          return res.status(503).json({
+            code: 'FINANCING_SCHEMA_NOT_INSTALLED',
+            message: 'Institution management requires the reviewed financing migration.',
+          });
+        }
+        if (error instanceof Error && error.message.includes('changed concurrently')) {
+          return res.status(409).json({ message: 'Institution status changed concurrently. Reload and try again.' });
+        }
+        return res.status(500).json({ message: 'Failed to update financing institution status.' });
+      }
+    });
+
+    router.post('/financing/products', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+
+      try {
+        const input = parseFinancingProductInput(req.body);
+        const institution = await prisma.financingInstitution.findUnique({
+          where: { id: input.institutionId },
+          select: { id: true },
+        });
+        if (!institution) return res.status(404).json({ message: 'Financing institution not found.' });
+
+        const product = await prisma.$transaction(async (transaction) => {
+          const created = await transaction.financingProduct.create({
+            data: { ...input, createdBy: session },
+            select: { id: true, code: true, displayName: true, status: true },
+          });
+          await transaction.platformAuditLog.create({
+            data: {
+              userId: session,
+              event: 'TUITION_FINANCING_PRODUCT_CREATED',
+              details: JSON.stringify({ productId: created.id, institutionId: input.institutionId, code: input.code }),
+            },
+          });
+          return created;
+        });
+        return res.status(201).json({ product });
+      } catch (error) {
+        if (error instanceof InvalidFinancingProductInputError) {
+          return res.status(400).json({ message: error.message });
+        }
+        if ((error as { code?: string })?.code === 'P2002') {
+          return res.status(409).json({ message: 'That product code already exists for this institution.' });
+        }
+        console.error('[platform financing] failed to create product:', error);
+        if (['P2021', 'P2022'].includes((error as { code?: string })?.code ?? '')) {
+          return res.status(503).json({ code: 'FINANCING_SCHEMA_NOT_INSTALLED', message: 'Product catalogue migration is not installed.' });
+        }
+        return res.status(500).json({ message: 'Failed to create financing product.' });
+      }
+    });
+
+    router.patch('/financing/products/:productId', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+
+      try {
+        const input = parseFinancingProductInput(req.body);
+        const current = await prisma.financingProduct.findUnique({
+          where: { id: req.params.productId },
+          select: { id: true, status: true },
+        });
+        if (!current) return res.status(404).json({ message: 'Financing product not found.' });
+        if (!['DRAFT', 'SUSPENDED'].includes(current.status)) {
+          return res.status(409).json({ message: 'Suspend the product before editing it.' });
+        }
+        const institution = await prisma.financingInstitution.findUnique({
+          where: { id: input.institutionId },
+          select: { id: true },
+        });
+        if (!institution) return res.status(404).json({ message: 'Financing institution not found.' });
+
+        const product = await prisma.$transaction(async (transaction) => {
+          const result = await transaction.financingProduct.updateMany({
+            where: { id: current.id, status: current.status },
+            data: {
+              ...input,
+              status: 'DRAFT',
+              approvedAt: null,
+              approvedBy: null,
+              approvalEvidenceReference: null,
+              createdBy: session,
+            },
+          });
+          if (result.count !== 1) throw new Error('Product changed concurrently; reload and try again.');
+          const updated = await transaction.financingProduct.findUniqueOrThrow({
+            where: { id: current.id },
+            select: { id: true, code: true, displayName: true, status: true },
+          });
+          await transaction.platformAuditLog.create({
+            data: {
+              userId: session,
+              event: 'TUITION_FINANCING_PRODUCT_UPDATED',
+              details: JSON.stringify({ productId: updated.id, institutionId: input.institutionId, statusReset: 'DRAFT' }),
+            },
+          });
+          return updated;
+        });
+        return res.json({ product });
+      } catch (error) {
+        if (error instanceof InvalidFinancingProductInputError) {
+          return res.status(400).json({ message: error.message });
+        }
+        if ((error as { code?: string })?.code === 'P2002') {
+          return res.status(409).json({ message: 'That product code already exists for this institution.' });
+        }
+        if (error instanceof Error && error.message.includes('changed concurrently')) {
+          return res.status(409).json({ message: 'Product changed concurrently. Reload and try again.' });
+        }
+        console.error('[platform financing] failed to update product:', error);
+        return res.status(500).json({ message: 'Failed to update financing product.' });
+      }
+    });
+
+    router.post('/financing/products/:productId/approve', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+
+      const approvalEvidenceReference = typeof req.body?.approvalEvidenceReference === 'string'
+        ? req.body.approvalEvidenceReference.trim()
+        : '';
+      if (req.body?.approvalConfirmed !== true || !approvalEvidenceReference || approvalEvidenceReference.length > 191) {
+        return res.status(400).json({ message: 'Confirm the bank approval and provide its reference.' });
+      }
+
+      try {
+        const current = await prisma.financingProduct.findUnique({
+          where: { id: req.params.productId },
+          select: { id: true, institutionId: true, status: true, createdBy: true },
+        });
+        if (!current) return res.status(404).json({ message: 'Financing product not found.' });
+        if (current.status !== 'DRAFT' && current.status !== 'SUSPENDED') {
+          return res.status(409).json({ message: 'Only draft or suspended products can be approved.' });
+        }
+        if (!canApproveFinancingProduct(current.createdBy, session)) {
+          return res.status(409).json({ message: 'A Platform Admin must approve this product.' });
+        }
+        const productData = await prisma.financingProduct.findUnique({ where: { id: current.id } });
+        if (!productData) return res.status(404).json({ message: 'Financing product not found.' });
+        let parsedProduct: ReturnType<typeof parseFinancingProductInput>;
+        try {
+          parsedProduct = parseFinancingProductInput(productData);
+        } catch (error) {
+          if (error instanceof InvalidFinancingProductInputError) {
+            return res.status(400).json({ message: error.message });
+          }
+          throw error;
+        }
+        const approvalBlockers = getFinancingProductApprovalBlockers(
+          parsedProduct,
+          approvalEvidenceReference,
+        );
+        if (approvalBlockers.length > 0) {
+          return res.status(409).json({ message: approvalBlockers.join(' ') });
+        }
+        const product = await prisma.$transaction(async (transaction) => {
+          const result = await transaction.financingProduct.updateMany({
+            where: { id: current.id, status: current.status, updatedAt: productData.updatedAt },
+            data: {
+              status: 'APPROVED',
+              approvedAt: new Date(),
+              approvedBy: session,
+              approvalEvidenceReference,
+            },
+          });
+          if (result.count !== 1) throw new Error('Product changed concurrently; reload and try again.');
+          const updated = await transaction.financingProduct.findUniqueOrThrow({
+            where: { id: current.id },
+            select: { id: true, code: true, displayName: true, status: true, approvedAt: true },
+          });
+          await transaction.platformAuditLog.create({
+            data: {
+              userId: session,
+              event: 'TUITION_FINANCING_PRODUCT_APPROVED',
+              details: JSON.stringify({
+                productId: updated.id,
+                institutionId: current.institutionId,
+                approvalEvidenceReference,
+              }),
+            },
+          });
+          return updated;
+        });
+        return res.json({ product });
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('changed concurrently')) {
+          return res.status(409).json({ message: 'Product changed concurrently. Reload and try again.' });
+        }
+        console.error('[platform financing] failed to approve product:', error);
+        return res.status(500).json({ message: 'Failed to approve financing product.' });
+      }
+    });
+
+    router.patch('/financing/products/:productId/status', async (req: Request, res: Response) => {
+      const session = await requirePlatformAdminSession(req, res);
+      if (!session) return;
+      const status = req.body?.status;
+      if (status !== 'ACTIVE' && status !== 'SUSPENDED') {
+        return res.status(400).json({ message: 'Product status must be ACTIVE or SUSPENDED.' });
+      }
+
+      try {
+        const current = await prisma.financingProduct.findUnique({
+          where: { id: req.params.productId },
+          include: { institution: { select: { status: true, integrationMode: true } } },
+        });
+        if (!current) return res.status(404).json({ message: 'Financing product not found.' });
+        if (status === 'ACTIVE') {
+          if (current.status !== 'APPROVED') {
+            return res.status(409).json({ message: 'Approve the product before activating it.' });
+          }
+          if (current.institution.status !== 'ACTIVE') {
+            return res.status(409).json({ message: 'Activate the approved institution before its products.' });
+          }
+          const blockers = getFinancingProductActivationBlockers(
+            parseFinancingProductInput(current),
+            current.institution.integrationMode,
+            current.approvalEvidenceReference,
+          );
+          if (blockers.length > 0) return res.status(409).json({ message: blockers.join(' ') });
+        } else if (current.status !== 'ACTIVE' && current.status !== 'APPROVED') {
+          return res.status(409).json({ message: 'Only active or approved products can be suspended.' });
+        }
+
+        const product = await prisma.$transaction(async (transaction) => {
+          const result = await transaction.financingProduct.updateMany({
+            where: { id: current.id, status: current.status },
+            data: { status },
+          });
+          if (result.count !== 1) throw new Error('Product changed concurrently; reload and try again.');
+          const updated = await transaction.financingProduct.findUniqueOrThrow({
+            where: { id: current.id },
+            select: { id: true, code: true, displayName: true, status: true },
+          });
+          await transaction.platformAuditLog.create({
+            data: {
+              userId: session,
+              event: status === 'ACTIVE' ? 'TUITION_FINANCING_PRODUCT_ACTIVATED' : 'TUITION_FINANCING_PRODUCT_SUSPENDED',
+              details: JSON.stringify({ productId: updated.id, institutionId: current.institutionId, status }),
+            },
+          });
+          return updated;
+        });
+        return res.json({ product });
+      } catch (error) {
+        if (error instanceof InvalidFinancingProductInputError) {
+          return res.status(400).json({ message: error.message });
+        }
+        if (error instanceof Error && error.message.includes('changed concurrently')) {
+          return res.status(409).json({ message: 'Product status changed concurrently. Reload and try again.' });
+        }
+        console.error('[platform financing] failed to change product status:', error);
+        return res.status(500).json({ message: 'Failed to update financing product status.' });
+      }
+    });
 
 // GET /schoolbase-admin/api/audit-logs - Get recent platform activity
 router.get('/audit-logs', async (req: Request, res: Response) => {

@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { PaymentMethod, Prisma, PrismaClient } from '@prisma/client';
+import { FinancingApplicationStatus, PaymentMethod, Prisma, PrismaClient } from '@prisma/client';
 import { AuthenticatedRequest, requireBursar, verifyAuth } from '../middleware/roleAuth.js';
 import { validateAccountingJournalEntry } from '../services/accounting-journal.js';
 import { calculateAccountingBalances } from '../services/accounting-ledger.js';
@@ -11,6 +11,17 @@ import { checksumBankStatement, parseBankStatementCsv } from '../services/bank-s
 import { buildBankChargeJournalLines, canApproveStatement, canPrepareStatement, canReopenStatement, canVoidStatement, remainingReconciliationAmount, validateReconciliationAllocation } from '../services/bank-statement-workflow.js';
 import { buildCashbookCsv } from '../services/cashbook-csv.js';
 import { buildSchoolDateRange } from '../services/school-date-range.js';
+import { isTuitionFinancingEnabled } from '../services/tuition-financing-feature-gate.js';
+import {
+  FinancingFeatureDisabledError,
+  InvalidManualFinancingSettlementError,
+  InvalidManualFinancingUpdateError,
+  linkManualFinancingPayment,
+  manualFinancingStatusSources,
+  updateManualFinancingApplicationStatus,
+  simulateDemoFinancingFunding,
+} from '../services/financing-applications.js';
+import { getAllowedFinancingApplicationTransitions, financingApplicationStatuses } from '../services/financing-application-lifecycle.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -160,6 +171,273 @@ async function resolveFeeInvoicesForAcademicContext(schoolId: string, academicYe
 // Middleware: Apply to all routes
 router.use(verifyAuth);
 router.use(requireBursar);
+
+router.get('/financing', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const schoolId = req.user?.schoolId;
+    if (!schoolId) return res.status(400).json({ error: 'School ID required.' });
+    if (!(await isTuitionFinancingEnabled(prisma))) {
+      return res.json({ enabled: false, participating: false, applications: [] });
+    }
+
+    const school = await prisma.school.findUnique({
+      where: { id: schoolId },
+      select: {
+        tuitionFinancingParticipationEnabled: true,
+        currency: true,
+      },
+    });
+    if (!school) return res.status(404).json({ error: 'School not found.' });
+    if (!school.tuitionFinancingParticipationEnabled) {
+      return res.json({ enabled: true, participating: false, applications: [] });
+    }
+
+    const applications = await prisma.financingApplication.findMany({
+      where: { schoolId },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+        pupil: { select: { firstName: true, lastName: true } },
+        invoice: {
+          select: {
+            invoiceNo: true,
+            amountDue: true,
+            amountPaid: true,
+            payments: {
+              where: { method: PaymentMethod.BANK_TRANSFER },
+              orderBy: { paidAt: 'desc' },
+              take: 20,
+              select: {
+                id: true,
+                amount: true,
+                reference: true,
+                paidAt: true,
+                financingApplicationPayment: { select: { id: true } },
+              },
+            },
+          },
+        },
+        institution: { select: { displayName: true, integrationMode: true, isDemo: true } },
+        product: { select: { displayName: true, applicationMode: true } },
+        events: {
+          where: { eventType: { in: ['DISBURSEMENT_REPORTED', 'DEMO_FUNDING_SIMULATED'] } },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: {
+            eventType: true,
+            createdAt: true,
+            providerEvent: { select: { status: true, lastErrorCode: true } },
+          },
+        },
+        settlementPayments: {
+          orderBy: { recordedAt: 'desc' },
+          select: {
+            bankReference: true,
+            recordedAt: true,
+            payment: { select: { id: true, amount: true, paidAt: true } },
+          },
+        },
+      },
+    });
+
+    res.json({
+      enabled: true,
+      participating: true,
+      currency: school.currency,
+      applications: applications.map((application) => ({
+        id: application.id,
+        status: application.status,
+        createdAt: application.createdAt,
+        pupilName: `${application.pupil.firstName} ${application.pupil.lastName}`,
+        invoiceNo: application.invoice.invoiceNo,
+        outstanding: Math.max(0, application.invoice.amountDue - application.invoice.amountPaid),
+        institutionName: application.institution?.displayName ?? 'General school-interest request',
+        productName: application.product?.displayName ?? null,
+        manualWorkflow: application.institution?.integrationMode === 'MANUAL' &&
+          application.product?.applicationMode === 'SCHOOL_CONTACT',
+        isDemo: application.institution?.isDemo ?? false,
+        allowedStatuses: application.institution?.integrationMode === 'MANUAL' &&
+          application.product?.applicationMode === 'SCHOOL_CONTACT'
+          ? getAllowedFinancingApplicationTransitions(application.status).filter((status) => status !== 'CONSENTED')
+          : [],
+        linkedPayments: application.settlementPayments.map((link) => ({
+          paymentId: link.payment.id,
+          amount: link.payment.amount,
+          paidAt: link.payment.paidAt,
+          bankReference: link.bankReference,
+          recordedAt: link.recordedAt,
+        })),
+        availableBankPayments: application.institution?.integrationMode === 'MANUAL' &&
+          application.product?.applicationMode === 'SCHOOL_CONTACT' &&
+          application.status === 'OFFER_ACCEPTED' &&
+          !application.institution.isDemo
+          ? application.invoice.payments
+            .filter((payment) => !payment.financingApplicationPayment && Boolean(payment.reference))
+            .map(({ id, amount, reference, paidAt }) => ({ id, amount, reference, paidAt }))
+          : [],
+        demoFundingSimulated: application.events.some((event) => event.eventType === 'DEMO_FUNDING_SIMULATED'),
+        disbursementReported: application.events.some((event) => event.eventType === 'DISBURSEMENT_REPORTED'),
+        reconciliationStatus: application.events.find((event) => event.eventType === 'DISBURSEMENT_REPORTED')?.providerEvent?.status ?? null,
+        reconciliationError: application.events.find((event) => event.eventType === 'DISBURSEMENT_REPORTED')?.providerEvent?.lastErrorCode ?? null,
+      })),
+    });
+  } catch (error) {
+    console.error('[bursar] Failed to load tuition financing operations:', error);
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'P2021' || code === 'P2022') {
+      return res.status(503).json({ error: 'Financing schema is not installed.' });
+    }
+    res.status(500).json({ error: 'Failed to load tuition financing operations.' });
+  }
+});
+
+router.patch('/financing/applications/:applicationId/status', async (req: AuthenticatedRequest, res: Response) => {
+  const schoolId = req.user?.schoolId;
+  const actorId = req.user?.userId;
+  const status = req.body?.status;
+  const source = req.body?.source;
+  const sourceReference = typeof req.body?.sourceReference === 'string'
+    ? req.body.sourceReference.trim()
+    : undefined;
+  if (!schoolId || !actorId) return res.status(401).json({ error: 'Authenticated school staff required.' });
+  if (typeof status !== 'string' ||
+      !financingApplicationStatuses.includes(status as FinancingApplicationStatus) ||
+      typeof source !== 'string' ||
+      !manualFinancingStatusSources.includes(source as typeof manualFinancingStatusSources[number]) ||
+      (req.body?.sourceReference !== undefined &&
+        (typeof req.body.sourceReference !== 'string' || (sourceReference?.length ?? 0) > 191))) {
+    return res.status(400).json({ error: 'Provide a valid status, update source, and optional bank reference.' });
+  }
+  try {
+    const school = await prisma.school.findFirst({
+      where: { id: schoolId, tuitionFinancingParticipationEnabled: true },
+      select: { id: true },
+    });
+    if (!school) return res.status(403).json({ error: 'School financing participation is not enabled.' });
+
+    const application = await updateManualFinancingApplicationStatus(prisma, {
+      applicationId: req.params.applicationId,
+      schoolId,
+      actorId,
+      status: status as FinancingApplicationStatus,
+      source: source as typeof manualFinancingStatusSources[number],
+      ...(sourceReference ? { sourceReference } : {}),
+    });
+    return res.json(application);
+  } catch (error) {
+    if (error instanceof FinancingFeatureDisabledError) {
+      return res.status(404).json({ error: 'Tuition financing is not available.' });
+    }
+    if (error instanceof InvalidManualFinancingUpdateError) {
+      const statusCode = error.code === 'NOT_FOUND' ? 404
+        : error.code === 'INVALID_TRANSITION' || error.code === 'CONCURRENT_CHANGE' ? 409
+          : 400;
+      return res.status(statusCode).json({
+        error: error.code === 'INVALID_TRANSITION'
+          ? 'That status change is not allowed from the current application status.'
+          : error.code === 'NOT_FOUND'
+            ? 'Manual financing application not found.'
+            : error.code === 'CONCURRENT_CHANGE'
+              ? 'The application changed. Refresh and try again.'
+              : 'This application is not eligible for a manual bank update.',
+      });
+    }
+    console.error('[bursar] Failed to update manual financing status:', error);
+    return res.status(500).json({ error: 'Failed to update manual financing status.' });
+  }
+});
+
+router.post('/financing/applications/:applicationId/settlements', async (req: AuthenticatedRequest, res: Response) => {
+  const schoolId = req.user?.schoolId;
+  const actorId = req.user?.userId;
+  const paymentId = typeof req.body?.paymentId === 'string' ? req.body.paymentId.trim() : '';
+  const bankReference = typeof req.body?.bankReference === 'string' ? req.body.bankReference.trim() : '';
+  if (!schoolId || !actorId) return res.status(401).json({ error: 'Authenticated school staff required.' });
+  if (req.body?.confirmed !== true || !paymentId || paymentId.length > 191 ||
+      !bankReference || bankReference.length > 191) {
+    return res.status(400).json({ error: 'Confirm the bank funds and provide the matching recorded payment and bank reference.' });
+  }
+
+  try {
+    const school = await prisma.school.findFirst({
+      where: { id: schoolId, tuitionFinancingParticipationEnabled: true },
+      select: { id: true },
+    });
+    if (!school) return res.status(403).json({ error: 'School financing participation is not enabled.' });
+
+    const settlement = await linkManualFinancingPayment(prisma, {
+      applicationId: req.params.applicationId,
+      schoolId,
+      actorId,
+      paymentId,
+      bankReference,
+    });
+    return res.status(201).json(settlement);
+  } catch (error) {
+    if (error instanceof FinancingFeatureDisabledError) {
+      return res.status(404).json({ error: 'Tuition financing is not available.' });
+    }
+    if (error instanceof InvalidManualFinancingSettlementError) {
+      const statusCode = error.code === 'NOT_FOUND' ? 404
+        : error.code === 'PAYMENT_ALREADY_LINKED' || error.code === 'NOT_ELIGIBLE' ? 409
+          : 400;
+      return res.status(statusCode).json({
+        error: error.code === 'NOT_FOUND'
+          ? 'Manual financing application not found.'
+          : error.code === 'PAYMENT_ALREADY_LINKED'
+            ? 'This payment is already linked to a financing application.'
+            : error.code === 'PAYMENT_NOT_FOUND'
+              ? 'The matching bank-transfer payment was not found for this invoice.'
+              : 'Only an accepted, real manual-bank application can be reconciled.',
+      });
+    }
+    if ((error as { code?: string })?.code === 'P2002') {
+      return res.status(409).json({ error: 'This payment was linked concurrently. Refresh and verify the case.' });
+    }
+    console.error('[bursar] Failed to reconcile manual financing payment:', error);
+    return res.status(500).json({ error: 'Failed to reconcile manual financing payment.' });
+  }
+});
+
+router.post('/financing/applications/:applicationId/demo-funding', async (req: AuthenticatedRequest, res: Response) => {
+  const schoolId = req.user?.schoolId;
+  const actorId = req.user?.userId;
+  if (!schoolId || !actorId) return res.status(401).json({ error: 'Authenticated school staff required.' });
+  if (req.body?.confirmed !== true) {
+    return res.status(400).json({ error: 'Confirm that this is a demo-only funding simulation.' });
+  }
+  try {
+    const school = await prisma.school.findFirst({
+      where: { id: schoolId, tuitionFinancingParticipationEnabled: true },
+      select: { id: true },
+    });
+    if (!school) return res.status(403).json({ error: 'School financing participation is not enabled.' });
+    return res.json(await simulateDemoFinancingFunding(prisma, {
+      applicationId: req.params.applicationId,
+      schoolId,
+      actorId,
+    }));
+  } catch (error) {
+    if (error instanceof FinancingFeatureDisabledError) {
+      return res.status(404).json({ error: 'Tuition financing is not available.' });
+    }
+    if (error instanceof InvalidManualFinancingSettlementError) {
+      const statusCode = error.code === 'NOT_FOUND' ? 404 : 409;
+      return res.status(statusCode).json({
+        error: error.code === 'NOT_FOUND'
+          ? 'Demo financing application not found.'
+          : error.code === 'SIMULATION_ALREADY_RECORDED'
+            ? 'Demo funding has already been simulated for this case.'
+            : 'Only an accepted demo manual-bank application can simulate funding.',
+      });
+    }
+    console.error('[bursar] Failed to simulate demo financing funding:', error);
+    return res.status(500).json({ error: 'Failed to simulate demo financing funding.' });
+  }
+});
 
 /**
  * GET /api/bursar/overview

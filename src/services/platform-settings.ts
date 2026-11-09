@@ -34,6 +34,7 @@ export const platformSettingDefaults = {
   signupNotificationRecipients: [],
   supportNotificationRecipients: [],
   competitionFeatures: competitionFeatureDefaults,
+  tuitionFinancingEnabled: false,
   paymentPlans: {
     STARTER: { label: 'Starter', priceLabel: '₦60,000 / term', amountMinor: 6000000, studentLimit: 150 },
     GROWTH: { label: 'Growth', priceLabel: '₦85,000 / term', amountMinor: 8500000, studentLimit: 600 },

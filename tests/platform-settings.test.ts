@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { getPublicPaymentPlans, isValidPaymentPlans, normalizeEmailList } from '../src/services/platform-settings.js';
+import {
+  getPublicPaymentPlans,
+  isValidPaymentPlans,
+  normalizeEmailList,
+  platformSettingDefaults,
+} from '../src/services/platform-settings.js';
 
 const plans = {
   STARTER: { label: 'Starter', priceLabel: 'Starter price', amountMinor: 3500000, studentLimit: 150 },
@@ -8,6 +13,7 @@ const plans = {
 };
 
 assert.deepEqual(normalizeEmailList(' Team@Example.com, team@example.com, invalid '), ['team@example.com']);
+assert.equal(platformSettingDefaults.tuitionFinancingEnabled, false);
 assert.equal(isValidPaymentPlans(plans), true);
 assert.equal(isValidPaymentPlans({ ...plans, GROWTH: { ...plans.GROWTH, studentLimit: 0 } }), false);
 
