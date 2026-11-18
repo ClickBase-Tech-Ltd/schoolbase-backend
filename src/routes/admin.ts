@@ -7547,6 +7547,8 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
   const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName.trim() : '';
   const middleName = typeof req.body?.middleName === 'string' ? req.body.middleName.trim() : '';
   const lastName = typeof req.body?.lastName === 'string' ? req.body.lastName.trim() : '';
+  const emailProvided = req.body?.email !== undefined;
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const jobTitle = typeof req.body?.jobTitle === 'string' ? req.body.jobTitle.trim() : '';
   const department = typeof req.body?.department === 'string' ? req.body.department.trim() : '';
   const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
@@ -7579,6 +7581,10 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
     discardStaffPhoto(req);
     return res.status(400).json({ error: 'First name, last name, job title and a valid start date are required.' });
   }
+  if (emailProvided && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+    discardStaffPhoto(req);
+    return res.status(400).json({ error: 'Enter a valid login email address.' });
+  }
   if (!['ACADEMIC', 'NON_ACADEMIC'].includes(classification) || !['FULL_TIME', 'PART_TIME', 'CONTRACT', 'TEMPORARY'].includes(employmentType)) {
     discardStaffPhoto(req);
     return res.status(400).json({ error: 'Choose valid employment classification and type values.' });
@@ -7609,6 +7615,13 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
       if (!current) throw Object.assign(new Error('Staff profile not found.'), { statusCode: 404 });
       const linkedUser = await tx.user.findFirst({ where: { id: current.userId, schoolId }, select: { id: true, email: true, role: true, isActive: true } });
       if (!linkedUser) throw Object.assign(new Error('Linked staff account not found in this school.'), { statusCode: 404 });
+      const emailChanged = emailProvided && email !== linkedUser.email;
+      if (emailChanged) {
+        const existingEmail = await tx.user.findUnique({ where: { email }, select: { id: true } });
+        if (existingEmail && existingEmail.id !== linkedUser.id) {
+          throw Object.assign(new Error('That email address is already in use by another account.'), { statusCode: 409 });
+        }
+      }
       const managedRoles = ['STAFF', 'TEACHER', 'BURSAR'];
       if (requestedRole !== undefined && (!managedRoles.includes(linkedUser.role) || !managedRoles.includes(requestedRole))) {
         throw Object.assign(new Error('Only staff, teacher, and bursar account roles can be changed here.'), { statusCode: 400 });
@@ -7629,10 +7642,13 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
         const ownedSubjects = await tx.subject.count({ where: { id: { in: subjectIds }, schoolId } });
         if (ownedSubjects !== subjectIds.length) throw Object.assign(new Error('One or more selected subjects do not belong to this school.'), { statusCode: 400 });
       }
-      if (roleChanged) {
+      if (roleChanged || emailChanged) {
         await tx.user.update({
           where: { id: current.userId },
-          data: { role: nextRole as 'STAFF' | 'TEACHER' | 'BURSAR' },
+          data: {
+            ...(roleChanged ? { role: nextRole as 'STAFF' | 'TEACHER' | 'BURSAR' } : {}),
+            ...(emailChanged ? { email } : {}),
+          },
         });
       }
       if (roleChanged && nextRole !== 'TEACHER') {
@@ -7693,6 +7709,17 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
           },
         });
       }
+      if (emailChanged) {
+        await tx.staffEmploymentEvent.create({
+          data: {
+            schoolId,
+            employeeId: current.id,
+            actorUserId: session.userId,
+            eventType: 'EMAIL_CHANGED',
+            reason: `Login email changed from ${linkedUser.email} to ${email}. ${reason}`,
+          },
+        });
+      }
       if (passwordHash) {
         await tx.user.update({
           where: { id: current.userId },
@@ -7730,6 +7757,9 @@ router.patch('/staff/:employeeId', staffPhotoUpload.single('photo'), async (req:
   } catch (error) {
     discardStaffPhoto(req);
     const statusCode = Number((error as { statusCode?: number })?.statusCode);
+    if ((error as { code?: string })?.code === 'P2002') {
+      return res.status(409).json({ error: 'That email address is already in use by another account.' });
+    }
     return res.status(statusCode || 500).json({ error: statusCode ? (error as Error).message : 'Failed to update staff profile.' });
   }
 });
